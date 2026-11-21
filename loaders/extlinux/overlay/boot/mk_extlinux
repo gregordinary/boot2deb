@@ -17,9 +17,11 @@ elif [ -e /usr/lib/os-release ]; then
     . /usr/lib/os-release
 fi
 
-# board dtb name (generated from the device's kernel_dtb; see /etc/boot2deb/board.conf)
+# board dtb name and kernel arguments (generated from the device; see
+# /etc/boot2deb/board.conf)
 if [ -e /etc/boot2deb/board.conf ]; then
     . /etc/boot2deb/board.conf
+    EXTL_CMD_LINE="${KERNEL_CMDLINE:-${EXTL_CMD_LINE}}"
 fi
 
 gen_menu_header() {

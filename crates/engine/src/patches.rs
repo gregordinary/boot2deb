@@ -304,6 +304,43 @@ mod tests {
         out.join("0001-change.patch")
     }
 
+    /// The same base and the same patch give the same commit, however far apart the two
+    /// applies run. A build that records its patched tree's `HEAD` then records the same
+    /// commit each time. The two clones share the base commit, so the only thing that
+    /// could tell them apart is the time `git am` ran.
+    #[test]
+    fn a_patch_applied_twice_makes_the_same_commit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let origin = tmp.path().join("origin");
+        init_repo(&origin, "hello.txt", "alpha\nbeta\n");
+        let patch = make_patch(&origin, "hello.txt", "alpha\nBETA\n", &tmp.path().join("p"));
+        let heads: Vec<String> = ["a", "b"]
+            .iter()
+            .map(|name| {
+                let repo = tmp.path().join(name);
+                git_in(
+                    tmp.path(),
+                    &[
+                        "clone",
+                        "-q",
+                        origin.to_str().unwrap(),
+                        repo.to_str().unwrap(),
+                    ],
+                );
+                let out = git::am_3way(&repo, &patch).unwrap();
+                assert!(
+                    out.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                // A committer date taken from the clock would differ by this second.
+                std::thread::sleep(std::time::Duration::from_millis(1100));
+                git_in(&repo, &["rev-parse", "HEAD"])
+            })
+            .collect();
+        assert_eq!(heads[0], heads[1]);
+    }
+
     #[test]
     fn keep_going_reports_every_failure_and_applies_the_rest() {
         let tmp = tempfile::tempdir().unwrap();

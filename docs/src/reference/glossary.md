@@ -6,7 +6,7 @@ listed, so rootfs, initramfs, suite and pocket have no entry.
 
 | Term | Definition | Source | Nearest standard term |
 |---|---|---|---|
-| axis | An independent dimension a build point is chosen along: the device, the kernel, the u-boot series, the suite, the layout, or the feature list. A recipe sets the axes it differs on, and the rest fall back to the device. | Coined | Build parameter |
+| axis | An independent dimension a build point is chosen along: the device, kernel, u-boot series, suite, layout, loader, or feature list. A recipe sets the axes it differs on, and the rest fall back to the device. | Coined | Build parameter |
 | board profile | A `depthcharge-tools` codename for a firmware behavior set, such as the largest payload the firmware loads. It names the firmware a unit runs, not the board model. | depthcharge-tools | |
 | boot method | The hardware layer that describes how a board's firmware loads the kernel (`boot-methods/<name>.toml`), such as `depthcharge`. Not U-Boot's bootmeth, which finds an operating system from inside U-Boot. | Coined | Boot flow |
 | build point | One value on every axis, which a build turns into an image. A recipe names one, and a recipe plus a feature selection (`turing-rk1/forky+jellyfin`) names another without a new file. | Coined | Build configuration |
@@ -15,6 +15,7 @@ listed, so rootfs, initramfs, suite and pocket have no entry.
 | feature | A named addition to the base image (`features/<name>.toml`): packages, files, and sometimes kernel configuration. A build selects any number of them. | Coined | Image feature (Yocto) |
 | kmod | The config layer for one out-of-tree kernel module (`kmods/<name>.toml`), built as a `.deb` against the build's kernel. Not the `kmod` package of module tools. | Coined | Out-of-tree module (Linux kernel documentation) |
 | layer | One of the config files a device resolves through, merged from arch to SoC to boot method to device. A later layer's value wins, so each states only what differs. | Coined | Yocto layer |
+| loader | The axis that decides what starts the kernel on an image (`loaders/<loader>.toml`). `extlinux` is a menu u-boot reads off the rootfs, and `efi` is GRUB on an EFI system partition. | Coined | Bootloader |
 | lock | The file `update` writes beside a recipe (`<leaf>.lock`). It records the exact pin of every source the build depends on. | Coined | Cargo's `Cargo.lock` |
 | overlay | A directory of config layers merged over the shipped tree (`--overlay <dir>`), where the later one wins. Not a layer's rootfs tree `overlay/`, which is laid into the image. | Coined | Buildroot's `BR2_EXTERNAL` tree |
 | patch series | A named, ordered set of patches applied to a source tree before it compiles, defined by a manifest in the separate `patches` repository. A kernel definition names its series. | Linux kernel documentation | |

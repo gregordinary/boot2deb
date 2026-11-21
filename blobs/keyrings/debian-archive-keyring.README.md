@@ -5,8 +5,7 @@ Debian suites the rootless build sandbox and (later) the image rootfs bootstrap
 . It is vendored because the build host is frequently **not** Debian —
 an Ubuntu, Pop!_OS, or Fedora host has its own distro's apt keys, not Debian's,
 so relying on a host-installed keyring is not portable. Vendoring keeps
-the bootstrap reproducible, offline, and host-distro-independent, matching how the
-rkbin blobs are vendored under `blobs/<soc>/`.
+the bootstrap reproducible, offline, and host-distro-independent.
 
 - Provenance: extracted from `debian-archive-keyring_2025.1_all.deb`, fetched from
   `http://deb.debian.org/debian/pool/main/d/debian-archive-keyring/`

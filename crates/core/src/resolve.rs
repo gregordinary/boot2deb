@@ -88,6 +88,7 @@ pub fn resolve_device(
             board: overrides.board.as_deref(),
             kernel_cmdline: &kernel_cmdline,
             uboot_series: overrides.uboot_series.as_deref(),
+            bl31: overrides.bl31,
         },
     )?;
 
@@ -126,7 +127,6 @@ pub fn resolve_device(
             device_dts: device.device_dts,
             kernel_cmdline,
             dt_dir: soc.dt_dir,
-            modules: soc.modules,
             kernel_arch: arch.kernel_arch,
             cross_compile: arch.cross_compile,
             kbuild_image: arch.kbuild_image,
@@ -266,9 +266,47 @@ pub fn resolve_device(
     // not tell which repo to activate.
     let apt_sources = merge_apt_sources(&loaded_features)?;
 
-    // Merge the rootfs package set: base ∪ soc ∪ boot-method ∪ device ∪ kernel ∪ Σ
-    // features, de-duplicated with order preserved (base first). apt solves the
-    // set, so nothing depends on the order — it only keeps the merged list stable.
+    // The loader: what finds the kernel on this image and starts it. Resolved with the
+    // rest of the image axes because it lives in the rootfs (its packages, its hooks,
+    // its checks) and in the image's partition table; a u-boot-only build refused a
+    // selection above.
+    let loader = resolve_loader(
+        root,
+        &bm,
+        soc.arch,
+        &LoaderPoint {
+            device_name,
+            dtb: device
+                .uboot_fdtfile
+                .as_deref()
+                .unwrap_or(&device.kernel_dtb),
+            selected: overrides.loader,
+        },
+    )?;
+    let (loader_packages, loader_exclude, loader_expect): (Vec<PackageEntry>, &[String], _) =
+        match &loader {
+            Some((resolved, layer)) => {
+                // The architecture's GRUB package comes from the axis and from no layer,
+                // as the generator's does: the package then always matches the platform
+                // the customize step installs GRUB for.
+                let mut packages: Vec<PackageEntry> = resolved
+                    .efi()
+                    .map(|efi| PackageEntry::from(efi.arch.grub_package))
+                    .into_iter()
+                    .collect();
+                packages.extend(layer.packages().iter().cloned());
+                (
+                    packages,
+                    layer.exclude(),
+                    Some((resolved.loader(), layer.expect().to_vec())),
+                )
+            }
+            None => (Vec::new(), &[], None),
+        };
+
+    // Merge the rootfs package set: base ∪ soc ∪ boot-method ∪ loader ∪ device ∪
+    // kernel ∪ Σ features, de-duplicated with order preserved (base first). apt solves
+    // the set, so nothing depends on the order — it only keeps the merged list stable.
     //
     // A distro-package kernel joins the set here: it installs from the mirror like
     // any other package (and is pinned like one, in the solved manifest), rather than
@@ -333,8 +371,12 @@ pub fn resolve_device(
         .map(PackageEntry::Plain)
         .collect();
     // The generator's package comes from the axis and from no layer, so an image can
-    // never be asked for both of two packages that conflict.
+    // never be asked for both of two packages that conflict. The time client's comes
+    // from the distro layer's `time_client` for the same reason: the client the build
+    // configures is then always the one the image installs.
     let generator_entry = [PackageEntry::from(initramfs_generator.package())];
+    let time_client = distro_layer.time_client;
+    let time_client_entry = [PackageEntry::from(time_client.package())];
     // A `distros` condition naming a layer the tree does not have would never apply.
     // The scan reads only the directory listing, which decides whether this build
     // resolves and never what it builds, so it is not recorded as an input.
@@ -353,9 +395,11 @@ pub fn resolve_device(
         ("the base layer", base.packages.as_slice()),
         (&distro_label, distro_layer.packages.as_slice()),
         ("the initramfs generator", generator_entry.as_slice()),
+        ("the time client", time_client_entry.as_slice()),
         (&soc_layer, soc.packages.as_slice()),
         (&soc_layer, soc_firmware),
         ("the boot method", bm.packages()),
+        ("the loader", loader_packages.as_slice()),
         (&device_layer, device.packages.as_slice()),
         (&device_layer, device_firmware),
         ("the kernel", kernel_entries.as_slice()),
@@ -396,6 +440,7 @@ pub fn resolve_device(
         distro_layer.exclude.as_slice(),
         soc.exclude.as_slice(),
         bm.exclude(),
+        loader_exclude,
         device.exclude.as_slice(),
     ] {
         extend_names(&mut rootfs_exclude, &mut seen_exclude, src);
@@ -460,10 +505,15 @@ pub fn resolve_device(
                 boot_method.to_string(),
                 bm.expect().to_vec(),
             ),
-            (ExpectScope::Device, device_name.to_string(), device_expect),
-            (ExpectScope::Kernel, kernel_id.clone(), kernel_expect),
         ]
         .into_iter()
+        .chain(
+            loader_expect.map(|(loader, expect)| (ExpectScope::Loader, loader.to_string(), expect)),
+        )
+        .chain([
+            (ExpectScope::Device, device_name.to_string(), device_expect),
+            (ExpectScope::Kernel, kernel_id.clone(), kernel_expect),
+        ])
         .map(|(scope, name, expect)| ExpectationGroup {
             scope,
             name,
@@ -495,7 +545,6 @@ pub fn resolve_device(
         device_dts: device.device_dts,
         kernel_cmdline,
         dt_dir: soc.dt_dir,
-        modules: soc.modules,
         kernel_arch: arch.kernel_arch,
         cross_compile: arch.cross_compile,
         kbuild_image: arch.kbuild_image,
@@ -513,6 +562,8 @@ pub fn resolve_device(
             components,
             user: distro_layer.default_user.clone(),
             initramfs_generator,
+            time_client,
+            loader: loader.map(|(resolved, _)| resolved),
             image_size,
             hostname: device.hostname,
             // Filled in by `resolve_recipe`: a direct device build names no recipe and
@@ -553,8 +604,8 @@ pub fn resolve_device(
 }
 
 /// Every layer's `[[expect]]` checks, one [`ExpectationGroup`] per **declaring** layer,
-/// in the order the caller composed them — SoC, boot method, device, kernel, features in
-/// selection order, then each kmod in the device's order.
+/// in the order the caller composed them — SoC, boot method, loader, device, kernel,
+/// features in selection order, then each kmod in the device's order.
 ///
 /// Groups are per layer, not flattened, because the layer is both the unit of authorship
 /// and the unit a failure has to name: the rootfs stage writes each group as its own
@@ -574,6 +625,112 @@ fn declared_expectations(
         .collect()
 }
 
+/// What a loader resolves against beyond its layer and the boot method's.
+struct LoaderPoint<'a> {
+    /// The device being resolved, which names it in every error.
+    device_name: &'a str,
+    /// The DTB name the board's u-boot loads by: its `uboot_fdtfile`, else its
+    /// `kernel_dtb`. Read under the `efi` loader alone.
+    dtb: &'a str,
+    /// A recipe's or `--loader`'s selection, or `None` for the boot method's default.
+    selected: Option<Loader>,
+}
+
+/// Resolve an image's loader: the selection, or the boot method's default, checked
+/// against the loaders the boot method lists, with the loader's layer loaded.
+///
+/// `None` under a boot method whose firmware loads the kernel itself, which lists no
+/// loaders. A selection there is refused rather than ignored, since nothing in the image
+/// would act on it.
+fn resolve_loader(
+    root: &ConfigRoot,
+    bm: &BootMethodLayer,
+    arch: Arch,
+    point: &LoaderPoint,
+) -> Result<Option<(ResolvedLoader, LoaderLayer)>, ConfigError> {
+    let &LoaderPoint {
+        device_name,
+        dtb,
+        selected,
+    } = point;
+    let boot_method = bm.method().as_str();
+    let BootMethodLayer::RockchipRkbin(l) = bm else {
+        return match selected {
+            Some(loader) => Err(ConfigError::LoaderWithoutChoice {
+                device: device_name.to_string(),
+                boot_method,
+                loader: loader.to_string(),
+            }),
+            None => Ok(None),
+        };
+    };
+    if !l.loaders.contains(&l.default_loader) {
+        return Err(ConfigError::DefaultLoaderNotListed {
+            boot_method,
+            loader: l.default_loader.to_string(),
+            supported: join(&l.loaders),
+        });
+    }
+    let loader = selected.unwrap_or(l.default_loader);
+    if !l.loaders.contains(&loader) {
+        return Err(ConfigError::UnsupportedLoader {
+            device: device_name.to_string(),
+            boot_method,
+            loader: loader.to_string(),
+            supported: join(&l.loaders),
+        });
+    }
+    let layer = root.loader(loader)?;
+    let resolved = match &layer {
+        LoaderLayer::Extlinux(_) => ResolvedLoader::Extlinux,
+        LoaderLayer::Efi(efi) => {
+            const MIB: u64 = 1 << 20;
+            let bytes = crate::size::parse_size(&efi.esp_size)?;
+            if bytes == 0 || !bytes.is_multiple_of(MIB) {
+                return Err(ConfigError::InvalidEspSize {
+                    value: efi.esp_size.clone(),
+                });
+            }
+            ResolvedLoader::Efi(ResolvedEfi {
+                esp_size: efi.esp_size.clone(),
+                arch: arch.efi(),
+                dtb: validate_esp_dtb(dtb)?.to_string(),
+            })
+        }
+    };
+    Ok(Some((resolved, layer)))
+}
+
+/// Validate the DTB name the `efi` loader places on the EFI system partition: a relative
+/// path of plain path characters, ending in `.dtb`, with no `..`. It becomes a FAT path
+/// and a value in the shell-sourced `/etc/boot2deb/board.conf`, so anything else is
+/// refused rather than escaped.
+fn validate_esp_dtb(dtb: &str) -> Result<&str, ConfigError> {
+    let bad = |why| {
+        Err(ConfigError::InvalidField {
+            what: "uboot_fdtfile",
+            value: dtb.to_string(),
+            why,
+        })
+    };
+    if !dtb.ends_with(".dtb") || dtb.starts_with('/') {
+        return bad("must be a DT-output-dir-relative path ending in .dtb");
+    }
+    if dtb
+        .split('/')
+        .any(|seg| seg.is_empty() || seg == "." || seg == "..")
+    {
+        return bad("must not contain an empty, `.` or `..` path segment");
+    }
+    if !dtb
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '-' | '_' | '+' | ','))
+    {
+        return bad("may hold letters, digits and `/ . - _ + ,` only");
+    }
+    Ok(dtb)
+}
+
 /// What a boot method resolves *against* beyond its own layer: the board's identity and
 /// the build-point choices that reach the bootloader.
 ///
@@ -591,11 +748,15 @@ struct BootPoint<'a> {
     /// Read only by `depthcharge`, which is the method that has one.
     board: Option<&'a str>,
     /// The board's validated extra kernel arguments. `depthcharge` folds them into the
-    /// cmdline it *signs*; `rockchip-rkbin` emits them separately as `EXTL_CMD_LINE`.
+    /// cmdline it *signs*; under `rockchip-rkbin` the loader's hooks read them from
+    /// `board.conf` as `KERNEL_CMDLINE`.
     kernel_cmdline: &'a str,
     /// A `--uboot-series` override, or `None` for the device's default. Read only by
     /// `rockchip-rkbin`, which is the method that compiles a bootloader.
     uboot_series: Option<&'a str>,
+    /// A `--bl31` or recipe `bl31` selection, or `None` for the device's default.
+    /// Resolved by `rockchip-rkbin` and rejected by every other method.
+    bl31: Option<Bl31Provider>,
 }
 
 /// Resolve the boot-method-specific half of a build, enforcing that method's
@@ -618,6 +779,7 @@ fn resolve_boot(
         board: board_override,
         kernel_cmdline,
         uboot_series: uboot_series_override,
+        bl31: bl31_override,
     } = point;
     match bm {
         BootMethodLayer::RockchipRkbin(l) => {
@@ -630,31 +792,50 @@ fn resolve_boot(
                     boot_method: BootMethod::RockchipRkbin.as_str(),
                     what: "uboot_defconfig",
                 })?;
-            // rkbin is layered: the SoC supplies the defaults (SoC-generic ATF, a
+            // rkbin is layered: the SoC supplies the defaults (SoC-generic BL31, a
             // common-memory DDR TPL, and BL32 where the boot chain needs OP-TEE) and
             // the device overrides per field (typically just the DDR TPL).
             let rkbin = resolve_rkbin(&soc.rkbin, &device.rkbin, device_name)?;
-            for s in [&l.idbloader_offset, &l.uboot_itb_offset, &l.rootfs_offset] {
+            let bl31 = resolve_bl31(
+                &Bl31Inputs {
+                    soc_rkbin: &soc.rkbin,
+                    device_rkbin: &device.rkbin,
+                    soc_tfa: soc.tfa.as_ref(),
+                    supported: &device.supported_bl31,
+                    default: device.default_bl31,
+                },
+                device_name,
+                bl31_override,
+            )?;
+            for s in [
+                &l.idbloader_offset,
+                &l.uboot_itb_offset,
+                &l.partition_offset,
+            ] {
                 crate::size::parse_size(s)?;
             }
             let (uboot_series, uboot_patches_url, uboot_patches_ref) =
                 resolve_uboot_series(l, device, device_name, uboot_series_override)?;
-            Ok(ResolvedBoot::RockchipRkbin(ResolvedRkbinBoot {
+            Ok(ResolvedBoot::RockchipRkbin(Box::new(ResolvedRkbinBoot {
                 uboot_defconfig,
                 uboot_source: l.uboot_source.clone(),
                 uboot_ref: l.uboot_ref.clone(),
                 uboot_series,
                 uboot_patches_url,
                 uboot_patches_ref,
+                bl31,
                 rkbin,
                 offsets: Offsets {
                     idbloader: l.idbloader_offset.clone(),
                     uboot_itb: l.uboot_itb_offset.clone(),
-                    rootfs: l.rootfs_offset.clone(),
+                    partitions: l.partition_offset.clone(),
                 },
-            }))
+            })))
         }
         BootMethodLayer::Depthcharge(l) => {
+            // A depthcharge board's firmware is its own coreboot, so there is no BL31
+            // to choose. A selection is a mistake worth naming, not a no-op to absorb.
+            reject_bl31_selection(device, device_name, BootMethod::Depthcharge, bl31_override)?;
             // `split` exists to put the bootloader on a *different* medium from the
             // rootfs. boot2deb builds no bootloader for depthcharge, and the firmware finds
             // the kernel partition by scanning the GPT of the same disk it will root
@@ -1241,9 +1422,11 @@ fn validate_kmod(k: &KmodLayer, name: &str) -> Result<(), ConfigError> {
 }
 
 /// Merge the SoC-layer rkbin defaults with the device overrides (device wins per
-/// field) and validate the result: `atf` and `tpl` are required (a missing or
-/// blank one is a [`ConfigError::MissingBlob`]), `bl32` stays optional, and a declared
-/// `upstream` names a relative directory ([`ConfigError::BadRkbinUpstream`]).
+/// field) and validate the result: `tpl` is required (a missing or blank one is a
+/// [`ConfigError::MissingBlob`]), `bl32` stays optional, and `upstream` is required
+/// with a usable URL, ref and relative directory ([`ConfigError::BadRkbinUpstream`]),
+/// since the build fetches every blob from it. The rkbin BL31 is [`resolve_bl31`]'s,
+/// since only the `rkbin` provider reads it.
 fn resolve_rkbin(
     soc: &RkbinLayer,
     device: &RkbinLayer,
@@ -1259,29 +1442,176 @@ fn resolve_rkbin(
             what: what.into(),
         })
     };
-    let upstream = device.upstream.clone().or_else(|| soc.upstream.clone());
-    if let Some(up) = &upstream {
-        let why = if up.git.trim().is_empty() {
-            Some("its git URL is empty")
-        } else if up.dir.is_empty() || up.dir.starts_with('/') {
-            Some("its dir must be a path relative to the repository root")
-        } else if up.dir.split('/').any(|step| step == ".." || step == ".") {
-            Some("its dir must not step through . or ..")
-        } else {
-            None
-        };
-        if let Some(why) = why {
-            return Err(ConfigError::BadRkbinUpstream {
-                device: device_name.to_string(),
-                why: why.into(),
-            });
-        }
+    let upstream = device
+        .upstream
+        .clone()
+        .or_else(|| soc.upstream.clone())
+        .ok_or_else(|| ConfigError::BadRkbinUpstream {
+            device: device_name.to_string(),
+            why: "no layer declares one, so there is nowhere to fetch the blobs from".into(),
+        })?;
+    let why = if upstream.git.trim().is_empty() || upstream.git.starts_with('-') {
+        Some("its git URL is empty or begins with '-'")
+    } else if upstream.git_ref.trim().is_empty() || upstream.git_ref.starts_with('-') {
+        Some("its ref is empty or begins with '-'")
+    } else if upstream.dir.is_empty() || upstream.dir.starts_with('/') {
+        Some("its dir must be a path relative to the repository root")
+    } else if upstream
+        .dir
+        .split('/')
+        .any(|step| step == ".." || step == ".")
+    {
+        Some("its dir must not step through . or ..")
+    } else {
+        None
+    };
+    if let Some(why) = why {
+        return Err(ConfigError::BadRkbinUpstream {
+            device: device_name.to_string(),
+            why: why.into(),
+        });
     }
     Ok(Rkbin {
-        atf: require(pick(&device.atf, &soc.atf), "rkbin.atf")?,
         tpl: require(pick(&device.tpl, &soc.tpl), "rkbin.tpl")?,
         bl32: pick(&device.bl32, &soc.bl32),
         upstream,
+    })
+}
+
+/// What [`resolve_bl31`] reads from the SoC and device layers.
+struct Bl31Inputs<'a> {
+    /// The SoC's `[rkbin]`, for its `atf` default.
+    soc_rkbin: &'a RkbinLayer,
+    /// The device's `[rkbin]`, whose `atf` wins over the SoC's.
+    device_rkbin: &'a RkbinLayer,
+    /// The SoC's `[tfa]`, when TF-A has a port for it.
+    soc_tfa: Option<&'a TfaSource>,
+    /// The device's `supported_bl31`, empty for `rkbin` alone.
+    supported: &'a [Bl31Provider],
+    /// The device's `default_bl31`.
+    default: Option<Bl31Provider>,
+}
+
+/// Resolve the BL31 of a `rockchip-rkbin` build: the recipe or `--bl31` selection,
+/// else the device's `default_bl31`, else `rkbin` for a device that lists no
+/// providers. The selection must be in the device's `supported_bl31` (`rkbin` alone
+/// when it lists none), and the provider's own inputs must be present:
+///
+/// - `rkbin` requires the merged `[rkbin].atf` (device wins over SoC), a
+///   [`ConfigError::MissingBlob`] otherwise.
+/// - `tfa` requires the SoC's `[tfa]`, with a non-empty `git`, a non-empty ref that
+///   is not option-like, and a bare `[a-z0-9_]` `plat`, a
+///   [`ConfigError::BadTfaSource`] otherwise.
+///
+/// The provider not selected may be absent, since nothing reads it.
+fn resolve_bl31(
+    inputs: &Bl31Inputs,
+    device_name: &str,
+    selected: Option<Bl31Provider>,
+) -> Result<Bl31, ConfigError> {
+    let supported = if inputs.supported.is_empty() {
+        &[Bl31Provider::Rkbin][..]
+    } else {
+        inputs.supported
+    };
+    let provider = match selected.or(inputs.default) {
+        Some(p) => p,
+        None if inputs.supported.is_empty() => Bl31Provider::Rkbin,
+        None => {
+            return Err(ConfigError::MissingDefaultBl31 {
+                device: device_name.to_string(),
+            })
+        }
+    };
+    if !supported.contains(&provider) {
+        return Err(ConfigError::UnsupportedBl31 {
+            device: device_name.to_string(),
+            bl31: provider.to_string(),
+            supported: join(supported),
+        });
+    }
+    match provider {
+        Bl31Provider::Rkbin => {
+            let file = [&inputs.device_rkbin.atf, &inputs.soc_rkbin.atf]
+                .into_iter()
+                .flatten()
+                .find(|v| !v.trim().is_empty())
+                .cloned()
+                .ok_or_else(|| ConfigError::MissingBlob {
+                    device: device_name.to_string(),
+                    what: "rkbin.atf".into(),
+                })?;
+            Ok(Bl31::Rkbin { file })
+        }
+        Bl31Provider::Tfa => {
+            let bad = |why: &str| ConfigError::BadTfaSource {
+                device: device_name.to_string(),
+                why: why.to_string(),
+            };
+            let src = inputs
+                .soc_tfa
+                .ok_or_else(|| bad("its SoC layer declares no [tfa] source"))?;
+            if src.git.trim().is_empty() {
+                return Err(bad("[tfa].git is empty"));
+            }
+            if src.git_ref.trim().is_empty() || src.git_ref.starts_with('-') {
+                return Err(bad(
+                    "[tfa].ref must be a non-empty ref that does not start with '-'",
+                ));
+            }
+            let plat_ok = !src.plat.is_empty()
+                && src
+                    .plat
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+            if !plat_ok {
+                return Err(bad("[tfa].plat must be a TF-A platform name of [a-z0-9_]"));
+            }
+            let path_ok = |p: &str| {
+                !p.is_empty()
+                    && !p.starts_with(['/', '-'])
+                    && p.split('/').all(|step| !matches!(step, "" | "." | ".."))
+                    && p.bytes().all(|b| {
+                        b.is_ascii_alphanumeric() || matches!(b, b'/' | b'_' | b'-' | b'.')
+                    })
+            };
+            if !src.submodules.iter().all(|p| path_ok(p)) {
+                return Err(bad(
+                    "each [tfa].submodules entry must be a relative path in the tree, \
+                     not stepping through . or ..",
+                ));
+            }
+            Ok(Bl31::Tfa(Box::new(src.clone())))
+        }
+    }
+}
+
+/// Refuse a BL31 selection under a boot method that builds no u-boot. The device's
+/// own `default_bl31` counts as a selection, since a board that boots only through
+/// such a method has no BL31 to default to. A device that lists `supported_bl31` for
+/// its `rockchip-rkbin` method and is resolved under another one is not refused for the
+/// list alone.
+fn reject_bl31_selection(
+    device: &DeviceLayer,
+    device_name: &str,
+    boot_method: BootMethod,
+    selected: Option<Bl31Provider>,
+) -> Result<(), ConfigError> {
+    let what = if selected.is_some() {
+        "bl31"
+    } else if device.default_bl31.is_some()
+        && !device
+            .supported_boot_methods
+            .contains(&BootMethod::RockchipRkbin)
+    {
+        "default_bl31"
+    } else {
+        return Ok(());
+    };
+    Err(ConfigError::Bl31WithoutBootloader {
+        device: device_name.to_string(),
+        boot_method: boot_method.to_string(),
+        what,
     })
 }
 
@@ -1659,9 +1989,11 @@ pub fn resolve_recipe(
         deliverable: recipe.deliverable,
         kernel: cli.kernel.clone().or(recipe.kernel),
         uboot_series: cli.uboot_series.clone().or(recipe.uboot_series),
+        bl31: cli.bl31.or(recipe.bl31),
         suite: cli.suite.clone().or(recipe.suite),
         initramfs_generator: cli.initramfs_generator.or(recipe.initramfs_generator),
         layout: cli.layout.or(recipe.layout),
+        loader: cli.loader.or(recipe.loader),
         boot_method: cli.boot_method,
         board: cli.board.clone().or(recipe.board),
         features: cli
@@ -1925,7 +2257,7 @@ fn join<T: std::fmt::Display>(items: &[T]) -> String {
 ///
 /// Checked in flag order so the first-reported error is stable.
 fn reject_rootfs_overrides(device_name: &str, overrides: &Overrides) -> Result<(), ConfigError> {
-    let inapplicable: [(&'static str, bool); 14] = [
+    let inapplicable: [(&'static str, bool); 15] = [
         ("--kernel", overrides.kernel.is_some()),
         ("--suite", overrides.suite.is_some()),
         // Recipe-only, so named as the key that sets it.
@@ -1934,6 +2266,7 @@ fn reject_rootfs_overrides(device_name: &str, overrides: &Overrides) -> Result<(
             overrides.initramfs_generator.is_some(),
         ),
         ("--feature", overrides.features.is_some()),
+        ("--loader", overrides.loader.is_some()),
         ("--image-size", overrides.image_size.is_some()),
         ("--locale", overrides.locale.is_some()),
         ("--locale-gen", overrides.locales_generate.is_some()),
@@ -2311,8 +2644,8 @@ fn validate_timezone(tz: &str) -> Result<(), ConfigError> {
 /// two networks wants two answers, and no board wants a different answer than its
 /// neighbour on the same network.
 ///
-/// An empty result is the normal one and means "write no configuration", leaving
-/// Debian's compiled-in `FallbackNTP` pool. See [`ResolvedImage::ntp_servers`].
+/// An empty result is the normal one and means "write no configuration", leaving the
+/// distribution's own servers. See [`ResolvedImage::ntp_servers`].
 fn resolve_ntp_servers(
     base: &BaseLayer,
     overrides: &Overrides,
@@ -2327,9 +2660,10 @@ fn resolve_ntp_servers(
     Ok(servers)
 }
 
-/// Reject anything that is not a bare host: `timesyncd` splits `NTP=` on whitespace and
-/// hands each field to the resolver, so a value with a space in it becomes two servers
-/// and a value with a scheme or a port becomes none.
+/// Reject anything that is not a bare host. `timesyncd` splits `NTP=` on whitespace and
+/// hands each field to the resolver, and chrony reads a `server` line as
+/// whitespace-separated fields. A value with a space in it therefore becomes two servers
+/// or a server with a stray option, and a value with a scheme or a port becomes none.
 ///
 /// Deliberately permissive about the host itself — an IPv4 or IPv6 literal and a
 /// hostname are all legal, and this cannot know which resolve on the target network.
@@ -2346,8 +2680,8 @@ fn validate_ntp_server(server: &str) -> Result<(), ConfigError> {
         return Err(ConfigError::InvalidField {
             what: "NTP server",
             value: server.to_string(),
-            why: "must not contain whitespace (NTP= is a space-separated list, so one \
-                  entry with a space in it silently becomes two servers)",
+            why: "must not contain whitespace (the time client splits its configuration \
+                  on whitespace, so one entry with a space in it silently becomes two)",
         });
     }
     if server.contains("://") {
@@ -2359,7 +2693,7 @@ fn validate_ntp_server(server: &str) -> Result<(), ConfigError> {
         });
     }
     // A bracketed IPv6 literal is the URL form and contains a port; the bare address is
-    // what `timesyncd` wants.
+    // what both clients want.
     if server.starts_with('[') || server.ends_with(']') {
         return Err(ConfigError::InvalidField {
             what: "NTP server",
@@ -2368,12 +2702,12 @@ fn validate_ntp_server(server: &str) -> Result<(), ConfigError> {
         });
     }
     // A colon is a port separator on everything except an IPv6 literal, which has at
-    // least two. `timesyncd` speaks port 123 and offers no way to say otherwise.
+    // least two. The image's client is always configured for port 123.
     if server.matches(':').count() == 1 {
         return Err(ConfigError::InvalidField {
             what: "NTP server",
             value: server.to_string(),
-            why: "must not contain a port (timesyncd always uses 123)",
+            why: "must not contain a port (the image's time client always uses 123)",
         });
     }
     if server
@@ -2499,43 +2833,63 @@ mod tests {
         ConfigRoot::new(dir)
     }
 
+    /// A SoC-shaped rkbin layer: the named files plus the upstream they come from.
     fn layer(atf: Option<&str>, tpl: Option<&str>, bl32: Option<&str>) -> RkbinLayer {
         RkbinLayer {
             atf: atf.map(Into::into),
             tpl: tpl.map(Into::into),
             bl32: bl32.map(Into::into),
-            upstream: None,
+            upstream: upstream("bin/rk35"),
         }
     }
 
     fn upstream(dir: &str) -> Option<RkbinUpstream> {
         Some(RkbinUpstream {
             git: "https://example.invalid/rkbin.git".into(),
+            git_ref: "master".into(),
             dir: dir.into(),
         })
     }
 
     #[test]
     fn rkbin_upstream_is_inherited_whole_and_must_name_a_relative_dir() {
-        let soc = RkbinLayer {
-            upstream: upstream("bin/rk35"),
-            ..layer(Some("atf.elf"), Some("ddr.bin"), None)
-        };
+        let soc = layer(Some("atf.elf"), Some("ddr.bin"), None);
         let r = resolve_rkbin(&soc, &RkbinLayer::default(), "dev").unwrap();
-        assert_eq!(r.upstream.unwrap().dir, "bin/rk35");
+        assert_eq!(r.upstream.dir, "bin/rk35");
         // A device that takes its blobs from elsewhere replaces the table, not a field.
         let dev = RkbinLayer {
             upstream: upstream("vendor/blobs"),
             ..RkbinLayer::default()
         };
         assert_eq!(
-            resolve_rkbin(&soc, &dev, "dev")
-                .unwrap()
-                .upstream
-                .unwrap()
-                .dir,
+            resolve_rkbin(&soc, &dev, "dev").unwrap().upstream.dir,
             "vendor/blobs"
         );
+        // The build fetches every blob from it, so no layer declaring one is an error.
+        let bare = RkbinLayer {
+            upstream: None,
+            ..soc.clone()
+        };
+        assert!(matches!(
+            resolve_rkbin(&bare, &RkbinLayer::default(), "dev"),
+            Err(ConfigError::BadRkbinUpstream { .. })
+        ));
+        for bad_ref in ["", " ", "--upload-pack=x"] {
+            let dev = RkbinLayer {
+                upstream: upstream("bin/rk35").map(|u| RkbinUpstream {
+                    git_ref: bad_ref.into(),
+                    ..u
+                }),
+                ..RkbinLayer::default()
+            };
+            assert!(
+                matches!(
+                    resolve_rkbin(&soc, &dev, "dev"),
+                    Err(ConfigError::BadRkbinUpstream { .. })
+                ),
+                "{bad_ref:?}"
+            );
+        }
         for bad in ["", "/bin/rk35", "bin/../rk35", "./bin"] {
             let dev = RkbinLayer {
                 upstream: upstream(bad),
@@ -2556,19 +2910,18 @@ mod tests {
         // Standard-memory board: empty device block, everything from the SoC.
         let soc = layer(Some("atf.elf"), Some("ddr.bin"), None);
         let r = resolve_rkbin(&soc, &RkbinLayer::default(), "dev").unwrap();
-        assert_eq!(r.atf, "atf.elf");
         assert_eq!(r.tpl, "ddr.bin");
         assert_eq!(r.bl32, None);
     }
 
     #[test]
     fn rkbin_device_overrides_win_per_field() {
-        // The device swaps only the DDR TPL (different DRAM); ATF still inherited.
-        let soc = layer(Some("atf.elf"), Some("ddr-lpddr4.bin"), None);
+        // The device swaps only the DDR TPL (different DRAM).
+        let soc = layer(Some("atf.elf"), Some("ddr-lpddr4.bin"), Some("optee.bin"));
         let dev = layer(None, Some("ddr-ddr4.bin"), None);
         let r = resolve_rkbin(&soc, &dev, "dev").unwrap();
-        assert_eq!(r.atf, "atf.elf", "ATF inherited from the SoC");
         assert_eq!(r.tpl, "ddr-ddr4.bin", "device TPL wins");
+        assert_eq!(r.bl32.as_deref(), Some("optee.bin"), "BL32 inherited");
     }
 
     #[test]
@@ -2596,9 +2949,175 @@ mod tests {
             other => panic!("expected MissingBlob, got {other:?}"),
         }
         // A blank override does not mask a good SoC default.
-        let blanked =
-            resolve_rkbin(&soc, &layer(Some("  "), Some("ddr.bin"), None), "h96").unwrap();
-        assert_eq!(blanked.atf, "atf.elf");
+        let soc = layer(Some("atf.elf"), Some("ddr.bin"), None);
+        let blanked = resolve_rkbin(&soc, &layer(None, Some("  "), None), "h96").unwrap();
+        assert_eq!(blanked.tpl, "ddr.bin");
+    }
+
+    fn tfa() -> TfaSource {
+        TfaSource {
+            git: "https://example.invalid/trusted-firmware-a.git".into(),
+            git_ref: "v2.16.0".into(),
+            plat: "rk3588".into(),
+            submodules: vec!["contrib/dtc".into()],
+        }
+    }
+
+    fn bl31_inputs<'a>(
+        soc: &'a RkbinLayer,
+        dev: &'a RkbinLayer,
+        soc_tfa: Option<&'a TfaSource>,
+        supported: &'a [Bl31Provider],
+        default: Option<Bl31Provider>,
+    ) -> Bl31Inputs<'a> {
+        Bl31Inputs {
+            soc_rkbin: soc,
+            device_rkbin: dev,
+            soc_tfa,
+            supported,
+            default,
+        }
+    }
+
+    #[test]
+    fn a_device_that_lists_no_bl31_providers_uses_rkbin_alone() {
+        let soc = layer(Some("atf.elf"), Some("ddr.bin"), None);
+        let none = RkbinLayer::default();
+        let src = tfa();
+        let inputs = bl31_inputs(&soc, &none, Some(&src), &[], None);
+        assert_eq!(
+            resolve_bl31(&inputs, "dev", None).unwrap(),
+            Bl31::Rkbin {
+                file: "atf.elf".into()
+            }
+        );
+        // TF-A existing for the SoC is not support for the board.
+        match resolve_bl31(&inputs, "dev", Some(Bl31Provider::Tfa)).unwrap_err() {
+            ConfigError::UnsupportedBl31 {
+                bl31, supported, ..
+            } => {
+                assert_eq!(bl31, "tfa");
+                assert_eq!(supported, "rkbin");
+            }
+            other => panic!("expected UnsupportedBl31, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_rkbin_bl31_comes_from_the_device_over_the_soc_and_is_required() {
+        let soc = layer(Some("soc-bl31.elf"), Some("ddr.bin"), None);
+        let dev = layer(Some("board-bl31.elf"), None, None);
+        let r = resolve_bl31(&bl31_inputs(&soc, &dev, None, &[], None), "dev", None).unwrap();
+        assert_eq!(r.rkbin_file(), Some("board-bl31.elf"));
+        // A blank device value does not mask the SoC's.
+        let blank = layer(Some(" "), None, None);
+        let r = resolve_bl31(&bl31_inputs(&soc, &blank, None, &[], None), "dev", None).unwrap();
+        assert_eq!(r.rkbin_file(), Some("soc-bl31.elf"));
+        // No layer names one: a typed error naming the field.
+        let bare = layer(None, Some("ddr.bin"), None);
+        let none = RkbinLayer::default();
+        match resolve_bl31(&bl31_inputs(&bare, &none, None, &[], None), "h96", None).unwrap_err() {
+            ConfigError::MissingBlob { device, what } => {
+                assert_eq!((device.as_str(), what.as_str()), ("h96", "rkbin.atf"));
+            }
+            other => panic!("expected MissingBlob, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_supported_tfa_selection_resolves_the_socs_source_without_an_rkbin_bl31() {
+        // The rkbin BL31 may be absent when it is not the provider selected.
+        let soc = layer(None, Some("ddr.bin"), None);
+        let none = RkbinLayer::default();
+        let src = tfa();
+        let both = [Bl31Provider::Rkbin, Bl31Provider::Tfa];
+        let inputs = bl31_inputs(&soc, &none, Some(&src), &both, Some(Bl31Provider::Tfa));
+        let r = resolve_bl31(&inputs, "dev", None).unwrap();
+        assert_eq!(r, Bl31::Tfa(Box::new(src.clone())));
+        assert_eq!(r.provider(), Bl31Provider::Tfa);
+        assert_eq!(r.rkbin_file(), None);
+        // The default is the board's; an explicit selection wins over it, and then
+        // needs that provider's input.
+        assert!(matches!(
+            resolve_bl31(&inputs, "dev", Some(Bl31Provider::Rkbin)),
+            Err(ConfigError::MissingBlob { .. })
+        ));
+    }
+
+    #[test]
+    fn a_device_listing_bl31_providers_must_name_a_default() {
+        let soc = layer(Some("atf.elf"), Some("ddr.bin"), None);
+        let none = RkbinLayer::default();
+        let both = [Bl31Provider::Rkbin, Bl31Provider::Tfa];
+        let src = tfa();
+        let inputs = bl31_inputs(&soc, &none, Some(&src), &both, None);
+        assert!(matches!(
+            resolve_bl31(&inputs, "dev", None),
+            Err(ConfigError::MissingDefaultBl31 { .. })
+        ));
+        // A selection makes the missing default moot.
+        assert!(resolve_bl31(&inputs, "dev", Some(Bl31Provider::Rkbin)).is_ok());
+    }
+
+    #[test]
+    fn a_tfa_source_is_shape_checked_where_it_is_selected() {
+        let soc = layer(Some("atf.elf"), Some("ddr.bin"), None);
+        let none = RkbinLayer::default();
+        let only = [Bl31Provider::Tfa];
+        let tfa_with = |f: &dyn Fn(&mut TfaSource)| {
+            let mut t = tfa();
+            f(&mut t);
+            t
+        };
+        let cases = [
+            ("no [tfa]", None),
+            ("empty git", Some(tfa_with(&|t| t.git = " ".into()))),
+            ("empty ref", Some(tfa_with(&|t| t.git_ref = String::new()))),
+            (
+                "option-like ref",
+                Some(tfa_with(&|t| t.git_ref = "--upload-pack=x".into())),
+            ),
+            (
+                "plat with a space",
+                Some(tfa_with(&|t| t.plat = "rk3588 X=1".into())),
+            ),
+            (
+                "plat with a path",
+                Some(tfa_with(&|t| t.plat = "../rk3588".into())),
+            ),
+            ("empty plat", Some(tfa_with(&|t| t.plat = String::new()))),
+            (
+                "absolute submodule",
+                Some(tfa_with(&|t| t.submodules = vec!["/contrib/dtc".into()])),
+            ),
+            (
+                "escaping submodule",
+                Some(tfa_with(&|t| t.submodules = vec!["contrib/../..".into()])),
+            ),
+            (
+                "option-like submodule",
+                Some(tfa_with(&|t| t.submodules = vec!["--init".into()])),
+            ),
+            (
+                "empty submodule",
+                Some(tfa_with(&|t| t.submodules = vec![String::new()])),
+            ),
+        ];
+        for (what, src) in &cases {
+            let inputs = bl31_inputs(&soc, &none, src.as_ref(), &only, Some(Bl31Provider::Tfa));
+            assert!(
+                matches!(
+                    resolve_bl31(&inputs, "dev", None),
+                    Err(ConfigError::BadTfaSource { .. })
+                ),
+                "{what}"
+            );
+        }
+        // A malformed [tfa] is not read when the rkbin provider is selected.
+        let bad = tfa_with(&|t| t.plat = String::new());
+        let both = [Bl31Provider::Rkbin, Bl31Provider::Tfa];
+        let inputs = bl31_inputs(&soc, &none, Some(&bad), &both, Some(Bl31Provider::Rkbin));
+        assert!(resolve_bl31(&inputs, "dev", None).is_ok());
     }
 
     #[test]
@@ -2632,6 +3151,27 @@ mod tests {
         let uk = &image_of(&unpatched).kernel;
         assert!(uk.patch_series().is_empty());
         assert!(uk.compiled().is_none());
+    }
+
+    /// A depthcharge board's firmware is its own, so it packs no BL31 and a selection
+    /// of one is refused rather than ignored, whichever provider it names.
+    #[test]
+    fn a_depthcharge_board_refuses_a_bl31_selection() {
+        let root = repo_root();
+        for provider in Bl31Provider::all() {
+            let ov = Overrides {
+                bl31: Some(*provider),
+                ..Default::default()
+            };
+            match resolve_device(&root, "asus-c201", &ov) {
+                Err(ConfigError::Bl31WithoutBootloader {
+                    boot_method, what, ..
+                }) => {
+                    assert_eq!((boot_method.as_str(), what), ("depthcharge", "bl31"));
+                }
+                other => panic!("expected Bl31WithoutBootloader, got {other:?}"),
+            }
+        }
     }
 
     /// A depthcharge board's initramfs settings are written for initramfs-tools, so
@@ -3508,7 +4048,7 @@ mod tests {
             "ntp.example.org ntp2",  // whitespace: silently becomes two servers
             "ntp://ntp.example.org", // a scheme the resolver can never answer
             "https://ntp.example.org",
-            "ntp.example.org:123", // timesyncd always uses 123 and parses no port
+            "ntp.example.org:123", // the client is always configured for 123
             "192.168.1.1:123",
             "[fd00::1]",   // the bracketed form is for URLs and implies a port
             "[fd00::1]:1", // both at once
@@ -3553,8 +4093,8 @@ mod tests {
         );
 
         // `Some([])` is distinguishable from `None`: it drops what the base named and
-        // returns the image to Debian's fallback pool, which is the whole reason the
-        // override is an `Option<Vec<_>>` rather than a `Vec<_>`.
+        // returns the image to the distribution's own servers, which is the whole reason
+        // the override is an `Option<Vec<_>>` rather than a `Vec<_>`.
         let cleared = Overrides {
             ntp_servers: Some(Vec::new()),
             ..Overrides::default()
@@ -3806,8 +4346,6 @@ mod tests {
         assert_eq!(image_of(&b).rootfs_exclude, vec!["isc-dhcp-client"]);
         assert_eq!(image_of(&b).kernel.id(), "rk3588-mainline-7.3");
         assert_eq!(b.kernel_dtb, "rockchip/rk3588-turing-rk1.dtb");
-        assert!(b.modules.contains(&"rga3".to_string()));
-        assert!(b.modules.contains(&"rkvenc".to_string()));
         // kernel fragments precede device fragments in apply order; the generated
         // Debian baseline is first, then the curated rockchip slices.
         let kernel = image_of(&b)
@@ -3830,8 +4368,8 @@ mod tests {
         assert_eq!(boot.uboot_defconfig, "turing-rk1-rk3588_defconfig");
         assert_eq!(boot.offsets.idbloader, "32KiB");
         assert_eq!(boot.offsets.uboot_itb, "8MiB");
-        assert_eq!(boot.offsets.rootfs, "16MiB");
-        assert_eq!(boot.rkbin.atf, "rk3588_bl31_v1.56.elf");
+        assert_eq!(boot.offsets.partitions, "16MiB");
+        assert_eq!(boot.bl31.rkbin_file(), Some("rk3588_bl31_v1.56.elf"));
         assert!(b.depthcharge_boot().is_none());
     }
 
@@ -4020,7 +4558,7 @@ mod tests {
         crate::distro::write_test_distro(p);
         std::fs::write(
             p.join("socs/rk3288.toml"),
-            "description = \"soc\"\narch = \"armv7\"\ndt_dir = \"rockchip\"\nmodules = []\n",
+            "description = \"soc\"\narch = \"armv7\"\ndt_dir = \"rockchip\"\n",
         )
         .unwrap();
         std::fs::write(
@@ -4461,6 +4999,56 @@ mod tests {
     }
 
     #[test]
+    fn a_depthcharge_board_has_no_loader_to_select() {
+        // The firmware loads the signed kernel itself, so the image has no loader, and a
+        // selection is named rather than ignored.
+        let root = repo_root();
+        let b = resolve_device(&root, "asus-c201", &Overrides::default()).unwrap();
+        assert_eq!(b.image.unwrap().loader, None);
+        let ov = Overrides {
+            loader: Some(Loader::Efi),
+            ..Default::default()
+        };
+        match resolve_device(&root, "asus-c201", &ov).unwrap_err() {
+            ConfigError::LoaderWithoutChoice {
+                boot_method,
+                loader,
+                ..
+            } => {
+                assert_eq!(boot_method, "depthcharge");
+                assert_eq!(loader, "efi");
+            }
+            other => panic!("expected LoaderWithoutChoice, got {other:?}"),
+        }
+    }
+
+    /// The shipped rkbin boards default to extlinux, and every one of them resolves
+    /// the efi loader with the shipped loader layer.
+    #[test]
+    fn a_shipped_rkbin_board_defaults_to_extlinux_and_resolves_efi() {
+        let root = repo_root();
+        let b = resolve_device(&root, "turing-rk1", &Overrides::default()).unwrap();
+        assert_eq!(b.image.unwrap().loader, Some(ResolvedLoader::Extlinux));
+        let ov = Overrides {
+            loader: Some(Loader::Efi),
+            ..Default::default()
+        };
+        let b = resolve_device(&root, "turing-rk1", &ov).unwrap();
+        let image = b.image.unwrap();
+        let Some(ResolvedLoader::Efi(efi)) = &image.loader else {
+            panic!("efi was selected");
+        };
+        assert_eq!(efi.arch.grub_package, "grub-efi-arm64");
+        assert!(image
+            .rootfs_packages
+            .contains(&"grub-efi-arm64".to_string()));
+        assert!(image
+            .expectations
+            .iter()
+            .any(|g| g.scope == ExpectScope::Loader && g.name == "efi"));
+    }
+
+    #[test]
     fn a_depthcharge_cmdline_may_not_contain_a_percent_or_a_root() {
         // Both rules are the hardware talking. depthchargectl round-trips the computed
         // cmdline through a ConfigParser that rejects a raw `%` outright — no escaping
@@ -4610,7 +5198,7 @@ mod tests {
         let rk1 = resolve_device(&root, "turing-rk1", &Overrides::default()).unwrap();
         let rk1_boot = rk1.rkbin_boot().unwrap();
         assert!(!rk1_boot.uboot_defconfig.is_empty());
-        assert!(!rk1_boot.rkbin.atf.is_empty());
+        assert!(rk1_boot.bl31.rkbin_file().is_some_and(|f| !f.is_empty()));
 
         let c201 = resolve_device(&root, "asus-c201", &Overrides::default()).unwrap();
         assert!(c201.depthcharge_boot().is_some());
@@ -4640,7 +5228,7 @@ mod tests {
         crate::distro::write_test_distro(p);
         std::fs::write(
             p.join("socs/rk3288.toml"),
-            "description = \"soc\"\narch = \"armv7\"\ndt_dir = \"rockchip\"\nmodules = []\n",
+            "description = \"soc\"\narch = \"armv7\"\ndt_dir = \"rockchip\"\n",
         )
         .unwrap();
         std::fs::write(
@@ -4703,7 +5291,7 @@ mod tests {
         crate::distro::write_test_distro(p);
         std::fs::write(
             p.join("socs/rk3288.toml"),
-            "description = \"soc\"\narch = \"armv7\"\ndt_dir = \"rockchip\"\nmodules = []\n",
+            "description = \"soc\"\narch = \"armv7\"\ndt_dir = \"rockchip\"\n",
         )
         .unwrap();
         std::fs::write(
@@ -4958,7 +5546,7 @@ mod tests {
         crate::distro::write_test_distro(p);
         std::fs::write(
             p.join("socs/rk3288.toml"),
-            "description = \"soc\"\narch = \"armv7\"\ndt_dir = \"rockchip\"\nmodules = []\n",
+            "description = \"soc\"\narch = \"armv7\"\ndt_dir = \"rockchip\"\n",
         )
         .unwrap();
         std::fs::write(
@@ -5313,6 +5901,11 @@ mod fixture_tests {
         soc_nonfree: &'static [&'static str],
         bm_packages: &'static [&'static str],
         bm_exclude: &'static [&'static str],
+        /// The boot method's `loaders` and `default_loader`.
+        bm_loaders: &'static [&'static str],
+        bm_default_loader: &'static str,
+        /// The efi loader layer's `esp_size`.
+        esp_size: &'static str,
         device_packages: &'static [&'static str],
         device_exclude: &'static [&'static str],
         /// Nonfree firmware the device declares, under the same gate.
@@ -5349,6 +5942,9 @@ mod fixture_tests {
                 soc_nonfree: &[],
                 bm_packages: &[],
                 bm_exclude: &[],
+                bm_loaders: &["extlinux", "efi"],
+                bm_default_loader: "extlinux",
+                esp_size: "128MiB",
                 device_packages: &[],
                 device_exclude: &[],
                 device_nonfree: &[],
@@ -5435,7 +6031,7 @@ mod fixture_tests {
                 p.join("socs/rk3588.toml"),
                 format!(
                     "description = \"soc\"\narch = \"arm64\"\ndt_dir = \"rockchip\"\n\
-                     modules = []\npackages = {}\nexclude = {}\n\
+                     packages = {}\nexclude = {}\n\
                      nonfree_firmware_packages = {}\n{src}{}",
                     arr(self.soc_packages),
                     arr(self.soc_exclude),
@@ -5449,11 +6045,32 @@ mod fixture_tests {
                 p.join("boot-methods/rockchip-rkbin.toml"),
                 format!(
                     "description = \"bm\"\nuboot_source = \"x\"\nuboot_ref = \"v1\"\n\
-                     idbloader_offset = \"32KiB\"\nuboot_itb_offset = \"8MiB\"\nrootfs_offset = \"16MiB\"\n\
+                     idbloader_offset = \"32KiB\"\nuboot_itb_offset = \"8MiB\"\npartition_offset = \"16MiB\"\n\
+                     loaders = {}\ndefault_loader = \"{}\"\n\
                      packages = {}\nexclude = {}\n{}",
+                    arr(self.bm_loaders),
+                    self.bm_default_loader,
                     arr(self.bm_packages),
                     arr(self.bm_exclude),
                     self.bm_extra
+                ),
+            )
+            .unwrap();
+
+            // The loader layers the boot method lists. The fixture's builds take the
+            // default, extlinux, unless a test selects efi.
+            fs::create_dir_all(p.join("loaders")).unwrap();
+            fs::write(
+                p.join("loaders/extlinux.toml"),
+                "description = \"extlinux\"\n",
+            )
+            .unwrap();
+            fs::write(
+                p.join("loaders/efi.toml"),
+                format!(
+                    "description = \"efi\"\nesp_size = \"{}\"\npackages = [\"dosfstools\"]\n\
+                     [[expect]]\ncheck = \"file\"\npath = \"/boot/grub/grub.cfg\"\n",
+                    self.esp_size
                 ),
             )
             .unwrap();
@@ -5468,7 +6085,9 @@ mod fixture_tests {
                      supported_suites = {}\ndefault_suite = {:?}\n\
                      default_layout = {:?}\nhostname = \"dev\"\nimage_size = {:?}\n\
                      packages = {}\nexclude = {}\nnonfree_firmware_packages = {}\n{}\
-                     \n[rkbin]\natf = \"atf.elf\"\ntpl = \"tpl.bin\"\n",
+                     \n[rkbin]\natf = \"atf.elf\"\ntpl = \"tpl.bin\"\n\
+                     [rkbin.upstream]\ngit = \"https://example.invalid/rkbin.git\"\n\
+                     ref = \"master\"\ndir = \"bin\"\n",
                     arr(self.supported_kernels),
                     self.default_kernel,
                     arr(self.supported_suites),
@@ -5533,6 +6152,199 @@ mod fixture_tests {
 
             dir
         }
+    }
+
+    #[test]
+    fn the_bl31_axis_takes_the_recipe_over_the_device_and_the_flag_over_both() {
+        let tree = Tree {
+            soc_extra: "[tfa]\ngit = \"https://example.invalid/tf-a.git\"\n\
+                        ref = \"v2.16.0\"\nplat = \"rk3588\"\n",
+            device_extra: "supported_bl31 = [\"rkbin\", \"tfa\"]\ndefault_bl31 = \"rkbin\"\n",
+            recipe: Some(RecipeSpec {
+                extra_toml: "bl31 = \"tfa\"\n",
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let dir = tree.write();
+        let root = ConfigRoot::new(dir.path());
+        let bl31 = |b: &ResolvedBuild| b.rkbin_boot().unwrap().bl31.clone();
+        // The device default, for a direct device build.
+        let b = resolve_device(&root, "dev", &Overrides::default()).unwrap();
+        assert_eq!(
+            bl31(&b),
+            Bl31::Rkbin {
+                file: "atf.elf".into()
+            }
+        );
+        // The recipe's selection over it, with the SoC's source.
+        let b = resolve_recipe(&root, "rec", &Overrides::default()).unwrap();
+        let Bl31::Tfa(src) = bl31(&b) else {
+            panic!("the recipe selects tfa");
+        };
+        assert_eq!(
+            (src.git_ref.as_str(), src.plat.as_str()),
+            ("v2.16.0", "rk3588")
+        );
+        // A flag over the recipe.
+        let cli = Overrides {
+            bl31: Some(Bl31Provider::Rkbin),
+            ..Default::default()
+        };
+        let b = resolve_recipe(&root, "rec", &cli).unwrap();
+        assert_eq!(bl31(&b).provider(), Bl31Provider::Rkbin);
+    }
+
+    /// The loader axis: the boot method's default, a recipe's selection over it, a flag
+    /// over the recipe. The efi loader brings the architecture's GRUB package, its
+    /// layer's packages, its partition size and names, and its checks, filed under the
+    /// loader between the boot method's and the device's.
+    #[test]
+    fn the_loader_axis_takes_the_recipe_over_the_boot_method_and_the_flag_over_both() {
+        let tree = Tree {
+            recipe: Some(RecipeSpec {
+                extra_toml: "loader = \"efi\"\n",
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let dir = tree.write();
+        let root = ConfigRoot::new(dir.path());
+        let loader = |b: &ResolvedBuild| b.image.as_ref().unwrap().loader.clone().unwrap();
+
+        let b = resolve_device(&root, "dev", &Overrides::default()).unwrap();
+        assert_eq!(loader(&b), ResolvedLoader::Extlinux);
+        assert!(!image_of(&b)
+            .rootfs_packages
+            .contains(&"grub-efi-arm64".to_string()));
+
+        let b = resolve_recipe(&root, "rec", &Overrides::default()).unwrap();
+        let ResolvedLoader::Efi(efi) = loader(&b) else {
+            panic!("the recipe selects efi");
+        };
+        assert_eq!(efi.esp_size, "128MiB");
+        assert_eq!(
+            efi.dtb, "rockchip/d.dtb",
+            "the kernel's DTB where u-boot's is unnamed"
+        );
+        assert_eq!(efi.arch, Arch::Arm64.efi());
+        assert_eq!(efi.arch.removable_file, "BOOTAA64.EFI");
+        let packages = &image_of(&b).rootfs_packages;
+        assert!(
+            packages.contains(&"grub-efi-arm64".to_string()),
+            "{packages:?}"
+        );
+        assert!(packages.contains(&"dosfstools".to_string()), "{packages:?}");
+        let scopes: Vec<_> = image_of(&b)
+            .expectations
+            .iter()
+            .map(|g| (g.scope, g.name.as_str()))
+            .collect();
+        assert_eq!(scopes, [(ExpectScope::Loader, "efi")]);
+
+        let cli = Overrides {
+            loader: Some(Loader::Extlinux),
+            ..Default::default()
+        };
+        let b = resolve_recipe(&root, "rec", &cli).unwrap();
+        assert_eq!(loader(&b), ResolvedLoader::Extlinux);
+    }
+
+    /// A loader the boot method does not list, a default it does not list, and a
+    /// partition size off a MiB boundary are each refused by name.
+    #[test]
+    fn a_loader_the_boot_method_cannot_start_is_refused() {
+        let only_extlinux = Tree {
+            bm_loaders: &["extlinux"],
+            ..Default::default()
+        };
+        let dir = only_extlinux.write();
+        let root = ConfigRoot::new(dir.path());
+        let efi = Overrides {
+            loader: Some(Loader::Efi),
+            ..Default::default()
+        };
+        assert!(matches!(
+            resolve_device(&root, "dev", &efi),
+            Err(ConfigError::UnsupportedLoader { ref loader, .. }) if loader == "efi"
+        ));
+
+        let bad_default = Tree {
+            bm_loaders: &["efi"],
+            ..Default::default()
+        };
+        let dir = bad_default.write();
+        let root = ConfigRoot::new(dir.path());
+        assert!(matches!(
+            resolve_device(&root, "dev", &Overrides::default()),
+            Err(ConfigError::DefaultLoaderNotListed { .. })
+        ));
+
+        let ragged = Tree {
+            esp_size: "100000KiB",
+            ..Default::default()
+        };
+        let dir = ragged.write();
+        let root = ConfigRoot::new(dir.path());
+        assert!(matches!(
+            resolve_device(&root, "dev", &efi),
+            Err(ConfigError::InvalidEspSize { .. })
+        ));
+    }
+
+    /// Under efi the DTB goes where the board's u-boot looks: its `uboot_fdtfile` where
+    /// the device names one, which is refused when it is not a plain relative `.dtb` path.
+    #[test]
+    fn the_esp_dtb_takes_the_name_u_boot_loads_by() {
+        let efi = Overrides {
+            loader: Some(Loader::Efi),
+            ..Default::default()
+        };
+        let generic = Tree {
+            device_extra: "uboot_fdtfile = \"rockchip/generic.dtb\"\n",
+            ..Default::default()
+        };
+        let dir = generic.write();
+        let root = ConfigRoot::new(dir.path());
+        let b = resolve_device(&root, "dev", &efi).unwrap();
+        let Some(ResolvedLoader::Efi(e)) = &image_of(&b).loader else {
+            panic!("efi was selected");
+        };
+        assert_eq!(e.dtb, "rockchip/generic.dtb");
+        // The extlinux loader names the kernel's DTB to u-boot itself, so the key
+        // changes nothing there.
+        let b = resolve_device(&root, "dev", &Overrides::default()).unwrap();
+        assert_eq!(image_of(&b).loader, Some(ResolvedLoader::Extlinux));
+
+        for bad in [
+            "../x.dtb",
+            "/rockchip/x.dtb",
+            "rockchip/x.dts",
+            "rock chip/x.dtb",
+        ] {
+            assert!(validate_esp_dtb(bad).is_err(), "{bad}");
+        }
+        assert!(validate_esp_dtb("rockchip/rk3576-generic.dtb").is_ok());
+    }
+
+    /// A u-boot-only build has no image to put a loader in, and says so.
+    #[test]
+    fn a_loader_on_a_u_boot_only_build_is_refused() {
+        let tree = Tree::default();
+        let dir = tree.write();
+        let root = ConfigRoot::new(dir.path());
+        let overrides = Overrides {
+            deliverable: Deliverable::Uboot,
+            loader: Some(Loader::Efi),
+            ..Default::default()
+        };
+        assert!(matches!(
+            resolve_device(&root, "dev", &overrides),
+            Err(ConfigError::OverrideNotApplicable {
+                flag: "--loader",
+                ..
+            })
+        ));
     }
 
     /// Every layer's `[[expect]]` appears in the resolved build as its own group,
@@ -5636,6 +6448,7 @@ mod fixture_tests {
             vec![
                 "base-pkg",
                 "initramfs-tools",
+                "systemd-timesyncd",
                 "soc-pkg",
                 "firmware-soc",
                 "device-pkg",
@@ -5652,7 +6465,13 @@ mod fixture_tests {
         assert!(image_of(&b).libre);
         assert_eq!(
             image_of(&b).rootfs_packages,
-            vec!["base-pkg", "initramfs-tools", "soc-pkg", "device-pkg"]
+            vec![
+                "base-pkg",
+                "initramfs-tools",
+                "systemd-timesyncd",
+                "soc-pkg",
+                "device-pkg"
+            ]
         );
         // Dropped from the include set, not pushed onto the exclude set: the blob is
         // unreachable, not unwanted, and excluding it would also forbid apt from
@@ -5688,10 +6507,18 @@ mod fixture_tests {
         let b = resolve_device(&root, "dev", &ov).unwrap();
 
         assert_eq!(image_of(&b).rootfs_exclude, vec!["b", "c", "a"]);
-        // The generator's package follows the base and distro layers' own.
+        // The generator's and the time client's packages follow the base and distro
+        // layers' own.
         assert_eq!(
             image_of(&b).rootfs_packages,
-            vec!["shared", "initramfs-tools", "d", "e", "g"]
+            vec![
+                "shared",
+                "initramfs-tools",
+                "systemd-timesyncd",
+                "d",
+                "e",
+                "g"
+            ]
         );
         // No name is both included and excluded — what the reconciliation guarantees.
         for x in &image_of(&b).rootfs_exclude {
@@ -6378,7 +7205,7 @@ mod fixture_tests {
         // SoC layer with no media-accel source stanzas.
         fs::write(
             p.join("socs/rk3588.toml"),
-            "description = \"soc\"\narch = \"arm64\"\ndt_dir = \"rockchip\"\nmodules = []\n",
+            "description = \"soc\"\narch = \"arm64\"\ndt_dir = \"rockchip\"\n",
         )
         .unwrap();
         // The feature opts into the media-accel build.
@@ -6426,7 +7253,12 @@ mod fixture_tests {
             .expect("the forky recipe resolves");
         assert_eq!(
             image_of(&b).rootfs_packages,
-            vec!["initramfs-tools", "network-manager", "network-manager-tui"],
+            vec![
+                "initramfs-tools",
+                "systemd-timesyncd",
+                "network-manager",
+                "network-manager-tui"
+            ],
             "forky includes the split-out package",
         );
 
@@ -6435,7 +7267,7 @@ mod fixture_tests {
             .expect("the trixie recipe resolves");
         assert_eq!(
             image_of(&b).rootfs_packages,
-            vec!["initramfs-tools", "network-manager"],
+            vec!["initramfs-tools", "systemd-timesyncd", "network-manager"],
             "trixie does not, and the entry contributes nothing there",
         );
     }
@@ -6462,7 +7294,7 @@ mod fixture_tests {
             .expect("the bookworm recipe resolves");
         assert_eq!(
             image_of(&b).rootfs_packages,
-            vec!["initramfs-tools", "libv4l-0"]
+            vec!["initramfs-tools", "systemd-timesyncd", "libv4l-0"]
         );
 
         let dir = tree("forky").write();
@@ -6470,7 +7302,7 @@ mod fixture_tests {
             .expect("the forky recipe resolves");
         assert_eq!(
             image_of(&b).rootfs_packages,
-            vec!["initramfs-tools", "libv4l-0t64"]
+            vec!["initramfs-tools", "systemd-timesyncd", "libv4l-0t64"]
         );
     }
 
@@ -6513,7 +7345,7 @@ mod fixture_tests {
 
     /// The suite picks the distro layer, and the layer fills in everything about the
     /// image that differs between distributions: its archive, its account, its
-    /// initramfs generator and its own packages.
+    /// initramfs generator, its time client and its own packages.
     #[test]
     fn a_suite_resolves_to_the_distro_layer_that_serves_it() {
         let dir = Tree {
@@ -6543,9 +7375,14 @@ mod fixture_tests {
             image.initramfs_generator,
             crate::distro::InitramfsGenerator::Dracut
         );
+        assert_eq!(image.time_client, crate::distro::TimeClient::Chrony);
         assert_eq!(image.components.len(), 4);
-        // The base layer's, then the distro's, then the generator's package.
-        assert_eq!(image.rootfs_packages, ["shared", "ubuntu-only", "dracut"]);
+        // The base layer's, then the distro's, then the generator's and the time
+        // client's package.
+        assert_eq!(
+            image.rootfs_packages,
+            ["shared", "ubuntu-only", "dracut", "chrony"]
+        );
         assert_eq!(image.rootfs_exclude, ["ubuntu-excluded"]);
 
         // The same tree's Debian suite takes the Debian layer, which names none of it.
@@ -6559,7 +7396,14 @@ mod fixture_tests {
             .expect("the forky recipe resolves");
         assert_eq!(b.distro.name, "debian");
         assert_eq!(image_of(&b).user, "debian");
-        assert_eq!(image_of(&b).rootfs_packages, ["shared", "initramfs-tools"]);
+        assert_eq!(
+            image_of(&b).time_client,
+            crate::distro::TimeClient::SystemdTimesyncd
+        );
+        assert_eq!(
+            image_of(&b).rootfs_packages,
+            ["shared", "initramfs-tools", "systemd-timesyncd"]
+        );
         assert!(image_of(&b).rootfs_exclude.is_empty());
     }
 

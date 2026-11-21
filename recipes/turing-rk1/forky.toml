@@ -7,7 +7,7 @@
 # later from the media-accel debs, or build it in from the start with
 # turing-rk1/media-accel-forky.
 #
-# The u-boot it ships includes the turing-rk1-recovery series, whose one patch adds
+# The u-boot it ships includes the turing-rk1-recovery series, whose board patch adds
 # `ums`. That is what lets a disk on the M.2 slot be written from the carrier at
 # all: the management controller writes the module's eMMC and nothing else, so
 # without it an NVMe u-boot enumerates perfectly well has no path to a host.
@@ -19,8 +19,13 @@ features   = []                          # base: accel kernel, no media userspac
 layout     = "combined"                  # omit -> device default_layout
 image_size = "2G"
 
-# The pin is v7.3. What the move from the 7.2 generation changes, on the paths this
-# image runs:
+# The pin is v7.3.3. Its point releases change none of the files the patch series
+# touches and no Rockchip path. 7.3.1's fixes are in io_uring, signal delivery and
+# coredumps, the keys subsystem, tracing and Bluetooth L2CAP; 7.3.2's are mostly in XFS,
+# HID, the SMB server and client, KVM and io_uring; 7.3.3 fixes two Xen backends. The
+# one fix on this image's paths closes a race in panthor's group registration, which
+# the base image does not reach, since it installs no Mesa. What the move from the 7.2
+# generation changes, on the paths this image runs:
 #
 # The patch series gets shorter. 7.3 includes the rocket driver's slot search on core
 # removal and on scheduler lookup, so the series no longer includes either; 095, which
@@ -44,10 +49,14 @@ image_size = "2G"
 # leaves both disabled; nothing in the RK1's own source moves. The HDMI PHY takes a run
 # of fixes and panthor a run of bounds checks, neither of which this image reaches: the
 # RK1 enables no HDMI, and the base image installs no Mesa. The kernel configuration
-# differs from 7.2.9's in 47 symbols, none of them on a Rockchip, media, NPU or GPU
-# path. 7.3 removes EFS, freevxfs and openvswitch's legacy tunnel types, and fscrypt now
-# always encrypts block-device contents through blk-crypto, which turns on
-# `BLK_INLINE_ENCRYPTION` and its software fallback.
+# differs from 7.2.9's in the 47 symbols 7.3 brings, none of them on a Rockchip, media,
+# NPU or GPU path, and in three that turn on compressed firmware loading. 7.3 removes
+# EFS, freevxfs and openvswitch's legacy tunnel types, and fscrypt now always encrypts
+# block-device contents through blk-crypto, which turns on `BLK_INLINE_ENCRYPTION` and
+# its software fallback. The firmware loader reads `.zst` and `.xz` files
+# (`FW_LOADER_COMPRESS`), as Debian's own arm64 kernel does. Debian's firmware packages
+# ship uncompressed files, which load as before; the setting is for Ubuntu's, which
+# compresses every file.
 #
 # The bootloader is u-boot v2026.10 with rkbin's BL31 v1.56 and DDR init v1.24, a pair
 # Rockchip requires: the DDR blob's dual-channel detection needs BL31 v1.53 or later.
@@ -60,12 +69,19 @@ image_size = "2G"
 # `inflate() returned -5`, lets `ums` run twice in one session, and has `ums` report
 # `serial#` as its USB serial number.
 #
+# Ahead of the board patch, the series applies the RK3588 SPL clock fix, upstream from
+# v2027.01. SPLL clocks the SoC's center interconnect, the fabric between the bus
+# masters and the DDR controllers, and only SPL can program it. v2026.10's SPL programs
+# it only on a boot from microSD, so on this board's eMMC boot it stays at the
+# BootROM's rate while Linux reports 702 MHz. With the fix the NPU reads DDR in half
+# the time: 0.80 ms instead of 1.58 ms for a 4x2048x4096 int8 read.
+#
 # `expected` until an image from this pin boots. The last image on the board is this
 # recipe at v7.2.9 and patches a74f07a5df1f on u-boot v2026.10, booted 2026-10-08: the
 # selftest passed 15 of 15, a 30-minute memory stress over 85% of RAM verified clean,
 # and five warm reboots each came back with the same four DRAM banks. It was built from
-# a tree with uncommitted changes, so it has no claim of its own. The kernel and its
-# patch series are what have moved since.
+# a tree with uncommitted changes, so it has no claim of its own. The kernel, its
+# patch series and the SPL clock fix in the u-boot series are what have moved since.
 [support]
 status = "expected"
-date   = "2026-10-19"
+date   = "2026-11-21"

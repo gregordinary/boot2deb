@@ -302,7 +302,6 @@ pub(crate) fn build_inputs(root: &ConfigRoot, reference: &str) -> Result<()> {
             root.lock_sibling(reference, &dotnet.nuget.manifest)?;
         }
     }
-    root.find_asset(format!("blobs/{}", build.soc.as_str()));
     kmod_local_patches(root, &build)?;
     // Every root a build provisions verifies the archive against the distro's keyring,
     // a bootloader-only build's cross and packaging roots included.
@@ -339,6 +338,50 @@ pub(crate) fn fragment_paths(root: &ConfigRoot, build: &ResolvedBuild) -> Result
         paths.push(path);
     }
     Ok(paths)
+}
+
+/// The digest of a compiled kernel's configuration inputs, as the lock records it in
+/// [`KernelPin::config_sha256`](boot2deb_core::lock::KernelPin::config_sha256): the base
+/// defconfig, each fragment's contents, and each board device-tree source, read from the
+/// files the build itself would use along the config search path. `None` for a build
+/// that compiles no kernel.
+///
+/// `update` records it and `build` compares against it, so both read it through here.
+pub(crate) fn kernel_config_sha256(
+    root: &ConfigRoot,
+    build: &ResolvedBuild,
+) -> Result<Option<String>> {
+    let Some(kernel) = build.image.as_ref().and_then(|i| i.kernel.compiled()) else {
+        return Ok(None);
+    };
+    let read =
+        |path: &PathBuf| std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()));
+    let fragments = fragment_paths(root, build)?
+        .iter()
+        .map(read)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let device_dts = device_dts_paths(root, build)?
+        .iter()
+        .map(read)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    // Each file under the name the config gives it, in the order it gives them.
+    let fragments: Vec<(&str, &[u8])> = kernel
+        .config_fragments
+        .iter()
+        .map(String::as_str)
+        .zip(fragments.iter().map(Vec::as_slice))
+        .collect();
+    let device_dts: Vec<(&str, &[u8])> = build
+        .device_dts
+        .iter()
+        .map(String::as_str)
+        .zip(device_dts.iter().map(Vec::as_slice))
+        .collect();
+    Ok(Some(boot2deb_engine::pins::kernel_config_digest(
+        &kernel.base_defconfig,
+        &fragments,
+        &device_dts,
+    )))
 }
 
 /// Resolve a build's `device_dts` entries to files along the config search path,
@@ -467,11 +510,16 @@ pub(crate) fn apt_source_keyrings<'a>(
 }
 
 /// Overlay directories for a build's rootfs, in merge order:
-/// base → soc → boot-method → device lineage → each feature. Each logical layer is
-/// expanded along the config search path (shipped copy first, then any overlay's
-/// copy of the same tree), so an overlay's overlay-tree stacks right after — and
-/// thus wins over — the shipped one, matching the layer merge semantics. Absent
+/// base → distro → soc → boot-method → loader → device lineage → each feature. Each logical
+/// layer is expanded along the config search path (shipped copy first, then any
+/// overlay's copy of the same tree), so an overlay's overlay-tree stacks right after —
+/// and thus wins over — the shipped one, matching the layer merge semantics. Absent
 /// dirs contribute nothing.
+///
+/// The distro's tree is the one the build's suite resolved to
+/// ([`ResolvedBuild::distro`]). It contains what that distribution's own network and
+/// service stack needs and the shared base cannot assume, and it stacks before the
+/// hardware so a board's file wins over it.
 ///
 /// The device contributes one tree per entry in its
 /// [`device_lineage`](ResolvedBuild::device_lineage), base-most first, so a variant
@@ -501,9 +549,15 @@ pub(crate) fn overlay_dirs(
         }
         trees
     };
-    let mut rels = vec![format!("base/{dir}")];
+    let mut rels = vec![
+        format!("base/{dir}"),
+        format!("distros/{}/{dir}", b.distro.name),
+    ];
     rels.extend(hardware(format!("socs/{}", b.soc.as_str())));
     rels.push(format!("boot-methods/{}/{dir}", b.boot_method.as_str()));
+    if let Some(loader) = b.image.as_ref().and_then(|i| i.loader.as_ref()) {
+        rels.push(format!("loaders/{}/{dir}", loader.loader().as_str()));
+    }
     for device in &b.device_lineage {
         rels.extend(hardware(format!("devices/{device}")));
     }
@@ -597,6 +651,14 @@ pub(crate) fn artifact_cache(root: &ConfigRoot) -> PathBuf {
 /// still pin, and `clean --all-caches` takes it entire.
 pub(crate) fn verify_trees_cache(root: &ConfigRoot) -> PathBuf {
     cache_dir(root).join("verify-trees")
+}
+
+/// The commit-addressed cache of fetched rkbin blobs (`<root>/cache/rkbin`), filled by
+/// [`boot2deb_engine::rkbin::ensure_files`]. Keyed on the lock's `[blobs] commit`, so
+/// `clean --verify-trees` sweeps it by the same liveness rule as
+/// [`verify_trees_cache`].
+pub(crate) fn rkbin_cache(root: &ConfigRoot) -> PathBuf {
+    cache_dir(root).join("rkbin")
 }
 
 /// The commit-addressed cache of auto-fetched `patches` checkouts
@@ -760,6 +822,15 @@ pub(crate) fn source_axes<'a>(
             commit: &pin.commit,
         });
     }
+    // TF-A, fetched only where the BL31 is built from it.
+    if let (Some(src), Some(pin)) = (build.rkbin_boot().and_then(|b| b.bl31.tfa()), &lock.tfa) {
+        axes.push(SourceAxis {
+            name: "tf-a".into(),
+            url: src.git.clone(),
+            reference: &pin.reference,
+            commit: &pin.commit,
+        });
+    }
     // The fetched media-accel trees, present only for a build that compiles the
     // transcode stack. URLs come from the resolved build, pins from the lock — both
     // `Some` together.
@@ -913,6 +984,111 @@ mod tests {
         assert!(checked > 20, "only {checked} locks were found to check");
     }
 
+    /// Every committed lock that compiles a kernel records the configuration its recipe
+    /// has now. `build` refuses a lock that does not, so a fragment or board DT source
+    /// edited without re-running `update` fails here, in the change that made it,
+    /// rather than at the next build of each recipe it reaches.
+    #[test]
+    fn every_kernel_lock_records_its_recipes_kernel_configuration() {
+        let root = repo_root();
+        let recipes = repo_root_path().join("recipes");
+        let mut checked = 0;
+        for device in std::fs::read_dir(&recipes).unwrap() {
+            let device = device.unwrap().path();
+            if !device.is_dir() {
+                continue;
+            }
+            for entry in std::fs::read_dir(&device).unwrap() {
+                let path = entry.unwrap().path();
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                if !name.ends_with(".lock")
+                    || name.ends_with(".pkgs.lock")
+                    || boot2deb_core::nuget::is_sidecar_name(&name)
+                {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap();
+                let lock = boot2deb_core::lock::Lock::from_toml_str(&text, &name).unwrap();
+                let Some(pin) = &lock.kernel else {
+                    continue;
+                };
+                let recipe = format!(
+                    "{}/{}",
+                    device.file_name().unwrap().to_string_lossy(),
+                    name.trim_end_matches(".lock")
+                );
+                let build = resolve_recipe(&root, &recipe, &Overrides::default())
+                    .unwrap_or_else(|e| panic!("{recipe}: {e}"));
+                let digest = kernel_config_sha256(&root, &build).unwrap();
+                assert_eq!(
+                    digest.as_deref(),
+                    Some(pin.config_sha256.as_str()),
+                    "{recipe}: the kernel configuration moved since the lock; run \
+                     `boot2deb update {recipe}`"
+                );
+                checked += 1;
+            }
+        }
+        assert!(
+            checked > 10,
+            "only {checked} kernel locks were found to check"
+        );
+    }
+
+    /// Every committed lock that builds u-boot records the configuration its recipe has
+    /// now, and a version its package can be named by. `build` refuses a lock whose
+    /// digest does not match, so a defconfig, offset or board description edited without
+    /// re-running `update` fails here, in the change that made it.
+    #[test]
+    fn every_uboot_lock_records_its_recipes_uboot_configuration() {
+        let root = repo_root();
+        let recipes = repo_root_path().join("recipes");
+        let mut checked = 0;
+        for device in std::fs::read_dir(&recipes).unwrap() {
+            let device = device.unwrap().path();
+            if !device.is_dir() {
+                continue;
+            }
+            for entry in std::fs::read_dir(&device).unwrap() {
+                let path = entry.unwrap().path();
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                if !name.ends_with(".lock")
+                    || name.ends_with(".pkgs.lock")
+                    || boot2deb_core::nuget::is_sidecar_name(&name)
+                {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap();
+                let lock = boot2deb_core::lock::Lock::from_toml_str(&text, &name).unwrap();
+                let Some(pin) = &lock.uboot else {
+                    continue;
+                };
+                let recipe = format!(
+                    "{}/{}",
+                    device.file_name().unwrap().to_string_lossy(),
+                    name.trim_end_matches(".lock")
+                );
+                let build = resolve_recipe(&root, &recipe, &Overrides::default())
+                    .unwrap_or_else(|e| panic!("{recipe}: {e}"));
+                assert_eq!(
+                    boot2deb_engine::pins::uboot_config_digest(&build).as_deref(),
+                    Some(pin.config_sha256.as_str()),
+                    "{recipe}: the u-boot configuration moved since the lock; run \
+                     `boot2deb update {recipe}`"
+                );
+                assert!(
+                    lock.uboot_deb_version().is_some(),
+                    "{recipe}: the lock names no BL31 to version its u-boot package by"
+                );
+                checked += 1;
+            }
+        }
+        assert!(
+            checked > 10,
+            "only {checked} u-boot locks were found to check"
+        );
+    }
+
     #[test]
     fn preflight_accepts_shipped_config_and_rejects_bad_geometry_or_fragment() {
         // Geometry + fragment existence are validated up front (by both update
@@ -925,7 +1101,7 @@ mod tests {
         // A nonsensical rootfs offset (the review's own probe value) is rejected.
         let mut bad_geom = resolved.clone();
         if let boot2deb_core::model::ResolvedBoot::RockchipRkbin(boot) = &mut bad_geom.boot {
-            boot.offsets.rootfs = "1".to_string();
+            boot.offsets.partitions = "1".to_string();
         }
         assert!(
             preflight_config(&root, &bad_geom).is_err(),
@@ -1219,6 +1395,57 @@ mod tests {
         let root =
             ConfigRoot::with_overlays(repo_root_path(), [overlay.path().to_path_buf()]).unwrap();
         (overlay, root)
+    }
+
+    /// The distro's tree is the tree of the distribution the suite resolved to, and it
+    /// stacks between the base and the hardware. Debian's dhcpcd needs a resolv.conf
+    /// that Ubuntu's systemd-resolved owns as a symlink, so either tree on the other
+    /// distribution would break its name resolution.
+    #[test]
+    fn the_suite_picks_the_distro_overlay_tree() {
+        let root = ConfigRoot::new(repo_root_path());
+        let forky = resolve_recipe(&root, "turing-rk1/forky", &Overrides::default()).unwrap();
+        let dirs = overlay_dirs(&root, &forky, OverlayStage::Customize);
+        let position = |tree: &std::path::Path| {
+            dirs.iter()
+                .position(|d| d == tree)
+                .unwrap_or_else(|| panic!("{} is missing from {dirs:?}", tree.display()))
+        };
+        let debian = root
+            .find_asset("distros/debian/overlay")
+            .expect("Debian ships a customize tree");
+        let base = root.find_asset("base/overlay").unwrap();
+        let soc = root.find_asset("socs/rk3588/overlay").unwrap();
+        assert!(position(&base) < position(&debian));
+        assert!(position(&debian) < position(&soc));
+        assert!(debian.join("etc/resolv.conf").is_file());
+        assert!(!dirs.iter().any(|d| d.ends_with("distros/ubuntu/overlay")));
+
+        // An Ubuntu suite takes Ubuntu's tree instead. A variant board serves resolute
+        // here, so the assertion reaches the shipped tree through real resolution.
+        let overlay = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(overlay.path().join("devices")).unwrap();
+        std::fs::write(
+            overlay.path().join("devices/turing-rk1-resolute.toml"),
+            "extends          = \"turing-rk1\"\n\
+             description      = \"Turing RK1 on Ubuntu, for the distro overlay\"\n\
+             hostname         = \"turing-rk1\"\n\
+             supported_suites = [\"resolute\"]\n\
+             default_suite    = \"resolute\"\n",
+        )
+        .unwrap();
+        let root =
+            ConfigRoot::with_overlays(repo_root_path(), [overlay.path().to_path_buf()]).unwrap();
+        let b = resolve_device(&root, "turing-rk1-resolute", &Overrides::default()).unwrap();
+        assert_eq!(b.distro.name, "ubuntu");
+        let dirs = overlay_dirs(&root, &b, OverlayStage::Customize);
+        let ubuntu = root
+            .find_asset("distros/ubuntu/overlay")
+            .expect("Ubuntu ships a customize tree");
+        assert!(dirs.contains(&ubuntu), "{dirs:?}");
+        assert!(ubuntu.join("etc/netplan/50-boot2deb.yaml").is_file());
+        assert!(!ubuntu.join("etc/resolv.conf").exists());
+        assert!(!dirs.iter().any(|d| d.ends_with("distros/debian/overlay")));
     }
 
     #[test]

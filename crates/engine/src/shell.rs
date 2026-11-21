@@ -68,7 +68,7 @@
 //! The user-facing description of the command is the CLI reference page,
 //! `docs/src/reference/cli.md`.
 
-use crate::build::{ffmpeg, kernel, kmod, uboot, userspace};
+use crate::build::{ffmpeg, kernel, kmod, tfa, uboot, userspace};
 use crate::error::{cage_message, EngineError};
 use crate::event::{EventSink, Step};
 use crate::repo::LocalDistsRepo;
@@ -104,6 +104,10 @@ pub enum ShellStage {
     /// The cross root u-boot compiles in, layered with the u-boot stage's
     /// build-dependencies.
     Uboot,
+    /// The cross root Trusted Firmware-A compiles in. The TF-A stage layers nothing
+    /// over the base, so a session enters it with the toolchain alone, as the build
+    /// does.
+    Tfa,
     /// The cross root an out-of-tree module compiles in. An out-of-tree module build
     /// *is* a kbuild invocation, so it declares the kernel stage's set, exactly as the
     /// kmod stage does.
@@ -140,6 +144,7 @@ impl ShellStage {
         match self {
             ShellStage::Kernel => "kernel",
             ShellStage::Uboot => "uboot",
+            ShellStage::Tfa => "tfa",
             ShellStage::Kmod => "kmod",
             ShellStage::Userspace => "userspace",
             ShellStage::Ffmpeg => "ffmpeg",
@@ -150,7 +155,9 @@ impl ShellStage {
     /// Which root this stage compiles or packages in.
     fn root(self) -> RootKind {
         match self {
-            ShellStage::Kernel | ShellStage::Uboot | ShellStage::Kmod => RootKind::Cross,
+            ShellStage::Kernel | ShellStage::Uboot | ShellStage::Tfa | ShellStage::Kmod => {
+                RootKind::Cross
+            }
             ShellStage::Userspace | ShellStage::Ffmpeg => RootKind::Target,
             ShellStage::Packaging => RootKind::Packaging,
         }
@@ -168,6 +175,7 @@ impl ShellStage {
         match self {
             ShellStage::Kernel => "shell-kernel",
             ShellStage::Uboot => "shell-uboot",
+            ShellStage::Tfa => "shell-tfa",
             ShellStage::Kmod => "shell-kmod",
             ShellStage::Userspace => "shell-userspace",
             ShellStage::Ffmpeg => "shell-ffmpeg",
@@ -186,6 +194,7 @@ impl ShellStage {
         match self {
             ShellStage::Kernel => Some(kernel::tree_dir(work_dir)),
             ShellStage::Uboot => Some(uboot::tree_dir(work_dir)),
+            ShellStage::Tfa => Some(tfa::tree_dir(work_dir)),
             ShellStage::Kmod => Some(kmod::stage_dir(work_dir)),
             ShellStage::Userspace => Some(userspace::stage_dir(work_dir)),
             ShellStage::Ffmpeg => Some(ffmpeg::tree_dir(work_dir)),
@@ -383,6 +392,7 @@ fn session_env(build: &ResolvedBuild, lock: &Lock, opts: &ShellOptions) -> Vec<(
         build,
         opts,
         kernel::source_date_epoch(opts.work_dir, lock),
+        lock.kernel.as_ref().map(|k| k.revision),
         opts.cross_compile,
     );
     env.extend(opts.env.iter().cloned());
@@ -392,28 +402,33 @@ fn session_env(build: &ResolvedBuild, lock: &Lock, opts: &ShellOptions) -> Vec<(
 /// The build variables the stage's own `make` invocations pass, so a command re-run by
 /// hand in here is the command the stage ran.
 ///
-/// Split from [`session_env`] around the two values that need a lock and a work dir, so
-/// the mapping itself is testable from a resolved build alone.
+/// Split from [`session_env`] around the values that need a lock and a work dir, so
+/// the mapping itself is testable from a resolved build alone. `kernel_revision` is the
+/// lock's, and a lock that compiles no kernel has none. A kernel or kmod session then
+/// sets no kbuild variables, as there is no kernel build for it to repeat.
 fn stage_env(
     build: &ResolvedBuild,
     opts: &ShellOptions,
     source_date_epoch: Option<u64>,
+    kernel_revision: Option<u32>,
     cross_compile: Option<&str>,
 ) -> Vec<(String, String)> {
-    let mut env = match opts.stage {
+    let mut env = match (opts.stage, kernel_revision) {
         // A kbuild invocation either way: the kmod stage compiles its modules against
         // the kernel tree with the kernel's own variables.
-        ShellStage::Kernel => kernel::kbuild_env(
+        (ShellStage::Kernel, Some(revision)) => kernel::kbuild_env(
             build,
             source_date_epoch,
+            revision,
             &[&kernel::tree_dir(opts.work_dir)],
         ),
         // The session is not told which module a command will build, so it maps the
         // directory holding every driver tree. A module compiled by hand here therefore
         // records its sources one directory deeper than the stage's own compile does.
-        ShellStage::Kmod => kernel::kbuild_env(
+        (ShellStage::Kmod, Some(revision)) => kernel::kbuild_env(
             build,
             source_date_epoch,
+            revision,
             &[
                 &kernel::tree_dir(opts.work_dir),
                 &crate::build::kmod::stage_dir(opts.work_dir),
@@ -421,11 +436,11 @@ fn stage_env(
         ),
         _ => Vec::new(),
     };
-    // The three stages that compile in the cross root, which is where a toolchain prefix
+    // The stages that compile in the cross root, which is where a toolchain prefix
     // means anything. `None` is a cross root that is already the target's architecture.
     if matches!(
         opts.stage,
-        ShellStage::Kernel | ShellStage::Kmod | ShellStage::Uboot
+        ShellStage::Kernel | ShellStage::Kmod | ShellStage::Uboot | ShellStage::Tfa
     ) {
         if let Some(prefix) = cross_compile {
             env.push(("CROSS_COMPILE".to_string(), prefix.to_string()));
@@ -451,15 +466,27 @@ fn layer_packages(
     Ok(match opts.stage {
         ShellStage::Kernel | ShellStage::Kmod => owned(kernel::BUILD_DEPS),
         ShellStage::Uboot => owned(uboot::UBOOT_BUILD_DEPS),
+        // The TF-A stage layers nothing: the toolchain and `make` are the base's.
+        ShellStage::Tfa => Vec::new(),
         ShellStage::Userspace => userspace::layer_packages(trees),
         ShellStage::Ffmpeg => {
             // Read for its error, not its value: a session in the ffmpeg root is only
             // meaningful over a lock that pins the userspace `.deb`s it layers.
             userspace_pins(lock)?;
+            let suite = lock
+                .rootfs
+                .as_ref()
+                .ok_or(EngineError::MissingPin {
+                    what: "rootfs",
+                    stage: "ffmpeg",
+                })?
+                .suite
+                .as_str();
             ffmpeg::layer_packages(
                 trees,
                 build.image.as_ref().is_some_and(|i| i.ffmpeg_nonfree),
                 build.image.as_ref().map_or(&[][..], |i| &i.ffmpeg_libs),
+                suite,
             )
         }
         // Never layered — the packaging root's contents are fixed at bootstrap.
@@ -662,7 +689,7 @@ mod tests {
         );
         assert_eq!(
             layer(ShellStage::Ffmpeg),
-            ffmpeg::layer_packages(&trees, false, &[])
+            ffmpeg::layer_packages(&trees, false, &[], &lock.rootfs.as_ref().unwrap().suite)
         );
         // The packaging root is never layered.
         assert!(layer(ShellStage::Packaging).is_empty());
@@ -752,6 +779,7 @@ mod tests {
                 &build,
                 &opts(stage, &dir, &[], &[]),
                 Some(1700),
+                Some(1),
                 Some("aarch64-"),
             )
         };
@@ -801,7 +829,13 @@ mod tests {
     fn a_native_root_has_no_toolchain_prefix() {
         let build = rk1_build();
         let dir = PathBuf::from("/nonexistent");
-        let env = stage_env(&build, &opts(ShellStage::Uboot, &dir, &[], &[]), None, None);
+        let env = stage_env(
+            &build,
+            &opts(ShellStage::Uboot, &dir, &[], &[]),
+            None,
+            None,
+            None,
+        );
         assert!(env.is_empty());
     }
 

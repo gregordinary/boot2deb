@@ -4,15 +4,9 @@ description = "Rockchip RK3288 (4x Cortex-A17, Mali-T764)"
 arch        = "armv7"
 dt_dir      = "rockchip"                 # arch/arm/boot/dts/<dt_dir> — same layout as arm64
 
-# No [rkbin]. The RK3288 Chromebooks have no maskrom loader chain and no ATF/DDR
+# No [rkbin]. The RK3288 Chromebooks have no maskrom loader chain and no BL31/DDR
 # blobs: the firmware is coreboot in the board's SPI flash. The depthcharge boot
 # method reads no blob set, and resolution asks for none.
-
-# Media modules. Both RK3288 codec blocks are mainline and neither is disabled in
-# the Veyron device trees, so both inherit rk3288.dtsi's enabled default:
-#   hantro_vpu     — JPEG encode, MPEG-2 / VP8 / H.264 decode
-#   rockchip_vdec  — HEVC decode (the RK3288 variant of rkvdec)
-modules = ["hantro_vpu", "rockchip_vdec"]
 
 # --- What every board in the family gets --------------------------------------
 # The Veyron boards differ from each other in their panel, their input, and their

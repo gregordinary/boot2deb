@@ -34,71 +34,29 @@ pub fn manifest_of(ext4: &Path) -> Result<FileManifest, EngineError> {
     walk(reader, ext4)
 }
 
-/// Read the rootfs file manifest back out of a finished image artifact: the partition its
-/// GPT labels `rootfs`, walked where it sits.
+/// Read the rootfs file manifest back out of a finished image: the partition `part`,
+/// walked where it sits.
 ///
 /// The reader is held to the partition's extent as well as its start, so it reads what a
 /// kernel mounting the partition reads. A read past the partition's end fails as one past
-/// the end of the image does, rather than taking bytes from whatever follows it.
-///
-/// The walk seeks, and a compressed stream cannot. A `.img.xz` or `.img.gz` is therefore
-/// decompressed first, into a sparse temporary file in `scratch`, which is removed when
-/// this returns. A raw `.img` is read in place.
+/// the end of the image does, rather than taking bytes from whatever follows it. Which
+/// partition is the rootfs is the caller's to establish, by the GUID the image's identity
+/// gives it ([`inspect::DiskTable::by_guid`](super::inspect::DiskTable::by_guid)).
 ///
 /// # Errors
 ///
-/// [`EngineError`] when the artifact cannot be read or decompressed, has no rootfs
-/// partition, or holds a tree the manifest format cannot contain.
-pub fn manifest_of_image(artifact: &Path, scratch: &Path) -> Result<FileManifest, EngineError> {
-    let partition = crate::image::inspect::rootfs_partition(artifact)?;
+/// [`EngineError`] when the image cannot be read, or holds a tree the manifest format
+/// cannot contain.
+pub fn manifest_of_image(
+    image: &super::inspect::RawImage,
+    part: &super::inspect::Partition,
+) -> Result<FileManifest, EngineError> {
     let options = ferrosys::ext::OpenOptions::new()
-        .base(partition.start)
-        .len(partition.bytes);
-    if crate::press::write::Container::of(artifact)? == crate::press::write::Container::Raw {
-        let file = std::fs::File::open(artifact).map_err(|s| EngineError::io(artifact, s))?;
-        let reader = Reader::open_with(std::io::BufReader::new(file), &options)
-            .map_err(|e| read_failed(artifact, e))?;
-        return walk(reader, artifact);
-    }
-    let mut raw = tempfile::Builder::new()
-        .prefix(".boot2deb-verify-")
-        .tempfile_in(scratch)
-        .map_err(|s| EngineError::io(scratch, s))?;
-    decompress_sparse(artifact, raw.as_file_mut())?;
-    let reader = Reader::open_with(
-        std::io::BufReader::new(raw.reopen().map_err(|s| EngineError::io(raw.path(), s))?),
-        &options,
-    )
-    .map_err(|e| read_failed(artifact, e))?;
-    walk(reader, artifact)
-}
-
-/// Decompress `artifact` into `out`, seeking past every all-zero chunk rather than
-/// writing it. An image is mostly unallocated filesystem, so the file stays sparse and
-/// the write stays proportional to the data.
-fn decompress_sparse(artifact: &Path, out: &mut std::fs::File) -> Result<(), EngineError> {
-    use std::io::{SeekFrom, Write};
-    let mut decoder = crate::press::write::open_decoded(artifact)?;
-    let mut buf = vec![0u8; 1 << 20];
-    let mut len: u64 = 0;
-    loop {
-        let n = decoder
-            .read(&mut buf)
-            .map_err(|s| EngineError::io(artifact, s))?;
-        if n == 0 {
-            break;
-        }
-        if buf[..n].iter().all(|&b| b == 0) {
-            out.seek(SeekFrom::Current(n as i64))
-                .map_err(|s| EngineError::io(artifact, s))?;
-        } else {
-            out.write_all(&buf[..n])
-                .map_err(|s| EngineError::io(artifact, s))?;
-        }
-        len += n as u64;
-    }
-    // A trailing run of zeros was seeked over, not written, so the length is set.
-    out.set_len(len).map_err(|s| EngineError::io(artifact, s))
+        .base(part.start)
+        .len(part.bytes);
+    let reader = Reader::open_with(std::io::BufReader::new(image.handle()?), &options)
+        .map_err(|e| read_failed(image.artifact(), e))?;
+    walk(reader, image.artifact())
 }
 
 /// Walk an open reader's tree into a manifest. `source` names the image in errors.

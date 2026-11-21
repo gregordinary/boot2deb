@@ -1,6 +1,6 @@
 //! Reads typed config layers from a boot2deb config root (the repo directory
-//! holding `devices/`, `socs/`, `arches/`, `boot-methods/`, `distros/`, `kernels/`,
-//! `kmods/`, `features/`, `recipes/`).
+//! holding `devices/`, `socs/`, `arches/`, `boot-methods/`, `loaders/`, `distros/`,
+//! `kernels/`, `kmods/`, `features/`, `recipes/`).
 //!
 //! **Layer search path & overlays.** A [`ConfigRoot`] holds an *ordered*
 //! search path: the shipped root first, then zero or more out-of-tree overlay
@@ -465,6 +465,20 @@ impl ConfigRoot {
         })
     }
 
+    /// Load the loader layer for `loader` (`loaders/<loader>.toml`).
+    ///
+    /// The [`Loader`] selects the variant, as [`boot_method`](Self::boot_method)'s
+    /// method does: an `esp_size` in `loaders/extlinux.toml` is a parse error naming
+    /// the file.
+    pub fn loader(&self, loader: Loader) -> Result<LoaderLayer, ConfigError> {
+        let rel = format!("loaders/{}.toml", loader.as_str());
+        let (value, path) = self.merge_value("loader", loader.as_str(), &rel)?;
+        Ok(match loader {
+            Loader::Extlinux => LoaderLayer::Extlinux(deserialize_at(value, &path)?),
+            Loader::Efi => LoaderLayer::Efi(deserialize_at(value, &path)?),
+        })
+    }
+
     /// Load `kernels/<id>.toml`, dispatching on its `flavor` to the variant that
     /// flavor's fields belong to. A compiled kernel contains a source ref, a
     /// defconfig, fragments and patch series. A `distro-package` kernel contains only
@@ -593,10 +607,7 @@ impl ConfigRoot {
     pub fn lock(&self, name: &str) -> Result<crate::lock::Lock, ConfigError> {
         let path = self.lock_path(name)?;
         match Self::read_file(&path)? {
-            Some(text) => toml::from_str(&text).map_err(|source| ConfigError::Parse {
-                path: path.display().to_string(),
-                source,
-            }),
+            Some(text) => crate::lock::Lock::from_toml_str(&text, &path.display().to_string()),
             None => Err(ConfigError::NotFound {
                 kind: "lock",
                 name: name.to_string(),
@@ -1710,9 +1721,12 @@ packages = [
         let h: String = std::iter::repeat_n('0', 64).collect();
         format!(
             "[kernel]\nid = \"k\"\nsource = \"s\"\nref = \"v\"\ncommit = \"{c}\"\n\
+             revision = 1\nconfig_sha256 = \"{h}\"\n\
              [uboot]\nsource = \"s\"\nref = \"v\"\ncommit = \"{c}\"\n\
+             revision = 1\nconfig_sha256 = \"{h}\"\n\
              [rootfs]\ndistro = \"debian\"\nsuite = \"forky\"\nmanifest = \"m.pkgs.lock\"\nsource_date_epoch = 1790347034\n\
-             [blobs]\natf = \"a.elf@sha256:{h}\"\ntpl = \"t.bin@sha256:{h}\"\n"
+             [blobs]\nsource = \"s\"\nref = \"master\"\ncommit = \"{c}\"\n\
+             atf = \"a.elf@sha256:{h}\"\ntpl = \"t.bin@sha256:{h}\"\n"
         )
     }
 

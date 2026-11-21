@@ -12,8 +12,8 @@ Each `.gpg` file here is a binary (dearmored) OpenPGP keyring that verifies the
 Keyrings are vendored because the build host is frequently not Debian — an
 Ubuntu, Pop!_OS, or Fedora host has its own distro's apt keys — and a
 third-party repo's key is on no host at all. Vendoring keeps the bootstrap
-reproducible, offline-friendly, and host-distro-independent, the same convention
-as the rkbin blobs under `blobs/<soc>/`.
+reproducible, offline-friendly, and host-distro-independent. A keyring is a trust
+anchor, so it lives beside the code that verifies against it.
 
 A feature that adds an `[[apt_sources]]` stanza names its keyring via
 `signed_by = "<name>.gpg"`, which must exist here: `resolve`, `update`, and

@@ -1,9 +1,11 @@
-//! Initramfs module coverage — the modules a board's initramfs must contain, and the
-//! decision whether a built initrd contains them.
+//! Initramfs coverage: what a built initrd must contain, and the decision whether it
+//! does. That is the modules a board lists, and the firmware the kernel's built-in
+//! drivers need from it.
 //!
-//! Pure: the name rule, the parse of what a built initrd holds, and the verdict. The
+//! Pure: the name rule, the parse of what a built initrd holds, and the verdicts. The
 //! rootfs stage runs a target-side report program over the finished rootfs and hands
-//! its output to [`InitrdReport::parse`]. [`coverage`] then decides.
+//! its output to [`InitrdReport::parse`]. [`coverage`] and [`missing_builtin_firmware`]
+//! then decide.
 //!
 //! The check exists because neither generator makes one. `initramfs-tools` hands each
 //! listed name to `dracut-install` with `-o` (`--optional`). A name it cannot find is
@@ -20,6 +22,17 @@
 //! The list itself is config: [`InitramfsLayer`](crate::model::InitramfsLayer) at the
 //! SoC and device layers, resolved into
 //! [`ResolvedImage::initramfs_modules`](crate::model::ResolvedImage::initramfs_modules).
+//!
+//! The firmware check needs no config. A driver built into the kernel probes while the
+//! initrd is still the root filesystem, and its firmware request reads the initrd. Both
+//! generators install each firmware file a built-in driver declares and the image holds.
+//! `initramfs-tools` does it in `add_builtin_firmware`, and dracut through the module
+//! boot2deb installs for it.
+//!
+//! A declared file the image holds and the initrd lacks therefore means a generator
+//! skipped it. On the RK3588 that is panthor's CSF firmware, and the GPU never appears.
+//! Nothing else catches it before hardware, since `boot2deb try` boots a different
+//! kernel.
 
 use crate::error::ConfigError;
 use std::collections::{BTreeMap, BTreeSet};
@@ -98,10 +111,28 @@ fn in_module_tree(path: &str) -> bool {
 
 /// The firmware-relative path of an initrd entry under the firmware tree, with any
 /// compression suffix removed, or `None` for an entry outside it.
-fn firmware_file(path: &str) -> Option<&str> {
+///
+/// The name is the one a driver requests. The kernel's loader looks for a request in
+/// `updates/<release>/`, `updates/`, `<release>/` and then the firmware root, so an
+/// entry in one of the first three directories answers the name without that
+/// directory. `release` is the kernel the initrd belongs to.
+fn firmware_file<'a>(path: &'a str, release: &str) -> Option<&'a str> {
     let rel = path.trim_start_matches("./").trim_start_matches('/');
     let rel = rel.strip_prefix("usr/").unwrap_or(rel);
-    rel.strip_prefix("lib/firmware/").map(strip_compression)
+    let rel = strip_compression(rel.strip_prefix("lib/firmware/")?);
+    let under = |dir: &str| {
+        rel.strip_prefix(dir)
+            .and_then(|r| r.strip_prefix('/'))
+            .filter(|r| !r.is_empty())
+    };
+    let updates = rel.strip_prefix("updates/");
+    Some(
+        updates
+            .and_then(|r| r.strip_prefix(release).and_then(|r| r.strip_prefix('/')))
+            .or(updates)
+            .or_else(|| under(release))
+            .unwrap_or(rel),
+    )
 }
 
 /// Whether `name` matches the firmware declaration `pattern`.
@@ -132,6 +163,8 @@ fn firmware_matches(pattern: &str, name: &str) -> bool {
 /// | `initrd <path>` | one path the initrd holds, as `lsinitramfs` lists it |
 /// | `builtin <path>` | one line of that kernel's `modules.builtin` |
 /// | `firmware <module path> <file>` | one firmware file a module in the initrd declares |
+/// | `builtin-firmware <module> <file>` | one firmware file a built-in driver declares |
+/// | `image-firmware <file>` | one `builtin-firmware` file the image holds |
 ///
 /// Tagged lines rather than a structured document, because the program is POSIX `sh`
 /// running on the target. A line is what `sed` can prefix without quoting.
@@ -143,8 +176,17 @@ pub struct InitrdReport {
     pub initrd: Vec<String>,
     /// The kernel's `modules.builtin` lines, in file order.
     pub builtin: Vec<String>,
-    /// `(module path, declared firmware)` pairs for the modules the initrd holds.
+    /// `(module path, declared firmware)` pairs for the modules the initrd holds. Empty
+    /// unless the program was asked for them, which a build with an initramfs module
+    /// list does.
     pub firmware: Vec<(String, String)>,
+    /// `(module name, declared firmware)` pairs for the drivers built into the kernel,
+    /// in `modules.builtin.modinfo` order.
+    pub builtin_firmware: Vec<(String, String)>,
+    /// The declared files of [`builtin_firmware`](Self::builtin_firmware) that the
+    /// image holds, in any firmware directory the kernel's loader searches and under
+    /// any compression suffix. Each is named as its driver declares it.
+    pub image_firmware: Vec<String>,
 }
 
 impl InitrdReport {
@@ -177,6 +219,15 @@ impl InitrdReport {
                         .ok_or_else(|| format!("a firmware line without a file: {line:?}"))?;
                     report.firmware.push((module.to_string(), file.to_string()));
                 }
+                "builtin-firmware" => {
+                    let (module, file) = rest.split_once(' ').ok_or_else(|| {
+                        format!("a builtin-firmware line without a file: {line:?}")
+                    })?;
+                    report
+                        .builtin_firmware
+                        .push((module.to_string(), file.to_string()));
+                }
+                "image-firmware" => report.image_firmware.push(rest.to_string()),
                 _ => return Err(format!("an unknown report tag {tag:?} in {line:?}")),
             }
         }
@@ -201,21 +252,25 @@ impl InitrdReport {
             .collect()
     }
 
-    /// Every firmware file the initrd holds, relative to the firmware tree.
+    /// Every firmware file the initrd holds, by the name a driver requests it under.
     fn initrd_firmware(&self) -> BTreeSet<&str> {
         self.initrd
             .iter()
-            .filter_map(|p| firmware_file(p))
+            .filter_map(|p| firmware_file(p, &self.kernel))
             .collect()
     }
 }
 
-/// A module in the initrd whose declared firmware is absent from it.
+/// A module whose firmware is absent from the initrd.
+///
+/// For a module in the initrd ([`Coverage::missing_firmware`]) it lists every file the
+/// module declares. For a built-in driver ([`missing_builtin_firmware`]) it lists the
+/// declared files the image holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MissingFirmware {
     /// The module, as its [`module_key`].
     pub module: String,
-    /// Every file it declares, in declaration order. None of them is in the initrd.
+    /// The files, in declaration order. None of them is in the initrd.
     pub firmware: Vec<String>,
 }
 
@@ -286,6 +341,35 @@ pub fn coverage(listed: &[String], report: &InitrdReport) -> Coverage {
         .map(|(module, firmware)| MissingFirmware { module, firmware })
         .collect();
     verdict
+}
+
+/// The firmware built-in drivers declare that the image holds and the initrd does not,
+/// grouped by driver in the order the kernel lists them.
+///
+/// Empty is the only passing answer. A declaration the image does not hold is not
+/// counted, since a driver declares one file per chip it supports. The image installs
+/// the firmware packages its board needs. Both generators install every declaration the
+/// image holds. Its absence from the initrd is therefore a generator that skipped it,
+/// and the driver's probe from the initrd fails.
+pub fn missing_builtin_firmware(report: &InitrdReport) -> Vec<MissingFirmware> {
+    let in_initrd = report.initrd_firmware();
+    let in_image: BTreeSet<&str> = report.image_firmware.iter().map(String::as_str).collect();
+    let mut missing: Vec<MissingFirmware> = Vec::new();
+    for (module, file) in &report.builtin_firmware {
+        if !in_image.contains(file.as_str()) || in_initrd.contains(file.as_str()) {
+            continue;
+        }
+        let key = module_key(module);
+        match missing.iter_mut().find(|m| m.module == key) {
+            Some(m) if !m.firmware.contains(file) => m.firmware.push(file.clone()),
+            Some(_) => {}
+            None => missing.push(MissingFirmware {
+                module: key,
+                firmware: vec![file.clone()],
+            }),
+        }
+    }
+    missing
 }
 
 #[cfg(test)]
@@ -452,6 +536,7 @@ mod tests {
             "kernel 1\nkernel 2\n",
             "kernel 1\nbogus x\n",
             "kernel 1\nfirmware only-a-module\n",
+            "kernel 1\nbuiltin-firmware only-a-module\n",
             "kernel 1\nuntagged\n",
         ] {
             assert!(InitrdReport::parse(bad).is_err(), "{bad:?}");
@@ -460,6 +545,78 @@ mod tests {
         assert_eq!(ok.kernel, "7.2.8");
         // A path is taken whole to the end of the line.
         assert_eq!(ok.initrd, ["a b"]);
+    }
+
+    const RK1: &str = "7.3.3-1-arm64";
+    const CSF: &str = "arm/mali/arch10.8/mali_csffw.bin";
+
+    /// A report from the RK1's kernel, whose panthor and rockchipdrm are built in: the
+    /// initrd's paths, then each driver's declarations and the ones the image holds.
+    fn builtin_report(initrd: &[&str], image: &[&str]) -> InitrdReport {
+        let mut text = format!("kernel {RK1}\n");
+        for p in initrd {
+            text.push_str(&format!("initrd {p}\n"));
+        }
+        for (m, f) in [
+            ("rockchipdrm", "rockchip/dptx.bin"),
+            ("panthor", "arm/mali/arch14.8/mali_csffw.bin"),
+            ("panthor", CSF),
+        ] {
+            text.push_str(&format!("builtin-firmware {m} {f}\n"));
+        }
+        for f in image {
+            text.push_str(&format!("image-firmware {f}\n"));
+        }
+        InitrdReport::parse(&text).expect("the fixture parses")
+    }
+
+    /// The failure this check exists for: the image holds panthor's CSF firmware and the
+    /// initrd does not. A declaration the image does not hold is not counted, since a
+    /// driver declares one file per GPU it supports.
+    #[test]
+    fn built_in_firmware_the_image_holds_must_be_in_the_initrd() {
+        let r = builtin_report(&[], &[CSF, "rockchip/dptx.bin"]);
+        assert_eq!(
+            missing_builtin_firmware(&r),
+            [
+                MissingFirmware {
+                    module: "rockchipdrm".into(),
+                    firmware: vec!["rockchip/dptx.bin".into()],
+                },
+                MissingFirmware {
+                    module: "panthor".into(),
+                    firmware: vec![CSF.into()],
+                },
+            ]
+        );
+
+        let shipped = builtin_report(
+            &["usr/lib/firmware/arm/mali/arch10.8/mali_csffw.bin.zst"],
+            &[CSF],
+        );
+        assert!(missing_builtin_firmware(&shipped).is_empty());
+
+        // An image that holds none of a driver's firmware owes the initrd none of it.
+        assert!(missing_builtin_firmware(&builtin_report(&[], &[])).is_empty());
+    }
+
+    /// The kernel's loader answers a request from `updates/<release>/`, `updates/` and
+    /// `<release>/` before the firmware root, and both generators install a file where
+    /// they found it. Each of those places, in either `/usr` spelling, is the file.
+    #[test]
+    fn built_in_firmware_counts_in_every_directory_the_loader_searches() {
+        for path in [
+            format!("lib/firmware/updates/{RK1}/{CSF}"),
+            format!("usr/lib/firmware/updates/{CSF}.xz"),
+            format!("./lib/firmware/{RK1}/{CSF}"),
+            format!("usr/lib/firmware/{CSF}"),
+        ] {
+            let r = builtin_report(&[&path], &[CSF]);
+            assert!(missing_builtin_firmware(&r).is_empty(), "{path}");
+        }
+        // Another kernel's directory does not answer this kernel's request.
+        let other = builtin_report(&[&format!("lib/firmware/7.2.9-1-arm64/{CSF}")], &[CSF]);
+        assert_eq!(missing_builtin_firmware(&other).len(), 1);
     }
 
     /// The names a drop-in can contain: what `modules.order` spells, and nothing a word

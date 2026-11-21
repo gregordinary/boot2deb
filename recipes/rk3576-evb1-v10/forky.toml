@@ -13,4 +13,4 @@ image_size = "2G"
 # h96-max-m9/forky for what the bump moves on this SoC, none of which is board-coupled.
 [support]
 status = "expected"
-date   = "2026-10-19"
+date   = "2026-11-07"

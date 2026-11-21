@@ -17,6 +17,8 @@
 //! - Which build points a change reaches ([`affected`]).
 //! - The rules a produced `.deb` is held to ([`debcheck`]), and the record of how the
 //!   newest build of a point ended ([`buildrecord`]).
+//! - What each stage of a point last published ([`inventory`]), and the private
+//!   first-boot credential document ([`credential`]).
 //! - Source-pin durability form ([`sources`]), and re-pin ref selection ([`repin`]).
 //! - The upgrade survey's comparison ([`outdated`]), over the tag spellings
 //!   [`version`] parses.
@@ -34,6 +36,7 @@ pub mod base64;
 pub mod buildpoint;
 pub mod buildrecord;
 pub mod chromeos;
+pub mod credential;
 pub mod datavolume;
 pub mod datetime;
 pub mod debcheck;
@@ -47,6 +50,7 @@ pub mod files;
 pub mod host;
 pub mod hostname;
 pub mod initramfs;
+pub mod inventory;
 pub mod kconfig;
 pub mod loader;
 pub mod lock;

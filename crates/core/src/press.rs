@@ -66,6 +66,17 @@ impl ArtifactRole {
         }
     }
 
+    /// The role's name in the artifact inventory
+    /// ([`inventory`](crate::inventory)): `"combined"`, `"boot"`, `"rootfs"`.
+    #[must_use]
+    pub fn key(self) -> &'static str {
+        match self {
+            ArtifactRole::Combined => "combined",
+            ArtifactRole::Boot => "boot",
+            ArtifactRole::Rootfs => "rootfs",
+        }
+    }
+
     /// What this artifact is, for messages: `"combined image"`, `"boot image"`,
     /// `"rootfs image"`.
     #[must_use]

@@ -292,6 +292,20 @@ pub fn plan_nodes(inputs: &PlanInputs) -> Vec<NodePlan> {
             store,
         ));
     }
+    // TF-A, ahead of the u-boot that packs it, where the lock pins it: the BL31 is
+    // built from source only under the `tfa` provider.
+    if let Some(src) = inputs.build.rkbin_boot().and_then(|boot| boot.bl31.tfa()) {
+        if let Ok(man) = crate::build::tfa::clone_manifest(src, lock) {
+            let out = crate::build::tfa::output_manifest(src, lock, inputs.env).ok();
+            nodes.push(NodePlan::evaluate(
+                crate::build::tfa::NODE,
+                crate::build::tfa::tree_dir(w),
+                &man,
+                out.as_ref(),
+                store,
+            ));
+        }
+    }
     if let Ok(man) = crate::build::uboot::clone_manifest(lock, patch_series(dev, &uboot_fp)) {
         let out = inputs.build.rkbin_boot().and_then(|boot| {
             crate::build::uboot::output_manifest(
@@ -598,6 +612,8 @@ mod tests {
                 source: "ks".into(),
                 reference: "v7.1.1".into(),
                 commit: kernel_commit.into(),
+                revision: 1,
+                config_sha256: "d".repeat(64),
             }),
             patches: Some(PatchesPin {
                 series: vec!["rk3588-accel".into()],
@@ -609,8 +625,11 @@ mod tests {
                 source: "us".into(),
                 reference: "v".into(),
                 commit: "u1".into(),
+                revision: 1,
+                config_sha256: "9".repeat(64),
             }),
             uboot_patches: None,
+            tfa: None,
             userspace: vec![
                 named_pin("mpp", git(mpp_commit)),
                 named_pin("librga", git("rga1")),
@@ -628,7 +647,10 @@ mod tests {
                 source_date_epoch: 1_790_347_034,
             }),
             blobs: Some(BlobsPin {
-                atf: "a".into(),
+                source: "https://example.invalid/rkbin.git".into(),
+                reference: "master".into(),
+                commit: "c".repeat(40),
+                atf: Some("a".into()),
                 tpl: "t".into(),
                 bl32: None,
             }),

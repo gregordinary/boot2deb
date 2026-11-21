@@ -19,8 +19,8 @@
 use crate::config::{default_patches_checkout, fragment_paths};
 use crate::render::{print_columns, short};
 use boot2deb_core::diff::{
-    compare, ArchiveChange, BuilderChanges, Change, KernelChanges, PackageChanges, PatchAxisChange,
-    Report, Section, Side, SourceChange,
+    compare, ArchiveChange, BuilderChanges, Change, ExtraDebChange, KernelChanges, PackageChanges,
+    PatchAxisChange, Report, Section, Side, SourceChange,
 };
 use boot2deb_core::kconfig::FragmentSet;
 use boot2deb_core::model::Overrides;
@@ -48,6 +48,8 @@ pub(crate) enum SectionArg {
     Sources,
     /// rkbin blob pins.
     Blobs,
+    /// Pre-built `.deb`s from outside the suite's archive, by URL or path.
+    ExtraDebs,
     /// What built each side, and the archive state it resolved against.
     Builder,
     /// Every file each image's rootfs holds, from the file manifests two provenance
@@ -110,6 +112,9 @@ pub(crate) fn run(
     }
     if wanted(SectionArg::Blobs) {
         quiet &= section("blobs", &report.blobs, |c| print_blobs(c));
+    }
+    if wanted(SectionArg::ExtraDebs) {
+        quiet &= section("extra debs", &report.extra_debs, |c| print_extra_debs(c));
     }
     if wanted(SectionArg::Builder) {
         quiet &= section("builder", &report.builder, print_builder);
@@ -395,6 +400,7 @@ fn print_kernel(c: &KernelChanges) {
         ("source", &c.source, false),
         ("ref", &c.reference, false),
         ("commit", &c.commit, true),
+        ("revision", &c.revision, false),
         ("package", &c.package, false),
     ] {
         if let Some(change) = change {
@@ -494,26 +500,56 @@ fn print_series_delta(delta: &SeriesDelta) {
 }
 
 fn print_sources(changes: &[SourceChange]) {
-    // Headed, unlike the sections whose first column is a field name: a source row is
-    // three arrows, and which of them is the ref and which the commit is not evident
-    // from an axis that pins a bare sha as its ref.
-    let mut rows = vec![vec![
-        "axis".to_string(),
-        "ref".to_string(),
-        "commit".to_string(),
-    ]];
+    print_columns(&source_rows(changes));
+}
+
+/// The rows [`print_sources`] prints, header first.
+///
+/// Headed, unlike the sections whose first column is a field name: a source row is
+/// three arrows, and which of them is the ref and which the commit is not evident from
+/// an axis that pins a bare sha as its ref. A revision column follows only where a
+/// change has one, since the u-boot axis is the one that does.
+fn source_rows(changes: &[SourceChange]) -> Vec<Vec<String>> {
+    let revisions = changes.iter().any(|c| c.revision.is_some());
+    let mut header = vec!["axis".to_string(), "ref".to_string(), "commit".to_string()];
+    if revisions {
+        header.push("revision".to_string());
+    }
+    let mut rows = vec![header];
     rows.extend(changes.iter().map(|c| {
-        vec![
+        let mut row = vec![
             c.axis.clone(),
             c.reference.as_ref().map(arrow).unwrap_or_default(),
             c.commit.as_ref().map(commit_arrow).unwrap_or_default(),
-        ]
+        ];
+        if revisions {
+            row.push(c.revision.as_ref().map(arrow).unwrap_or_default());
+        }
+        row
     }));
-    print_columns(&rows);
+    rows
 }
 
 fn print_blobs(changes: &[Change]) {
     let rows: Vec<Vec<String>> = changes.iter().map(|c| vec![arrow(c)]).collect();
+    print_columns(&rows);
+}
+
+fn print_extra_debs(changes: &[ExtraDebChange]) {
+    // Headed like the sources: a row whose targets held still leaves that column
+    // blank, and a bare digest arrow does not say which column it is.
+    let mut rows = vec![vec![
+        "deb".to_string(),
+        "sha256".to_string(),
+        "targets".to_string(),
+    ]];
+    rows.extend(changes.iter().map(|c| {
+        vec![
+            c.location.clone(),
+            c.sha256.as_ref().map(commit_arrow).unwrap_or_default(),
+            c.targets.as_ref().map(arrow).unwrap_or_default(),
+        ]
+    }));
     print_columns(&rows);
 }
 
@@ -582,6 +618,38 @@ mod tests {
             published_manifest(Path::new("recipes/asus-c201/forky.lock")),
             None
         );
+    }
+
+    /// The source table gains a revision column only when a row moved one: the u-boot
+    /// package's revision beside its pins, and no empty column on every other diff.
+    #[test]
+    fn the_source_table_shows_a_revision_column_only_when_one_moved() {
+        let change = |from: &str, to: &str| {
+            Some(Change {
+                from: Some(from.into()),
+                to: Some(to.into()),
+            })
+        };
+        let librga = SourceChange {
+            axis: "librga".into(),
+            reference: change("master", "multicore"),
+            commit: None,
+            revision: None,
+        };
+        let rows = source_rows(std::slice::from_ref(&librga));
+        assert_eq!(rows[0], ["axis", "ref", "commit"]);
+        assert_eq!(rows[1].len(), 3);
+
+        let uboot = SourceChange {
+            axis: "uboot".into(),
+            reference: None,
+            commit: None,
+            revision: change("1", "2"),
+        };
+        let rows = source_rows(&[librga, uboot]);
+        assert_eq!(rows[0], ["axis", "ref", "commit", "revision"]);
+        assert_eq!(rows[1][3], "");
+        assert_eq!(rows[2], ["uboot", "", "", "1 -> 2"]);
     }
 
     #[test]

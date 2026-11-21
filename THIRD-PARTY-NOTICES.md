@@ -6,24 +6,30 @@ sources are under the project license stated in the repository root; the
 components below retain the license of their upstream and keep their original
 copyright notices.
 
-## Bootloader firmware blobs — `blobs/rk3588/`, `blobs/rk3576/`
+## Bootloader firmware blobs — fetched from Rockchip's `rkbin`
 
-- `rk3588_bl31_v1.56.elf` — ARM Trusted Firmware BL31 for RK3588 (passed to the
-  u-boot build as `BL31=`).
+This repository contains none of these files. A Rockchip build fetches them at build
+time from Rockchip's `rkbin` repository, <https://github.com/rockchip-linux/rkbin>
+(`bin/rk35`), at the commit its lock pins, and checks each one against the sha256 the
+lock records:
+
+- `rk3588_bl31_v1.56.elf` — Rockchip's prebuilt BL31 for RK3588 (passed to the
+  u-boot build as `BL31=` when the `rkbin` BL31 provider is selected).
 - `rk3588_ddr_lp4_2112MHz_lp5_2400MHz_v1.24.bin` — DDR init TPL for RK3588
   (passed as `ROCKCHIP_TPL=`).
-- `rk3576_bl31_v1.25.elf` — ARM Trusted Firmware BL31 for RK3576 (passed to the
-  u-boot build as `BL31=`).
+- `rk3576_bl31_v1.25.elf` — Rockchip's prebuilt BL31 for RK3576 (passed to the
+  u-boot build as `BL31=` when the `rkbin` BL31 provider is selected).
 - `rk3576_ddr_lp4_2112MHz_lp5_2736MHz_v1.13.bin` — DDR init TPL for RK3576
   (passed as `ROCKCHIP_TPL=`).
 
-Source: Rockchip's `rkbin` repository, <https://github.com/rockchip-linux/rkbin>
-(`bin/rk35`). Rockchip's license grants a non-exclusive right to use, copy, and
-distribute the binaries and to distribute modifications, on the condition that
-copyright, patent, and trademark notices are preserved; the binaries are provided
-as-is with no warranty. Vendoring them here is redistribution under those terms.
+The bootloader images a build produces (`idbloader.img`, `u-boot.itb`, the u-boot
+`.deb`, and every disk image that contains them) contain these binaries. Rockchip's
+license grants a non-exclusive right to use, copy, and distribute the binaries and to
+distribute modifications, on the condition that copyright, patent, and trademark
+notices are preserved; the binaries are provided as-is with no warranty. Distributing
+a built image is redistribution under those terms.
 
-## Boot and kernel-hook scripts — `boot-methods/rockchip-rkbin/overlay/`
+## Boot and kernel-hook scripts — `loaders/extlinux/overlay/`
 
 - `boot/mk_extlinux`
 - `etc/kernel/postinst.d/dtb_cp`
@@ -59,6 +65,15 @@ module, which is the same one on every Broadcom board in the family, and in an
 `overlay-nonfree/` tree rather than `overlay/` so that a `libre` build lays neither of
 them into the image. Provenance, hashes, and why the superficially similar ChromiumOS
 copies are the *wrong module* are recorded in `socs/rk3288/README.md`.
+
+## The BL31 a build compiles
+
+Not a vendored component either. A recipe whose BL31 provider is `tfa` builds Trusted
+Firmware-A from <https://git.trustedfirmware.org/TF-A/trusted-firmware-a.git> at the
+commit its lock pins, and packs the result into `u-boot.itb`. TF-A is under the
+BSD-3-Clause license, which requires its copyright notice to accompany a binary
+distribution. The u-boot `.deb` therefore reproduces TF-A's `docs/license.rst` in its
+`copyright` file, beside the ref and commit it was built from.
 
 ## The FFmpeg a build produces
 

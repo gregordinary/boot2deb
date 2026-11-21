@@ -1,0 +1,17 @@
+# Every wired interface takes its address by DHCP, through systemd-networkd.
+#
+# `e*` matches every Ethernet name, the kernel's eth* and systemd's predictable en*
+# alike, so the interface is configured whichever name it has on this boot. IPv6
+# autoconfiguration by router advertisement stays on, as networkd's default.
+# `optional` keeps network-online.target from waiting for an interface with no cable
+# in it. A static_ip from the boot2deb seed is written to 60-boot2deb-seed.yaml, which
+# overrides this definition by its ID.
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    wired:
+      match:
+        name: "e*"
+      dhcp4: true
+      optional: true

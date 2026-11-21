@@ -3,9 +3,10 @@
 //! `sgdisk`/`parted`/`cgpt` shell-out.
 //!
 //! Two shapes, one writer. A `rockchip-rkbin` image has a single Linux-filesystem
-//! partition, and its bootloader lives in a raw gap *outside* the table. A
-//! `depthcharge` image adds a **ChromeOS kernel partition** ahead of it, which is
-//! the entire boot mechanism on that board. The firmware scans every medium's GPT
+//! partition, and its bootloader lives in a raw gap *outside* the table. Under the
+//! `efi` loader an **EFI system partition** precedes the rootfs. A `depthcharge`
+//! image adds a **ChromeOS kernel partition** ahead of it instead, which is the
+//! entire boot mechanism on that board. The firmware scans every medium's GPT
 //! for that type GUID, and picks among the candidates by the entry's attribute
 //! bits.
 //! Both are ordinary GPT entries, so the type GUID (`partition_types::CHROME_KERNEL`)
@@ -18,7 +19,9 @@
 //! the file's length.
 
 use crate::error::EngineError;
+use crate::image::esp::ESP_PARTLABEL;
 use crate::image::geometry::{BootGeometry, Geometry, SECTOR};
+use crate::image::ImageIdentity;
 use boot2deb_core::chromeos::MAX_KPART_SLOTS;
 use boot2deb_core::press::{SEED_PARTITION_BYTES, SEED_PARTLABEL};
 use gpt::disk::LogicalBlockSize;
@@ -44,14 +47,16 @@ const KPART_NAMES: [&str; MAX_KPART_SLOTS as usize] = ["KERN-A", "KERN-B", "KERN
 /// Required under `rockchip-rkbin`. U-Boot's `bootflow scan`, which is
 /// `bootcmd` on every board this builds, considers **only** partitions having
 /// this bit, and when no partition on the medium has it falls back to
-/// scanning partition 1 alone. The rootfs is what holds
-/// `/boot/extlinux/extlinux.conf`, and it is not partition 1 — the seed is — so
-/// an unmarked table is a board that reaches its prompt and finds no bootflow.
+/// scanning partition 1 alone. Partition 1 is the seed, so an unmarked table is
+/// a board that reaches its prompt and finds no bootflow.
 ///
-/// Set on the rootfs of every image, whatever the boot method. It survives the
-/// first-boot grow (`sfdisk -N` leaves fields the descriptor does not name
-/// alone), and depthcharge firmware ignores it: there the selection is the type
-/// GUID plus the ChromeOS attribute bits on the kernel slots.
+/// Set on the one partition holding what the scan must find. Under the `efi` loader
+/// that is the EFI system partition, where u-boot's EFI boot method finds the loader
+/// at the removable-media path. Otherwise it is the rootfs, which holds
+/// `/boot/extlinux/extlinux.conf`. The rootfs keeps it through the first-boot grow
+/// (`sfdisk -N` leaves fields the descriptor does not name alone), and depthcharge
+/// firmware ignores it: there the selection is the type GUID plus the ChromeOS
+/// attribute bits on the kernel slots.
 const LEGACY_BIOS_BOOTABLE: u64 = 1 << 2;
 
 /// One partition to write: everything the GPT entry needs.
@@ -66,8 +71,9 @@ struct PartitionSpec<'a> {
     length_lba: u64,
     /// Type GUID.
     part_type: partition_types::Type,
-    /// The 64-bit attribute word: [`LEGACY_BIOS_BOOTABLE`] on the rootfs, the
-    /// boot selection itself on a ChromeOS kernel partition, zero on the seed.
+    /// The 64-bit attribute word: [`LEGACY_BIOS_BOOTABLE`] on the partition a
+    /// scanning bootloader must open, the boot selection itself on a ChromeOS kernel
+    /// partition, zero on the seed.
     flags: u64,
     /// The deterministic partition GUID (a rootfs partition's is its PARTUUID).
     guid: Uuid,
@@ -78,29 +84,28 @@ struct PartitionSpec<'a> {
 ///
 /// The rootfs partition spans `[rootfs_first_lba, rootfs_first_lba +
 /// rootfs_length_lba)` — the exact range the ext4 filesystem is spliced into —
-/// typed `LINUX_FS`, having `rootfs_guid` as its PARTUUID and the
-/// [`LEGACY_BIOS_BOOTABLE`] attribute that points a scanning bootloader at it.
-/// Under `depthcharge` a ChromeOS kernel partition precedes it, having the
-/// attribute bits the firmware selects on; under `rockchip-rkbin` the bootloader
-/// payloads live in the raw gap ahead of the table and are not GPT entries at all.
+/// typed `LINUX_FS`, having the identity's rootfs PARTUUID. Under the `efi` loader an
+/// EFI system partition precedes it, typed as one and having the
+/// [`LEGACY_BIOS_BOOTABLE`] attribute that points a scanning bootloader at it; otherwise
+/// the rootfs has that attribute. Under `depthcharge` a ChromeOS kernel partition
+/// precedes the rootfs, having the attribute bits the firmware selects on; under
+/// `rockchip-rkbin` the bootloader payloads live in the raw gap ahead of the table and
+/// are not GPT entries at all.
 ///
-/// `disk_guid` and `rootfs_guid` are the deterministic identifiers the caller
-/// derived from the lock: the `gpt` crate otherwise draws both from
-/// `/dev/urandom` (the disk GUID at header build, the partition GUID inside
-/// `add_partition_at`), which would make the GPT region differ on every rebuild.
-/// Setting both makes the whole table a function of the lock — and, on depthcharge,
-/// makes the rootfs PARTUUID knowable *before* the rootfs is built, which is what
-/// lets its `/etc/fstab` name the partition the signed kernel will root on.
+/// Every GUID comes from `identity`, which the caller derived from the lock: the `gpt`
+/// crate otherwise draws them from `/dev/urandom` (the disk GUID at header build, each
+/// partition GUID inside `add_partition_at`), which would make the GPT region differ on
+/// every rebuild. Setting them makes the whole table a function of the lock — and, on
+/// depthcharge, makes the rootfs PARTUUID knowable *before* the rootfs is built, which
+/// is what lets its `/etc/fstab` name the partition the signed kernel will root on.
 pub(crate) fn write_table(
     image: &Path,
     geom: &Geometry,
     rootfs_label: &str,
-    disk_guid: Uuid,
-    rootfs_guid: Uuid,
-    seed_guid: Uuid,
-    kpart_guids: &[Uuid],
+    identity: &ImageIdentity,
 ) -> Result<(), EngineError> {
-    let mut parts = Vec::with_capacity(usize::from(MAX_KPART_SLOTS) + 2);
+    let disk_guid = identity.disk_guid;
+    let mut parts = Vec::with_capacity(usize::from(MAX_KPART_SLOTS) + 3);
     // The seed sits below the kernel slots on depthcharge and below the rootfs
     // on rkbin (see the geometry), so pushing it here keeps the list in on-disk
     // order for the former; the sort below handles the latter.
@@ -114,7 +119,7 @@ pub(crate) fn write_table(
         // auto-mount a FAT volume under. The device side finds it by its label.
         part_type: partition_types::BASIC,
         flags: 0,
-        guid: seed_guid,
+        guid: identity.seed_partuuid,
     });
     if let BootGeometry::Kpart { ref slots } = geom.boot {
         for (i, slot) in slots.iter().enumerate() {
@@ -129,9 +134,21 @@ pub(crate) fn write_table(
                 length_lba: slot.length_lba,
                 part_type: partition_types::CHROME_KERNEL,
                 flags: slot.flags,
-                guid: kpart_guids[i],
+                guid: identity.kpart_guids[i],
             });
         }
+    }
+    if let Some(esp) = geom.esp {
+        parts.push(PartitionSpec {
+            index: 0,
+            name: ESP_PARTLABEL,
+            first_lba: esp.first_lba(),
+            length_lba: esp.length_lba(),
+            part_type: partition_types::EFI,
+            // The partition u-boot's EFI boot method opens — see the constant.
+            flags: LEGACY_BIOS_BOOTABLE,
+            guid: identity.esp_partuuid,
+        });
     }
     parts.push(PartitionSpec {
         index: 0,
@@ -139,9 +156,14 @@ pub(crate) fn write_table(
         first_lba: geom.rootfs_first_lba,
         length_lba: geom.rootfs_length_lba,
         part_type: partition_types::LINUX_FS,
-        // The partition a scanning bootloader must look inside — see the constant.
-        flags: LEGACY_BIOS_BOOTABLE,
-        guid: rootfs_guid,
+        // The partition a scanning bootloader must look inside, unless an ESP is the
+        // one it opens — see the constant.
+        flags: if geom.esp.is_some() {
+            0
+        } else {
+            LEGACY_BIOS_BOOTABLE
+        },
+        guid: identity.rootfs_partuuid,
     });
     // Table order = disk order, whatever the boot method: an operator reading
     // `lsblk` sees partitions in the order they sit on the medium, and the
@@ -230,25 +252,29 @@ mod tests {
     }
 
     fn rkbin_boot() -> ResolvedBoot {
-        ResolvedBoot::RockchipRkbin(ResolvedRkbinBoot {
+        ResolvedBoot::RockchipRkbin(Box::new(ResolvedRkbinBoot {
             uboot_defconfig: "d".into(),
             uboot_source: "s".into(),
             uboot_ref: "v1".into(),
             uboot_series: None,
             uboot_patches_url: None,
             uboot_patches_ref: None,
+            bl31: boot2deb_core::model::Bl31::Rkbin { file: "atf".into() },
             rkbin: Rkbin {
-                atf: "atf".into(),
                 tpl: "tpl".into(),
                 bl32: None,
-                upstream: None,
+                upstream: boot2deb_core::RkbinUpstream {
+                    git: "https://example.invalid/rkbin.git".into(),
+                    git_ref: "master".into(),
+                    dir: "bin".into(),
+                },
             },
             offsets: Offsets {
                 idbloader: "32KiB".into(),
                 uboot_itb: "8MiB".into(),
-                rootfs: "16MiB".into(),
+                partitions: "16MiB".into(),
             },
-        })
+        }))
     }
 
     fn depthcharge_boot() -> ResolvedBoot {
@@ -272,12 +298,25 @@ mod tests {
     const DISK_GUID: Uuid = Uuid::from_bytes([0xa1; 16]);
     const ROOTFS_GUID: Uuid = Uuid::from_bytes([0xb2; 16]);
     const SEED_GUID: Uuid = Uuid::from_bytes([0x5e; 16]);
+    const ESP_GUID: Uuid = Uuid::from_bytes([0xe5; 16]);
     const KPART_GUIDS: [Uuid; MAX_KPART_SLOTS as usize] = [
         Uuid::from_bytes([0xc3; 16]),
         Uuid::from_bytes([0xc4; 16]),
         Uuid::from_bytes([0xc5; 16]),
         Uuid::from_bytes([0xc6; 16]),
     ];
+
+    /// The fixed identifiers every table below is written with.
+    fn identity() -> ImageIdentity {
+        ImageIdentity {
+            ext4_uuid: Uuid::from_bytes([0xe4; 16]),
+            disk_guid: DISK_GUID,
+            rootfs_partuuid: ROOTFS_GUID,
+            seed_partuuid: SEED_GUID,
+            esp_partuuid: ESP_GUID,
+            kpart_guids: KPART_GUIDS,
+        }
+    }
 
     /// With the disk + partition GUIDs fixed, the whole GPT-bearing image is
     /// byte-identical across independent writes — the last random inputs in the
@@ -287,30 +326,12 @@ mod tests {
     fn gpt_bytes_are_reproducible_with_fixed_guids() {
         let tmp = tempfile::tempdir().unwrap();
         let size = 192 * 1024 * 1024;
-        let geom = Geometry::resolve(&rkbin_boot(), 192 << 20).unwrap();
+        let geom = Geometry::resolve(&rkbin_boot(), None, 192 << 20).unwrap();
 
         let a = sized_image(tmp.path(), "a.img", size);
         let b = sized_image(tmp.path(), "b.img", size);
-        write_table(
-            &a,
-            &geom,
-            "rootfs",
-            DISK_GUID,
-            ROOTFS_GUID,
-            SEED_GUID,
-            &KPART_GUIDS,
-        )
-        .unwrap();
-        write_table(
-            &b,
-            &geom,
-            "rootfs",
-            DISK_GUID,
-            ROOTFS_GUID,
-            SEED_GUID,
-            &KPART_GUIDS,
-        )
-        .unwrap();
+        write_table(&a, &geom, "rootfs", &identity()).unwrap();
+        write_table(&b, &geom, "rootfs", &identity()).unwrap();
 
         let ba = std::fs::read(&a).unwrap();
         assert_eq!(
@@ -363,22 +384,13 @@ mod tests {
     fn the_rootfs_is_the_bootable_partition_and_the_seed_is_not() {
         let tmp = tempfile::tempdir().unwrap();
         for (name, boot) in [("rkbin", rkbin_boot()), ("depthcharge", depthcharge_boot())] {
-            let geom = Geometry::resolve(&boot, 192 << 20).unwrap();
+            let geom = Geometry::resolve(&boot, None, 192 << 20).unwrap();
             let img = sized_image(
                 tmp.path(),
                 &format!("{name}-boot-flag.img"),
                 geom.total_size,
             );
-            write_table(
-                &img,
-                &geom,
-                "rootfs",
-                DISK_GUID,
-                ROOTFS_GUID,
-                SEED_GUID,
-                &KPART_GUIDS,
-            )
-            .unwrap();
+            write_table(&img, &geom, "rootfs", &identity()).unwrap();
 
             let disk = GptConfig::new()
                 .writable(false)
@@ -426,20 +438,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         for (name, boot) in [("rkbin", rkbin_boot()), ("depthcharge", depthcharge_boot())] {
             let rootfs_bytes = 256 * 1024 * 1024;
-            let geom = Geometry::around_rootfs(&boot, rootfs_bytes).unwrap();
+            let geom = Geometry::around_rootfs(&boot, None, rootfs_bytes).unwrap();
             let img = sized_image(tmp.path(), &format!("{name}-fit.img"), geom.total_size);
             // The writer refuses a partition past the usable range, so reaching here at
             // all is the assertion: the disk is one sector-perfect fit.
-            write_table(
-                &img,
-                &geom,
-                "rootfs",
-                DISK_GUID,
-                ROOTFS_GUID,
-                SEED_GUID,
-                &KPART_GUIDS,
-            )
-            .unwrap_or_else(|e| panic!("{name}: fitted geometry rejected by the GPT writer: {e}"));
+            write_table(&img, &geom, "rootfs", &identity()).unwrap_or_else(|e| {
+                panic!("{name}: fitted geometry rejected by the GPT writer: {e}")
+            });
 
             let disk = GptConfig::new()
                 .writable(false)
@@ -486,18 +491,9 @@ mod tests {
     fn a_depthcharge_table_contains_a_bootable_kernel_slot_and_an_unbootable_spare() {
         let tmp = tempfile::tempdir().unwrap();
         let size = 512 * 1024 * 1024;
-        let geom = Geometry::resolve(&depthcharge_boot(), 512 << 20).unwrap();
+        let geom = Geometry::resolve(&depthcharge_boot(), None, 512 << 20).unwrap();
         let img = sized_image(tmp.path(), "c201.img", size);
-        write_table(
-            &img,
-            &geom,
-            "rootfs",
-            DISK_GUID,
-            ROOTFS_GUID,
-            SEED_GUID,
-            &KPART_GUIDS,
-        )
-        .unwrap();
+        write_table(&img, &geom, "rootfs", &identity()).unwrap();
 
         let disk = GptConfig::new()
             .writable(false)
@@ -573,5 +569,69 @@ mod tests {
             root.part_guid, ROOTFS_GUID,
             "the PARTUUID the signed kernel cmdline roots on"
         );
+    }
+
+    /// Under the efi loader the ESP sits between the seed and the rootfs, typed as an
+    /// EFI system partition and having the derived GUID, and it is the one partition
+    /// marked bootable: u-boot's scan then opens it and finds the loader, and never
+    /// opens the rootfs, which holds no extlinux menu.
+    #[test]
+    fn under_the_efi_loader_the_esp_is_the_bootable_partition() {
+        let tmp = tempfile::tempdir().unwrap();
+        let geom = Geometry::resolve(&rkbin_boot(), Some(64 << 20), 512 << 20).unwrap();
+        let img = sized_image(tmp.path(), "efi.img", geom.total_size);
+        write_table(&img, &geom, "rootfs", &identity()).unwrap();
+
+        let disk = GptConfig::new()
+            .writable(false)
+            .logical_block_size(LogicalBlockSize::Lb512)
+            .open(&img)
+            .unwrap();
+        let parts = disk.partitions();
+        assert_eq!(parts.len(), 3, "seed + esp + rootfs");
+        assert_eq!(parts.get(&1).unwrap().name, SEED_PARTLABEL);
+        let esp = parts.get(&2).unwrap();
+        assert_eq!(esp.name, ESP_PARTLABEL);
+        assert_eq!(esp.part_type_guid, partition_types::EFI);
+        assert_eq!(esp.first_lba, 16 * 1024 * 1024 / 512);
+        assert_eq!(esp.last_lba - esp.first_lba + 1, 64 * 1024 * 1024 / 512);
+        assert_eq!(esp.part_guid, ESP_GUID);
+        assert_eq!(esp.flags, LEGACY_BIOS_BOOTABLE);
+        let rootfs = parts.get(&3).unwrap();
+        assert_eq!(
+            rootfs.first_lba,
+            80 * 1024 * 1024 / 512,
+            "the rootfs follows the ESP"
+        );
+        assert_eq!(rootfs.flags, 0, "the ESP is the partition u-boot opens");
+        assert_eq!(rootfs.part_guid, ROOTFS_GUID);
+    }
+
+    /// The rootfs's entry number the boot region reports is the one the table gives it,
+    /// in every layout: GRUB's core image finds the rootfs by that number.
+    #[test]
+    fn the_rootfs_index_the_region_reports_is_the_one_the_table_writes() {
+        let tmp = tempfile::tempdir().unwrap();
+        for (name, boot, esp) in [
+            ("rkbin", rkbin_boot(), None),
+            ("rkbin-efi", rkbin_boot(), Some(64 << 20)),
+            ("depthcharge", depthcharge_boot(), None),
+        ] {
+            let geom = Geometry::resolve(&boot, esp, 512 << 20).unwrap();
+            let region = crate::image::geometry::BootRegion::resolve(&boot, esp).unwrap();
+            let img = sized_image(tmp.path(), &format!("{name}-index.img"), geom.total_size);
+            write_table(&img, &geom, "rootfs", &identity()).unwrap();
+            let disk = GptConfig::new()
+                .writable(false)
+                .logical_block_size(LogicalBlockSize::Lb512)
+                .open(&img)
+                .unwrap();
+            let (index, _) = disk
+                .partitions()
+                .iter()
+                .find(|(_, p)| p.name == "rootfs")
+                .unwrap();
+            assert_eq!(*index, region.rootfs_index(), "{name}");
+        }
     }
 }

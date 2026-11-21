@@ -24,10 +24,10 @@ device       = "turing-rk1"
 deliverable  = "uboot"
 uboot_series = "turing-rk1-util"
 
-# Built clean from mainline u-boot with the two board defconfig patches, and not
-# yet exercised on hardware in this form. The commands it adds are stock u-boot
-# ones whose drivers the board defconfig already enabled, but no RK1 has been
-# booted on this image, which is what "expected" says.
+# Built clean from mainline u-boot with the RK3588 SPL clock fix and the two board
+# defconfig patches, and not yet exercised on hardware in this form. The commands it
+# adds are stock u-boot ones whose drivers the board defconfig already enabled, but
+# no RK1 has been booted on this image, which is what "expected" says.
 [support]
 status = "expected"
-date   = "2026-08-05"
+date   = "2026-11-21"

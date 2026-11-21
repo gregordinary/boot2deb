@@ -29,11 +29,6 @@ use boot2deb_core::model::ResolvedCompiledKernel;
 use boot2deb_core::ResolvedBuild;
 use std::path::{Path, PathBuf};
 
-/// Debian package build revision baked into `LOCALVERSION` and the changelog.
-/// Fixed at 1: a boot2deb build is a fresh reproduction, not an incrementing
-/// series of packagings.
-const BUILD_VERSION: u32 = 1;
-
 /// The artifact-store node this stage keys its outputs under, and the label
 /// [`why-rebuild`](crate::plan) predicts against.
 ///
@@ -246,8 +241,9 @@ pub fn build_kernel(
 
     // Deterministic build timestamp from the locked base commit, not the tree's
     // README mtime (= clone time) or HEAD (a patch commit stamped now).
-    let epoch = crate::git::commit_epoch(&tree, &build::kernel_pin(lock)?.commit).ok();
-    compile(build, env, &cr, &tree, epoch, &step)?;
+    let pin = build::kernel_pin(lock)?;
+    let epoch = crate::git::commit_epoch(&tree, &pin.commit).ok();
+    compile(build, env, &cr, &tree, epoch, pin.revision, &step)?;
 
     let artifacts = collect(opts, &step)?;
 
@@ -333,8 +329,9 @@ pub fn ensure_module_tree(
         binds: &binds,
     };
     configure(build, kernel, opts, env, &cr, &tree, step)?;
-    let epoch = crate::git::commit_epoch(&tree, &build::kernel_pin(lock)?.commit).ok();
-    compile(build, env, &cr, &tree, epoch, step)?;
+    let pin = build::kernel_pin(lock)?;
+    let epoch = crate::git::commit_epoch(&tree, &pin.commit).ok();
+    compile(build, env, &cr, &tree, epoch, pin.revision, step)?;
     Ok(tree)
 }
 
@@ -400,8 +397,9 @@ pub fn build_dtb(
         "--".to_string(),
         build.kernel_dtb.clone(),
     ];
-    let epoch = crate::git::commit_epoch(&tree, &build::kernel_pin(lock)?.commit).ok();
-    let mut vars = kbuild_env(build, epoch, &[&tree]);
+    let pin = build::kernel_pin(lock)?;
+    let epoch = crate::git::commit_epoch(&tree, &pin.commit).ok();
+    let mut vars = kbuild_env(build, epoch, pin.revision, &[&tree]);
     vars.extend(cross_env(env));
     build::run_in_root(&cr, &tree, &argv, &vars, "make <board>.dtb", &step)?;
 
@@ -461,7 +459,10 @@ pub fn output_manifest(
         .fold_scalar("base_defconfig", &kernel.base_defconfig)
         .fold_scalar("kernel_arch", &build.kernel_arch)
         .fold_scalar("kbuild_image", &build.kbuild_image)
-        .fold_scalar("localversion", &localversion(build))
+        .fold_scalar(
+            "localversion",
+            &localversion(build, build::kernel_pin(lock)?.revision),
+        )
         .fold_scalar("cross", env.cross_compile.as_deref().unwrap_or(""))
         .fold_scalar("toolchain", &env.toolchain_id)
         // The base root's identity above covers what the toolchain is; this covers what
@@ -795,6 +796,7 @@ fn compile(
     cr: &CompileRoot,
     tree: &Path,
     source_date_epoch: Option<u64>,
+    revision: u32,
     step: &Step,
 ) -> Result<(), EngineError> {
     let mut argv = vec![
@@ -804,7 +806,7 @@ fn compile(
         format!("-j{}", env.jobs()),
         "bindeb-pkg".to_string(),
         format!("KBUILD_IMAGE={}", build.kbuild_image),
-        format!("LOCALVERSION={}", localversion(build)),
+        format!("LOCALVERSION={}", localversion(build, revision)),
     ];
     // `dpkg-checkbuilddeps` asks a question this build answers elsewhere, and better.
     // Its oracle is a *dpkg database*, and the database it reads is the
@@ -829,7 +831,7 @@ fn compile(
         write_changelog_hook(tree.parent().expect("the kernel tree sits in its work dir"))?;
     }
     argv.push(format!("DPKG_FLAGS={}", dpkg_flags(source_date_epoch)));
-    let mut vars = kbuild_env(build, source_date_epoch, &[tree]);
+    let mut vars = kbuild_env(build, source_date_epoch, revision, &[tree]);
     vars.extend(cross_env(env));
     build::run_in_root(cr, tree, &argv, &vars, "make bindeb-pkg", step)
 }
@@ -891,9 +893,11 @@ fn collect(opts: &KernelOptions, step: &Step) -> Result<KernelArtifacts, EngineE
     })
 }
 
-/// The Debian `LOCALVERSION` suffix, e.g. `-1-arm64`.
-fn localversion(build: &ResolvedBuild) -> String {
-    format!("-{BUILD_VERSION}-{}", build.arch)
+/// The Debian `LOCALVERSION` suffix, `-<revision>-<arch>` (`-1-arm64`), from the lock's
+/// [`KernelPin::revision`](boot2deb_core::lock::KernelPin::revision). The release it
+/// completes names the kernel's packages, so a new revision installs beside the last.
+fn localversion(build: &ResolvedBuild, revision: u32) -> String {
+    format!("-{revision}-{}", build.arch)
 }
 
 /// The reproducibility + packaging env passed to `make bindeb-pkg`. Pure so the
@@ -907,9 +911,14 @@ fn localversion(build: &ResolvedBuild) -> String {
 /// that covers that debug information. With the work directory's absolute path in it,
 /// each work directory gives every module and the kernel image a build ID of its own.
 /// Nothing they execute differs.
+///
+/// `revision` is the lock's [`KernelPin::revision`](boot2deb_core::lock::KernelPin::revision).
+/// As `KBUILD_BUILD_VERSION` it is the `#N` of `uname -v` and the Debian revision the
+/// packages are versioned with (`<version>-<N>`), matching the `N` of the release.
 pub fn kbuild_env(
     build: &ResolvedBuild,
     source_date_epoch: Option<u64>,
+    revision: u32,
     trees: &[&Path],
 ) -> Vec<(String, String)> {
     let mut env = vec![
@@ -929,10 +938,7 @@ pub fn kbuild_env(
         ),
         ("KBUILD_BUILD_USER".to_string(), "boot2deb".to_string()),
         ("KBUILD_BUILD_HOST".to_string(), "boot2deb".to_string()),
-        (
-            "KBUILD_BUILD_VERSION".to_string(),
-            BUILD_VERSION.to_string(),
-        ),
+        ("KBUILD_BUILD_VERSION".to_string(), revision.to_string()),
     ];
     if let Some(epoch) = source_date_epoch {
         env.push(("SOURCE_DATE_EPOCH".to_string(), epoch.to_string()));
@@ -988,6 +994,8 @@ mod tests {
                 source: "ks".into(),
                 reference: "v".into(),
                 commit: kernel_commit.into(),
+                revision: 1,
+                config_sha256: "d".repeat(64),
             }),
             patches: Some(PatchesPin {
                 series: vec!["rk3588-accel".into()],
@@ -999,8 +1007,11 @@ mod tests {
                 source: "us".into(),
                 reference: "v".into(),
                 commit: "u".into(),
+                revision: 1,
+                config_sha256: "9".repeat(64),
             }),
             uboot_patches: None,
+            tfa: None,
             userspace: vec![
                 named_pin("mpp", git("m")),
                 named_pin("librga", git("r")),
@@ -1018,7 +1029,10 @@ mod tests {
                 source_date_epoch: 1_790_347_034,
             }),
             blobs: Some(BlobsPin {
-                atf: "a".into(),
+                source: "https://example.invalid/rkbin.git".into(),
+                reference: "master".into(),
+                commit: "c".repeat(40),
+                atf: Some("a".into()),
                 tpl: "t".into(),
                 bl32: None,
             }),
@@ -1361,9 +1375,20 @@ mod tests {
         assert_ne!(base, sig(&lock, &env("gcc-1")));
     }
 
+    /// The release suffix is the lock's revision and the arch, so a re-pinned kernel at
+    /// revision 2 is a different release, and different packages, from revision 1.
     #[test]
-    fn localversion_uses_build_version_and_arch() {
-        assert_eq!(localversion(&rk1_build()), "-1-arm64");
+    fn localversion_is_the_lock_revision_and_the_arch() {
+        assert_eq!(localversion(&rk1_build(), 1), "-1-arm64");
+        assert_eq!(localversion(&rk1_build(), 2), "-2-arm64");
+    }
+
+    /// The Debian revision the packages are versioned with is the lock's, so the deb
+    /// version `<version>-<N>` moves with the release `<version>-<N>-<arch>`.
+    #[test]
+    fn kbuild_build_version_is_the_lock_revision() {
+        let env = kbuild_env(&rk1_build(), None, 3, &[]);
+        assert!(env.contains(&("KBUILD_BUILD_VERSION".to_string(), "3".to_string())));
     }
 
     /// Every compiled tree is mapped out of the debug information, for C and assembler
@@ -1374,6 +1399,7 @@ mod tests {
         let env = kbuild_env(
             &rk1_build(),
             None,
+            1,
             &[Path::new("/work/linux"), Path::new("/work/kmod/aic8800")],
         );
         let want = "-fdebug-prefix-map=/work/linux=. -fdebug-prefix-map=/work/kmod/aic8800=.";
@@ -1433,7 +1459,7 @@ mod tests {
     #[test]
     fn kbuild_env_sets_arch_and_optional_epoch() {
         let build = rk1_build();
-        let env = kbuild_env(&build, Some(1_700_000_000), &[Path::new("/work/linux")]);
+        let env = kbuild_env(&build, Some(1_700_000_000), 1, &[Path::new("/work/linux")]);
         assert!(env.contains(&("ARCH".to_string(), "arm64".to_string())));
         assert!(env
             .iter()
@@ -1445,7 +1471,7 @@ mod tests {
             "Tue Nov 14 22:13:20 UTC 2023".to_string()
         )));
         // No epoch → neither var is set.
-        let env = kbuild_env(&build, None, &[]);
+        let env = kbuild_env(&build, None, 1, &[]);
         assert!(!env.iter().any(|(k, _)| k == "SOURCE_DATE_EPOCH"));
         assert!(!env.iter().any(|(k, _)| k == "KBUILD_BUILD_TIMESTAMP"));
         // And with no tree named, no prefix map either.
@@ -1464,7 +1490,7 @@ mod tests {
     /// a literal, so the kernel path cannot drift from the u-boot and kmod paths.
     #[test]
     fn the_kernel_debs_state_their_compressor() {
-        let env = kbuild_env(&rk1_build(), None, &[]);
+        let env = kbuild_env(&rk1_build(), None, 1, &[]);
         assert_eq!(
             env.iter()
                 .find(|(k, _)| k == "KDEB_COMPRESS")

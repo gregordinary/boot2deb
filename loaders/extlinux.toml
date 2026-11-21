@@ -1,0 +1,13 @@
+# loaders/extlinux.toml — u-boot's distro boot reads /boot/extlinux/extlinux.conf off the
+# rootfs and starts the kernel it names, with the board DTB beside it on /boot.
+#
+# The wiring is overlay files (loaders/extlinux/overlay). Kernel hooks copy the board
+# DTB into /boot and regenerate the menu through /boot/mk_extlinux whenever a kernel is
+# installed or removed, so an apt kernel upgrade on the board keeps the menu current.
+description = "u-boot distro boot: /boot/extlinux/extlinux.conf on the rootfs"
+
+# The menu u-boot reads. The DTB check is emitted by the build, which knows the
+# resolved kernel_dtb.
+[[expect]]
+check = "file"
+path  = "/boot/extlinux/extlinux.conf"

@@ -62,13 +62,28 @@ created, since that is always a typo.
 
 ## The password
 
-Each built image gets its own randomly generated password for `debian`, printed on the
-build's last lines and stored in the `.provenance.toml` beside the image. It is
-**expired**, so the first login has to replace it.
+Each built image gets its own randomly generated password for `debian`. The build writes
+it to one file beside the image, `<stem>.credentials.toml`, created readable by you only,
+and names that file on its last lines. The password itself is printed nowhere else. It is
+not in the build's output or its `--json` stream. Nor is it in the provenance manifest,
+the bills of materials, or the artifact inventory, which are records made to be kept and
+shared. It is **expired**, so the first login has to replace it.
 
 ```
-first-boot pw : 7kQmR3xLpAvB  (user debian, expired — change at first login)
+first-boot pw : .../artifacts/turing-rk1-forky.credentials.toml (user debian, readable by you only; ...)
 ```
+
+```toml
+image = "turing-rk1-forky.img"
+user = "debian"
+password = "7kQmR3xLpAvB"
+note = "expired at first login (passwd -e); unique per assembled image"
+```
+
+A pressed image that is re-assembled gets a password of its own, in
+`<output stem>.credentials.toml` beside the pressed file. Keep the credentials file with
+you, not with the image. A copy of the image never needs it, and whoever holds it holds
+the board's first login.
 
 Three facts about the base image decide how much that password is guarding.
 `openssh-server` is installed and enabled, and a DHCP client brings the board onto the
@@ -93,10 +108,10 @@ There are two different attacks, and they have very different reach:
 - **Guessing at the login.** Bounded by what an `sshd` on one of these boards will
   service — tens of attempts per second, not thousands. Even 8 characters (~46 bits) is
   far out of reach here. This is why 8 is the minimum rather than a recommendation.
-- **Attacking the hash offline.** `/etc/shadow` travels *inside the image file*, and the
-  password appears in the `.provenance.toml` beside it. Anyone holding a copy of either
-  can attack the hash with no rate limit and no board involved. Against that, 8
-  characters is merely expensive, and 12 (~70 bits) is out of reach.
+- **Attacking the hash offline.** `/etc/shadow` travels *inside the image file*. Anyone
+  holding a copy of the image can attack the hash with no rate limit and no board
+  involved. Against that, 8 characters is merely expensive, and 12 (~70 bits) is out of
+  reach.
 
 The length that matters is the one for an image you might copy, publish, or hand to
 someone else. That case is what 12 is chosen for. Shortening to 8 suits an image one
@@ -197,20 +212,20 @@ through `sudo`.
 
 ## What the provenance records
 
-The `.provenance.toml` beside each image contains the full access picture in
-`[credentials]` — the generated password, the sudo policy, and every authorized key:
+The `.provenance.toml` beside each image contains the access picture in
+`[credentials]`: the account, the sudo policy, and every authorized key. It names where
+the generated password is and does not contain it, so the manifest can be shared with
+the image:
 
 ```toml
 [credentials]
 user = "debian"
-password = "7kQmR3xLpAvB"
-note = "expired at first login (passwd -e); unique per built image"
+note = "the generated password is in the image's private credentials file, not here; expired at first login (passwd -e); unique per assembled image"
 sudo = "password"
 authorized_keys = ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBl5Nn9... operator@workstation"]
 ```
 
-That file holds a live credential, so treat it as sensitive. The image's own
-`/etc/boot2deb/image.toml` deliberately contains none of this. It is readable by anyone
+The image's own `/etc/boot2deb/image.toml` deliberately contains none of this. It is readable by anyone
 holding the disk. An image that inventoried its own access rules would hand a reader the
 list of what to go after.
 

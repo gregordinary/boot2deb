@@ -20,7 +20,19 @@ pub(crate) fn run(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let build = resolve_recipe(root, recipe, &Overrides::default())?;
     let lock = root.lock(recipe)?;
-    let axes = source_axes(&build, &lock)?;
+    let mut axes = source_axes(&build, &lock)?;
+    // The rkbin commit is probed here and nowhere else. It is always a commit on a
+    // branch, since rkbin publishes no tags, so the durability warning `update` prints
+    // and the ref comparison `outdated` makes would only ever report that. Whether the
+    // commit is still reachable at all is what this survey can say about it.
+    if let (Some(boot), Some(pin)) = (build.rkbin_boot(), &lock.blobs) {
+        axes.push(crate::config::SourceAxis {
+            name: "rkbin".into(),
+            url: boot.rkbin.upstream.git.clone(),
+            reference: &pin.reference,
+            commit: &pin.commit,
+        });
+    }
     // A recipe can pin nothing from git: a distro kernel comes from the mirror and a
     // board whose firmware is its own builds no bootloader. There is then no upstream
     // to rot, which is a stronger guarantee than "all pins are durable" — so say so

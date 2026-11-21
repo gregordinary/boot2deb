@@ -15,7 +15,7 @@
 //! leaves the stamp naming an object no branch reaches, so the record points at
 //! nothing anyone else can resolve.
 //!
-//! So the mismatch is detected up front instead, from two cheap `git` reads, and
+//! So the mismatch is detected up front instead, from three cheap `git` reads, and
 //! [`Freshness`] is what a caller gates on. Relinking the CLI is seconds.
 //! Discovering the stamp is wrong afterwards costs the whole build.
 
@@ -40,10 +40,32 @@ pub(crate) fn commit() -> Option<&'static str> {
     option_env!("BOOT2DEB_GIT_COMMIT").filter(|s| !s.is_empty())
 }
 
-/// Whether the checkout had uncommitted changes to [`SOURCE_PATHS`] when this
-/// binary was compiled. `true` means [`commit`] does not identify it.
+/// How [`SOURCE_PATHS`] stood against [`commit`] when this binary was compiled, by the
+/// rule [`SourceState::of`] states. [`SourceState::Unknown`] when git could not read
+/// them, and when there is no commit to stand against.
+pub(crate) fn source_state() -> SourceState {
+    compiled_state(option_env!("BOOT2DEB_GIT_DIRTY"))
+}
+
+/// Read a `BOOT2DEB_GIT_DIRTY` value. Anything but one of the two definite stamps,
+/// an absent variable included, is [`SourceState::Unknown`].
+fn compiled_state(stamp: Option<&str>) -> SourceState {
+    [SourceState::Clean, SourceState::Dirty]
+        .into_iter()
+        .find(|state| Some(state.stamp()) == stamp)
+        .unwrap_or(SourceState::Unknown)
+}
+
+/// Whether [`commit`] fails to identify this binary: its sources differed from the
+/// commit when it was compiled, or git could not tell. `false` without a commit, where
+/// there is nothing for the flag to disclaim.
+///
+/// This is the value the provenance record's `dirty` takes, and that field has no third
+/// value. "Could not tell" therefore reads as `true`, the answer that claims nothing
+/// about the commit. [`source_state`] keeps the two apart for a caller that reports
+/// which it was.
 pub(crate) fn dirty() -> bool {
-    matches!(option_env!("BOOT2DEB_GIT_DIRTY"), Some("true"))
+    commit().is_some() && source_state() != SourceState::Clean
 }
 
 /// How this binary stands relative to the boot2deb source checkout it is being run
@@ -71,8 +93,8 @@ pub(crate) enum Freshness {
         /// The checkout's current `HEAD`, abbreviated to the stamp's width.
         head: String,
     },
-    /// The binary was compiled from `HEAD`, but [`SOURCE_PATHS`] have been edited
-    /// since — so it predates changes that are on disk now.
+    /// The binary was compiled from `HEAD`, but [`SOURCE_PATHS`] have changed since, by
+    /// an edit or by a file git does not track — so it predates what is on disk now.
     SourceEdited {
         /// The commit both the binary and the checkout name, whose content the working
         /// tree no longer matches.
@@ -84,6 +106,22 @@ pub(crate) enum Freshness {
     /// the honest answer rather than a false one.
     Unverifiable {
         /// The commit the binary names, which its dirty flag disclaims.
+        built: String,
+    },
+    /// Git could not read the state of [`SOURCE_PATHS`] when the binary was compiled,
+    /// so its stamp says `unknown`. Reported and not gated, as
+    /// [`Unverifiable`](Self::Unverifiable) is, and the provenance record says
+    /// `dirty = true` for the same reason: the commit is not shown to identify the binary.
+    StampUnknown {
+        /// The commit the binary names, which nothing has shown identifies it.
+        built: String,
+    },
+    /// The root is this binary's source checkout, but git cannot read its `HEAD` or the
+    /// state of [`SOURCE_PATHS`] now. A failed read proves no mismatch, so this is
+    /// reported and not gated. It is never [`Current`](Self::Current) either, because
+    /// nothing has checked the binary against the checkout.
+    CheckoutUnreadable {
+        /// The commit the binary names.
         built: String,
     },
 }
@@ -109,15 +147,28 @@ impl Freshness {
                  Run `cargo build` (seconds) to re-stamp it."
             )),
             Self::SourceEdited { head } => Some(format!(
-                "this boot2deb was compiled from {head}, and its sources ({}) have been \
-                 edited since — so it does not contain them. Run `cargo build` to pick \
-                 them up.",
+                "this boot2deb was compiled from {head}, and its sources ({}) have changed \
+                 since, by an edit or a file git does not track — so it does not contain \
+                 them. Run `cargo build` to pick them up.",
                 SOURCE_PATHS.join(", ")
             )),
             Self::Unverifiable { built } => Some(format!(
                 "this boot2deb was compiled from a tree with uncommitted changes to its \
                  sources ({}), so {built} does not identify it and an image built now \
                  records `dirty = true`. Commit the source to make the build identifiable.",
+                SOURCE_PATHS.join(", ")
+            )),
+            Self::StampUnknown { built } => Some(format!(
+                "git could not read the state of this boot2deb's sources ({}) when it was \
+                 compiled, so {built} is not shown to identify it and an image built now \
+                 records `dirty = true`. Rebuild it where git can read the checkout \
+                 (`touch crates/cli/build.rs && cargo build`) to re-stamp it.",
+                SOURCE_PATHS.join(", ")
+            )),
+            Self::CheckoutUnreadable { built } => Some(format!(
+                "git cannot read this checkout's commit or the state of its sources ({}), \
+                 so whether this boot2deb, compiled from {built}, still matches them is \
+                 unknown. An image built now records {built} as its builder unchecked.",
                 SOURCE_PATHS.join(", ")
             )),
         }
@@ -132,16 +183,28 @@ impl Freshness {
 /// which is the co-located layout boot2deb is developed in. An out-of-tree config tree
 /// or an installed binary answers [`Freshness::Unknown`] and is left alone, because
 /// there is no expectation there for a stale binary to violate.
+///
+/// Once that holds, a failed `git` read is
+/// [`CheckoutUnreadable`](Freshness::CheckoutUnreadable) and never
+/// [`Current`](Freshness::Current): the comparison is owed, and a read that failed has
+/// not made it.
 pub(crate) fn freshness(root: &ConfigRoot) -> Freshness {
-    let Some(built) = commit() else {
+    freshness_of(commit(), source_state(), root.path())
+}
+
+/// [`freshness`] for a binary stamped with `built` and `compiled`, against the checkout
+/// at `path`. Separate so a test can stamp a scratch checkout's commit.
+fn freshness_of(built: Option<&str>, compiled: SourceState, path: &Path) -> Freshness {
+    let Some(built) = built else {
         return Freshness::Unknown;
     };
-    let path = root.path();
     if !is_source_checkout(path) {
         return Freshness::Unknown;
     }
     let Ok(head) = boot2deb_engine::git::rev_parse_head(path) else {
-        return Freshness::Unknown;
+        return Freshness::CheckoutUnreadable {
+            built: built.to_string(),
+        };
     };
     // The stamp is abbreviated and `rev-parse` is not, so the stamp is the prefix. A
     // stamp that is not a prefix of HEAD is a different commit, which is the whole
@@ -152,17 +215,27 @@ pub(crate) fn freshness(root: &ConfigRoot) -> Freshness {
             head: head.chars().take(built.len()).collect(),
         };
     }
-    if dirty() {
-        return Freshness::Unverifiable {
-            built: built.to_string(),
-        };
+    let built = built.to_string();
+    match compiled {
+        SourceState::Dirty => return Freshness::Unverifiable { built },
+        SourceState::Unknown => return Freshness::StampUnknown { built },
+        SourceState::Clean => {}
     }
-    if boot2deb_engine::git::has_tracked_changes(path, &SOURCE_PATHS) {
-        return Freshness::SourceEdited {
-            head: built.to_string(),
-        };
+    match current_state(path) {
+        SourceState::Clean => Freshness::Current,
+        SourceState::Dirty => Freshness::SourceEdited { head: built },
+        SourceState::Unknown => Freshness::CheckoutUnreadable { built },
     }
-    Freshness::Current
+}
+
+/// How [`SOURCE_PATHS`] stand against `HEAD` in the checkout at `path` now. The same
+/// two reads and the same [`SourceState::of`] rule the build script stamps with, so a
+/// binary compiled from this tree as it is now would stamp this answer.
+fn current_state(path: &Path) -> SourceState {
+    SourceState::of(
+        boot2deb_engine::git::tracked_changes(path, &SOURCE_PATHS),
+        boot2deb_engine::git::untracked_files(path, &SOURCE_PATHS).as_deref(),
+    )
 }
 
 /// The config tree's own identity: its `HEAD`, abbreviated, and whether its tracked
@@ -209,9 +282,12 @@ fn is_source_checkout(path: &Path) -> bool {
 /// The identity line shared by `doctor` and the build gate: what this binary is, and
 /// what that means for the images it stamps.
 pub(crate) fn identity() -> String {
-    match (commit(), dirty()) {
-        (Some(c), true) => format!("{} ({c}, dirty)", version()),
-        (Some(c), false) => format!("{} ({c})", version()),
+    match (commit(), source_state()) {
+        (Some(c), SourceState::Clean) => format!("{} ({c})", version()),
+        (Some(c), SourceState::Dirty) => format!("{} ({c}, dirty)", version()),
+        (Some(c), SourceState::Unknown) => {
+            format!("{} ({c}, source state unknown)", version())
+        }
         (None, _) => format!("{} (no commit — built outside a git checkout)", version()),
     }
 }
@@ -235,6 +311,15 @@ mod tests {
         // provenance `dirty` flag is the honest record, and refusing the build would
         // block the ordinary edit-and-run loop it describes.
         assert!(!Freshness::Unverifiable {
+            built: "aaaaaaaaaaaa".into(),
+        }
+        .is_stale());
+        // A git read that failed proves no mismatch, at compile time or now.
+        assert!(!Freshness::StampUnknown {
+            built: "aaaaaaaaaaaa".into(),
+        }
+        .is_stale());
+        assert!(!Freshness::CheckoutUnreadable {
             built: "aaaaaaaaaaaa".into(),
         }
         .is_stale());
@@ -279,24 +364,192 @@ mod tests {
         }
     }
 
-    /// The compiled dirty stamp asks the run-time check's question: tracked changes
-    /// under [`SOURCE_PATHS`], not anywhere in the repo. This test binary was compiled
-    /// from this checkout, so the two answers agree unless the build script got it
-    /// wrong. That happens in two ways. It counts an edit outside the source paths, such
-    /// as a recipe or a doc page. Or a rebuild compiles an edit under crates/ without
+    #[test]
+    fn the_unknown_variants_say_so_without_claiming_a_mismatch() {
+        let stamp = Freshness::StampUnknown {
+            built: "7e6e2f02674c".into(),
+        }
+        .note()
+        .expect("an unknown stamp is worth saying");
+        assert!(stamp.contains("dirty = true"), "{stamp}");
+        let now = Freshness::CheckoutUnreadable {
+            built: "7e6e2f02674c".into(),
+        }
+        .note()
+        .expect("an unread checkout is worth saying");
+        assert!(now.contains("unknown"), "{now}");
+        for note in [stamp, now] {
+            assert!(!note.contains("checkout is at"), "{note}");
+            assert!(note.contains("7e6e2f02674c"), "{note}");
+        }
+    }
+
+    /// The compiled stamp asks the run-time check's question, by the one rule both
+    /// include, of [`SOURCE_PATHS`] and not of the whole repo. This test binary was
+    /// compiled from this checkout, so the two answers agree unless the build script got
+    /// it wrong. That happens in two ways. It reads a path outside the source paths, such
+    /// as a recipe or a doc page. Or a rebuild compiles a change under crates/ without
     /// re-running the script.
     #[test]
-    fn the_compiled_dirty_stamp_covers_the_source_paths_only() {
+    fn the_compiled_stamp_agrees_with_the_run_time_read() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         if commit().is_none() || !is_source_checkout(&root) {
             // Compiled outside a checkout: there is no stamp to compare.
             return;
         }
         assert_eq!(
-            dirty(),
-            boot2deb_engine::git::has_tracked_changes(&root, &SOURCE_PATHS),
-            "BOOT2DEB_GIT_DIRTY disagrees with `git diff --quiet HEAD -- {}`",
+            source_state(),
+            current_state(&root),
+            "BOOT2DEB_GIT_DIRTY disagrees with a run-time read of {}",
             SOURCE_PATHS.join(" ")
+        );
+    }
+
+    #[test]
+    fn a_stamp_reads_back_as_the_state_it_was_written_from() {
+        for state in [SourceState::Clean, SourceState::Dirty, SourceState::Unknown] {
+            assert_eq!(compiled_state(Some(state.stamp())), state);
+        }
+        // A missing or unrecognized stamp claims nothing.
+        assert_eq!(compiled_state(None), SourceState::Unknown);
+        assert_eq!(compiled_state(Some("")), SourceState::Unknown);
+    }
+
+    /// A read that proves the tree dirty settles it. Otherwise a failed read is unknown,
+    /// never clean.
+    #[test]
+    fn a_failed_git_read_is_unknown_and_never_clean() {
+        let new_module = ["crates/cli/src/new.rs".to_string()];
+        assert_eq!(SourceState::of(Some(false), Some(&[])), SourceState::Clean);
+        assert_eq!(SourceState::of(None, Some(&[])), SourceState::Unknown);
+        assert_eq!(SourceState::of(Some(false), None), SourceState::Unknown);
+        assert_eq!(SourceState::of(None, None), SourceState::Unknown);
+        assert_eq!(SourceState::of(Some(true), None), SourceState::Dirty);
+        assert_eq!(SourceState::of(None, Some(&new_module)), SourceState::Dirty);
+        // A rustfmt backup is the one untracked file that is never compiled.
+        let backup = ["crates/cli/src/main.rs.bk".to_string()];
+        assert_eq!(
+            SourceState::of(Some(false), Some(&backup)),
+            SourceState::Clean
+        );
+    }
+
+    /// Run git in `dir`, asserting success, and return trimmed stdout.
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .expect("spawn git");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// A scratch boot2deb source checkout at one commit, and that commit at the stamp's
+    /// width. Its `.gitignore` ignores `target/` at the root, as the real one does, and
+    /// `*.gen.rs` anywhere, to stand for an ignored file under the source paths.
+    fn source_checkout() -> (tempfile::TempDir, String) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path();
+        std::fs::create_dir_all(repo.join("crates/cli/src")).unwrap();
+        std::fs::write(repo.join("crates/cli/Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(repo.join("crates/cli/src/main.rs"), "mod builder;\n").unwrap();
+        std::fs::write(repo.join("Cargo.toml"), "[workspace]\n").unwrap();
+        std::fs::write(repo.join(".gitignore"), "/target\n*.gen.rs\n**/*.rs.bk\n").unwrap();
+        git(repo, &["init", "-q"]);
+        git(repo, &["config", "user.email", "t@boot2deb"]);
+        git(repo, &["config", "user.name", "t"]);
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-qm", "one"]);
+        let head = git(
+            repo,
+            &["rev-parse", &format!("--short={STAMP_WIDTH}"), "HEAD"],
+        );
+        (tmp, head)
+    }
+
+    /// A module a tracked `mod` declares compiles from the filesystem before anyone
+    /// stages it, and so does an ignored file under the source paths. Neither is in the
+    /// commit, so either one makes the tree dirty. Files outside the source paths,
+    /// ignored build output included, do not.
+    #[test]
+    fn an_untracked_or_ignored_source_file_makes_the_tree_dirty_and_others_do_not() {
+        let (tmp, head) = source_checkout();
+        let repo = tmp.path();
+        assert_eq!(current_state(repo), SourceState::Clean);
+        assert_eq!(
+            freshness_of(Some(&head), SourceState::Clean, repo),
+            Freshness::Current
+        );
+
+        // A scratch file elsewhere, an ignored build directory at the root, and a
+        // rustfmt backup beside a module.
+        std::fs::write(repo.join("notes.txt"), "x").unwrap();
+        std::fs::create_dir_all(repo.join("target/debug")).unwrap();
+        std::fs::write(repo.join("target/debug/boot2deb"), "x").unwrap();
+        std::fs::write(repo.join("crates/cli/src/main.rs.bk"), "x").unwrap();
+        assert_eq!(current_state(repo), SourceState::Clean);
+
+        // An ignored file under the source paths: an ignore rule is no promise that
+        // nothing compiles it.
+        std::fs::write(repo.join("crates/cli/src/table.gen.rs"), "x").unwrap();
+        assert_eq!(current_state(repo), SourceState::Dirty);
+        std::fs::remove_file(repo.join("crates/cli/src/table.gen.rs")).unwrap();
+        assert_eq!(current_state(repo), SourceState::Clean);
+
+        // The module `main.rs` declares, not yet staged.
+        std::fs::write(repo.join("crates/cli/src/builder.rs"), "x").unwrap();
+        assert_eq!(current_state(repo), SourceState::Dirty);
+        assert_eq!(
+            freshness_of(Some(&head), SourceState::Clean, repo),
+            Freshness::SourceEdited { head: head.clone() }
+        );
+    }
+
+    #[test]
+    fn the_compiled_state_decides_before_the_checkout_is_read() {
+        let (tmp, head) = source_checkout();
+        let repo = tmp.path();
+        assert_eq!(
+            freshness_of(Some(&head), SourceState::Dirty, repo),
+            Freshness::Unverifiable {
+                built: head.clone()
+            }
+        );
+        assert_eq!(
+            freshness_of(Some(&head), SourceState::Unknown, repo),
+            Freshness::StampUnknown {
+                built: head.clone()
+            }
+        );
+        // A binary with no commit is not compared at all.
+        assert_eq!(
+            freshness_of(None, SourceState::Unknown, repo),
+            Freshness::Unknown
+        );
+    }
+
+    /// A source checkout whose `.git` git cannot read is owed a comparison it cannot
+    /// have. That is reported, and never passes as current.
+    #[test]
+    fn a_source_checkout_git_cannot_read_is_unreadable_and_never_current() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path();
+        std::fs::create_dir_all(repo.join("crates/cli")).unwrap();
+        std::fs::write(repo.join("crates/cli/Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(repo.join(".git"), "").unwrap();
+        assert!(is_source_checkout(repo));
+        assert_eq!(current_state(repo), SourceState::Unknown);
+        assert_eq!(
+            freshness_of(Some("7e6e2f02674c"), SourceState::Clean, repo),
+            Freshness::CheckoutUnreadable {
+                built: "7e6e2f02674c".into()
+            }
         );
     }
 

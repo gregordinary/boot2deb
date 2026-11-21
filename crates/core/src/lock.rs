@@ -56,7 +56,7 @@ where
     Ok(s)
 }
 
-/// [`de_blob_pin`] for the optional BL32 pin.
+/// [`de_blob_pin`] for an optional pin (the rkbin BL31, the BL32).
 fn de_opt_blob_pin<'de, D>(d: D) -> Result<Option<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -163,6 +163,12 @@ pub struct Lock {
     /// record both. Omitted from the committed lock when u-boot ships pristine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uboot_patches: Option<PatchesPin>,
+    /// Exact Trusted Firmware-A pin. Present iff the build compiles u-boot **and** its
+    /// BL31 provider is `tfa`. The rkbin provider's BL31 is a blob, pinned in
+    /// [`BlobsPin::atf`] instead, and a lock pins exactly one of the two
+    /// ([`check_shape`](Self::check_shape)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tfa: Option<TfaPin>,
     /// Exact media-accel userspace source pins, one `[[userspace]]` entry per tree the
     /// build compiles, in the SoC's declared order. Non-empty iff the recipe builds the
     /// HW transcode stack (a `requires_media_accel` feature is selected). The committed
@@ -194,9 +200,10 @@ pub struct Lock {
     /// that compiles no kernel).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rootfs: Option<RootfsPin>,
-    /// Verified rkbin blob hashes. Present iff the build's boot method consumes rkbin
-    /// blobs (`rockchip-rkbin`, whose u-boot build takes the ATF and DDR TPL as make
-    /// inputs). Omitted from the committed lock otherwise.
+    /// The rkbin commit and blob hashes. Present iff the build's boot method consumes
+    /// rkbin blobs (`rockchip-rkbin`, whose u-boot build takes the DDR TPL, and the
+    /// rkbin BL31 when that provider is selected, as make inputs). Omitted from the
+    /// committed lock otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blobs: Option<BlobsPin>,
     /// Pre-built `.deb`s pulled from outside the Debian mirror,
@@ -238,10 +245,53 @@ impl Lock {
     /// [`ConfigError::Parse`](crate::ConfigError::Parse) when the text is not a lock.
     /// `path` names the file in that error and is not read from.
     pub fn from_toml_str(text: &str, path: &str) -> Result<Self, crate::ConfigError> {
-        toml::from_str(text).map_err(|source| crate::ConfigError::Parse {
+        let lock: Self = toml::from_str(text).map_err(|source| crate::ConfigError::Parse {
             path: path.to_string(),
             source,
-        })
+        })?;
+        lock.check_shape(path)?;
+        Ok(lock)
+    }
+
+    /// Check what the per-field deserializers cannot: that the tables agree about the
+    /// BL31. A lock with `[blobs]` builds u-boot and pins exactly one BL31, the
+    /// `[blobs].atf` blob or the `[tfa]` table. A lock with no `[blobs]` builds no
+    /// u-boot and pins neither. Every path that parses a lock runs this. A hand-edited
+    /// lock that names two BL31s, or none, then fails at load rather than in the u-boot
+    /// node.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::LockShape`](crate::ConfigError::LockShape), naming `path`.
+    pub fn check_shape(&self, path: &str) -> Result<(), crate::ConfigError> {
+        let why = match (&self.blobs, &self.tfa) {
+            (Some(b), Some(_)) if b.atf.is_some() => {
+                Some("it pins both an rkbin BL31 ([blobs].atf) and a [tfa] BL31")
+            }
+            (Some(b), None) if b.atf.is_none() => {
+                Some("[blobs] pins no BL31 ([blobs].atf) and there is no [tfa] table")
+            }
+            (None, Some(_)) => Some("it pins a [tfa] BL31 but no [blobs] DDR TPL to pack it with"),
+            _ => None,
+        };
+        match why {
+            Some(why) => Err(crate::ConfigError::LockShape {
+                path: path.to_string(),
+                why: why.to_string(),
+            }),
+            None => Ok(()),
+        }
+    }
+
+    /// The BL31 provider this lock pins, or `None` for a lock that builds no u-boot.
+    /// Meaningful on a lock that passed [`check_shape`](Self::check_shape).
+    pub fn bl31_provider(&self) -> Option<crate::model::Bl31Provider> {
+        use crate::model::Bl31Provider;
+        match (&self.tfa, &self.blobs) {
+            (Some(_), _) => Some(Bl31Provider::Tfa),
+            (None, Some(_)) => Some(Bl31Provider::Rkbin),
+            (None, None) => None,
+        }
     }
 
     /// Keep `prev`'s rootfs [`source_date_epoch`](RootfsPin::source_date_epoch) when no
@@ -261,16 +311,124 @@ impl Lock {
         }
     }
 
+    /// Give this lock's kernel the revision that `prev`, the lock it replaces, implies.
+    ///
+    /// `update` writes a fresh lock at revision 1 and then calls this. The revision stays
+    /// `prev`'s while the kernel is the same kernel. Under the same definition and ref, it
+    /// moves to the one after `prev`'s when anything that reaches the kernel moved. That
+    /// is the commit, the kernel patch series or its pin, or the configuration digest.
+    /// Another ref or another kernel definition is another version, which starts again
+    /// at 1. Where either lock pins no kernel this does nothing.
+    pub fn carry_kernel_revision(&mut self, prev: &Lock) {
+        let same_patches = self.patches == prev.patches;
+        let (Some(next), Some(before)) = (self.kernel.as_mut(), prev.kernel.as_ref()) else {
+            return;
+        };
+        if next.id != before.id || next.reference != before.reference {
+            return;
+        }
+        let unchanged = next.commit == before.commit
+            && next.config_sha256 == before.config_sha256
+            && same_patches;
+        next.revision = if unchanged {
+            before.revision
+        } else {
+            before.revision + 1
+        };
+    }
+
+    /// The upstream half of the `u-boot-<device>` package's Debian version, or `None`
+    /// for a lock that pins no u-boot or no BL31.
+    ///
+    /// It is the u-boot ref without its `v`, then `+` and the BL31's own version
+    /// (`2026.10+rkbin1.56`, `2026.10+tfa2.16.0`), written as a legal Debian version
+    /// ([`sanitize_deb_version`](crate::version::sanitize_deb_version)). The rkbin
+    /// BL31 contributes `rkbin` and the version in the blob's file name
+    /// (`rk3588_bl31_v1.56.elf` gives `rkbin1.56`), or the name's stem where it states
+    /// none. TF-A contributes `tfa` and its ref. A ref's `-` is written `~`, so a
+    /// prerelease sorts before its release (`v2026.10-rc1` gives `2026.10~rc1`).
+    ///
+    /// The BL31 is part of it because it is part of the package's contents. One u-boot
+    /// ref with two BL31s is two different packages, and a version derived from the
+    /// u-boot ref alone would give them the same name.
+    pub fn uboot_deb_upstream(&self) -> Option<String> {
+        let uboot = self.uboot.as_ref()?;
+        let bl31 = match (
+            &self.tfa,
+            self.blobs.as_ref().and_then(|b| b.atf.as_deref()),
+        ) {
+            (Some(tfa), _) => format!("tfa{}", tag_version(&tfa.reference)),
+            (None, Some(atf)) => format!("rkbin{}", rkbin_blob_version(atf)),
+            (None, None) => return None,
+        };
+        Some(crate::version::sanitize_deb_version(&format!(
+            "{}+{bl31}",
+            tag_version(&uboot.reference)
+        )))
+    }
+
+    /// The `u-boot-<device>` package's Debian version, `<upstream>-<revision>`
+    /// (`2026.10+rkbin1.56-1`), or `None` where
+    /// [`uboot_deb_upstream`](Self::uboot_deb_upstream) is.
+    ///
+    /// The kernel's packages are versioned the same way, `<version>-<revision>`. dpkg
+    /// orders the upstream half first, so a new u-boot ref or BL31 sorts by its own
+    /// version. A package rebuilt from moved pins under the same one sorts after the
+    /// last by its [`revision`](UbootPin::revision).
+    pub fn uboot_deb_version(&self) -> Option<String> {
+        let upstream = self.uboot_deb_upstream()?;
+        Some(format!("{upstream}-{}", self.uboot.as_ref()?.revision))
+    }
+
+    /// Set this lock's u-boot package revision from `prev`, the lock it replaces.
+    ///
+    /// `update` calls this on the lock it has just resolved, whose revision is 1, beside
+    /// [`carry_kernel_revision`](Self::carry_kernel_revision). The revision stays
+    /// `prev`'s while the package is built from the same inputs. Under the same
+    /// [upstream version](Self::uboot_deb_upstream) it moves to the one after `prev`'s
+    /// when any of them moved:
+    ///
+    /// - The u-boot pin, including the commit a branch ref resolves to and the
+    ///   [configuration digest](UbootPin::config_sha256).
+    /// - The u-boot patch series or its pin.
+    /// - The DDR TPL, rkbin BL31 or BL32 blob.
+    /// - The TF-A pin, including a new commit under the same ref.
+    ///
+    /// The rkbin commit is not one of them. The blobs' hashes decide the bytes, and a
+    /// commit that moved with every hash unchanged ships the same package. Another
+    /// upstream version starts again at 1. Where either lock builds no u-boot this does
+    /// nothing.
+    pub fn carry_uboot_revision(&mut self, prev: &Lock) {
+        let (Some(upstream), Some(before_upstream)) =
+            (self.uboot_deb_upstream(), prev.uboot_deb_upstream())
+        else {
+            return;
+        };
+        if upstream != before_upstream {
+            return;
+        }
+        let unchanged = uboot_package_inputs(self) == uboot_package_inputs(prev);
+        let (Some(next), Some(before)) = (self.uboot.as_mut(), prev.uboot.as_ref()) else {
+            return;
+        };
+        next.revision = if unchanged {
+            before.revision
+        } else {
+            before.revision + 1
+        };
+    }
+
     /// Every upstream commit this lock pins, across all source axes:
     ///
-    /// - The kernel and u-boot trees
+    /// - The kernel, u-boot and TF-A trees
+    /// - The rkbin commit the blobs are fetched at
     /// - Both patch-series checkouts
     /// - Each userspace and ffmpeg tree
     /// - Each out-of-tree kmod
     /// - Each app's tree, its packaging tree, and its patch-series checkout
     ///
-    /// Blob, extra-deb, and rootfs pins are content hashes, not commits, so they are
-    /// not here.
+    /// The per-file blob hashes, extra-deb and rootfs pins are content hashes, not
+    /// commits, so they are not here.
     ///
     /// This is the *liveness* set a commit-addressed cache is swept against. A checkout
     /// keyed on a commit no lock names can be re-fetched, so it is dead. Deliberately
@@ -282,6 +440,8 @@ impl Lock {
         out.extend(self.patches.iter().map(|p| p.commit.as_str()));
         out.extend(self.uboot.iter().map(|p| p.commit.as_str()));
         out.extend(self.uboot_patches.iter().map(|p| p.commit.as_str()));
+        out.extend(self.tfa.iter().map(|p| p.commit.as_str()));
+        out.extend(self.blobs.iter().map(|p| p.commit.as_str()));
         out.extend(self.userspace.iter().map(|p| p.commit.as_str()));
         out.extend(self.kmods.iter().map(|p| p.commit.as_str()));
         for app in &self.apps {
@@ -295,6 +455,58 @@ impl Lock {
         }
         out
     }
+}
+
+/// The pins a lock builds its u-boot package from, the package's own revision aside:
+/// the u-boot pin with its configuration digest, the u-boot patch pin, the TF-A pin,
+/// and the rkbin blob pins without the commit they are fetched at. Two locks whose
+/// inputs are equal build the same package, which is what
+/// [`Lock::carry_uboot_revision`] compares.
+type UbootPackageInputs<'a> = (
+    Option<(&'a str, &'a str, &'a str, &'a str)>,
+    Option<&'a PatchesPin>,
+    Option<&'a TfaPin>,
+    Option<(Option<&'a str>, &'a str, Option<&'a str>)>,
+);
+
+/// [`UbootPackageInputs`] read out of `lock`.
+fn uboot_package_inputs(lock: &Lock) -> UbootPackageInputs<'_> {
+    (
+        lock.uboot.as_ref().map(|u| {
+            (
+                u.source.as_str(),
+                u.reference.as_str(),
+                u.commit.as_str(),
+                u.config_sha256.as_str(),
+            )
+        }),
+        lock.uboot_patches.as_ref(),
+        lock.tfa.as_ref(),
+        lock.blobs
+            .as_ref()
+            .map(|b| (b.atf.as_deref(), b.tpl.as_str(), b.bl32.as_deref())),
+    )
+}
+
+/// A ref as the version part of a Debian version: without a leading `v`, and with each
+/// `-` written `~`, so a prerelease (`v2026.10-rc1`, `v2.16-rc0`) sorts before its
+/// release.
+fn tag_version(reference: &str) -> String {
+    reference
+        .strip_prefix('v')
+        .unwrap_or(reference)
+        .replace('-', "~")
+}
+
+/// The version an rkbin blob pin's file name states, the `1.56` of
+/// `rk3588_bl31_v1.56.elf@sha256:<hex>`, or the name's stem where it states none.
+fn rkbin_blob_version(pin: &str) -> &str {
+    let file = pin.rsplit_once("@sha256:").map_or(pin, |(file, _)| file);
+    let stem = file.rsplit_once('.').map_or(file, |(stem, _)| stem);
+    stem.rsplit_once("_v")
+        .map(|(_, v)| v)
+        .filter(|v| v.starts_with(|c: char| c.is_ascii_digit()))
+        .unwrap_or(stem)
 }
 
 /// Pinned kernel: which definition, from which repo, at which ref, resolved to
@@ -317,6 +529,26 @@ pub struct KernelPin {
     /// shape.
     #[serde(deserialize_with = "de_commit")]
     pub commit: String,
+    /// The kernel's package revision: the `N` of the release `<version>-<N>-<arch>` that
+    /// `uname -r` reports, and of the deb version `<version>-<N>`.
+    ///
+    /// The release names the kernel's packages. A kernel at a new revision therefore
+    /// installs beside the previous one rather than replacing it, as a Debian ABI bump
+    /// does. Each out-of-tree module deb is built for one release, by name. `update`
+    /// starts it at 1 for a new ref, and moves it on when anything that reaches the
+    /// kernel moved under the same ref ([`Lock::carry_kernel_revision`]).
+    pub revision: u32,
+    /// The digest of the kernel's configuration inputs in the config tree, as 64
+    /// lowercase hex. The inputs are the base defconfig, each config fragment's contents
+    /// in merge order, and the board's device-tree sources.
+    ///
+    /// Everything else a kernel is built from is a pin above or in
+    /// [`patches`](Lock::patches). This is the input that lives in the config tree, so
+    /// `build` recomputes it and refuses a tree that does not match. A different
+    /// configuration under the same revision would be a different kernel that apt
+    /// cannot tell from this one.
+    #[serde(deserialize_with = "de_sha256")]
+    pub config_sha256: String,
 }
 
 /// Pinned patch series: the series applied, the repo they came from, the ref that
@@ -353,7 +585,8 @@ pub struct PatchesPin {
     pub commit: String,
 }
 
-/// Pinned u-boot: source repo, ref, and exact commit.
+/// Pinned u-boot: source repo, ref, and exact commit, and the revision and configuration
+/// digest of the `u-boot-<device>` package built from them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UbootPin {
@@ -361,6 +594,45 @@ pub struct UbootPin {
     /// `uboot_source`). The drift gate compares it against a fresh resolve, so
     /// a boot-method flip to a different repo cannot silently reinterpret the
     /// commit there.
+    pub source: String,
+    /// The tag that was resolved (TOML key `ref`).
+    #[serde(rename = "ref")]
+    pub reference: String,
+    /// The exact commit the ref pointed at. Deserialization enforces the full-hex-sha
+    /// shape.
+    #[serde(deserialize_with = "de_commit")]
+    pub commit: String,
+    /// The u-boot package's Debian revision: the `N` of its version `<upstream>-<N>`
+    /// ([`Lock::uboot_deb_version`]).
+    ///
+    /// The upstream half names the u-boot ref and the BL31 and nothing else. A package
+    /// rebuilt with another DDR TPL, BL32 or patch pin, or from a moved branch ref,
+    /// differs from the last only here. It is what apt orders the two by. `update`
+    /// starts it at 1 for a new upstream version. Under the same one, it moves on when
+    /// anything that reaches the package moved ([`Lock::carry_uboot_revision`]).
+    pub revision: u32,
+    /// The digest of the u-boot package's configuration inputs in the config tree, as
+    /// 64 lowercase hex. The inputs are the resolved values the u-boot node builds the
+    /// package from that no pin records. They are the board defconfig and raw-gap
+    /// offsets, and the device's name, description, SoC, boot method and architecture.
+    /// Under TF-A they include its platform and submodules.
+    ///
+    /// Everything else the package is built from is a pin. `build` recomputes this
+    /// digest from the config tree and refuses a lock it does not match, as it does the
+    /// kernel's [`config_sha256`](KernelPin::config_sha256). A changed defconfig
+    /// therefore never ships under the version of the package it replaces.
+    #[serde(deserialize_with = "de_sha256")]
+    pub config_sha256: String,
+}
+
+/// Pinned Trusted Firmware-A: source repo, ref, and exact commit. The `plat` the
+/// tree is built for is config, re-resolved each build and folded into the `tfa`
+/// node's signature, as a u-boot defconfig is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TfaPin {
+    /// Clone URL the commit was pinned from (the SoC's `[tfa].git`). The drift gate
+    /// compares it against a fresh resolve.
     pub source: String,
     /// The tag that was resolved (TOML key `ref`).
     #[serde(rename = "ref")]
@@ -569,16 +841,39 @@ pub struct RootfsPin {
     pub source_date_epoch: u64,
 }
 
-/// Pinned rkbin blobs, each `"<filename>@sha256:<hex>"`, verified before the
-/// u-boot build consumes them.
+/// Pinned rkbin blobs: the commit of the rkbin repository they are fetched from, and
+/// each file as `"<filename>@sha256:<hex>"`.
+///
+/// The commit says where the bytes come from and the sha256 says what they are. The
+/// u-boot stage fetches each named file at `commit` and refuses one whose hash
+/// differs, so a re-pushed or tampered upstream cannot change the bootloader. A
+/// `--blobs-dir` build reads the files from a local directory instead and is held to
+/// the same hashes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BlobsPin {
-    /// ATF/BL31 blob pin. Deserialization enforces the
-    /// `"<filename>@sha256:<hex64>"` shape.
-    #[serde(deserialize_with = "de_blob_pin")]
-    pub atf: String,
-    /// DDR TPL blob pin. Shape-enforced like [`atf`](Self::atf).
+    /// Clone URL the commit was pinned from (the resolved `[rkbin.upstream].git`).
+    /// The drift gate compares it against a fresh resolve.
+    pub source: String,
+    /// The branch `update` resolved the commit from (TOML key `ref`).
+    #[serde(rename = "ref")]
+    pub reference: String,
+    /// The rkbin commit every file below is fetched at. Deserialization enforces the
+    /// full-hex-sha shape. `update` keeps it while it still contains every named file,
+    /// since rkbin deletes a blob's older versions when it publishes a newer one.
+    #[serde(deserialize_with = "de_commit")]
+    pub commit: String,
+    /// rkbin BL31 blob pin, present iff the BL31 provider is `rkbin`. A `tfa` build
+    /// pins its BL31 as [`Lock::tfa`] and serializes without the field.
+    /// Deserialization enforces the `"<filename>@sha256:<hex64>"` shape.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "de_opt_blob_pin"
+    )]
+    pub atf: Option<String>,
+    /// DDR TPL blob pin, required under either BL31 provider. Shape-enforced like
+    /// [`atf`](Self::atf).
     #[serde(deserialize_with = "de_blob_pin")]
     pub tpl: String,
     /// OP-TEE BL32 blob pin, present only when the build has one. Absent on
@@ -638,6 +933,8 @@ mod tests {
                 source: "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git".into(),
                 reference: "v7.1.1".into(),
                 commit: "c9acdc466e9aa96352f658b9276aa8a45b8e817d".into(),
+                revision: 1,
+                config_sha256: "d".repeat(64),
             }),
             patches: Some(PatchesPin {
                 series: vec!["rk3588-accel".into()],
@@ -649,6 +946,8 @@ mod tests {
                 source: "https://git.u-boot-project.org/u-boot/u-boot.git".into(),
                 reference: "v2026.04".into(),
                 commit: "88dc2788777babfd6322fa655df549a019aa1e69".into(),
+                revision: 1,
+                config_sha256: "9".repeat(64),
             }),
             uboot_patches: Some(PatchesPin {
                 series: vec!["rk3576-display".into()],
@@ -656,6 +955,7 @@ mod tests {
                 reference: "main".into(),
                 commit: "e86ef2a0000000000000000000000000000000ab".into(),
             }),
+            tfa: None,
             userspace: vec![
                     UserspacePin {
                         name: "mpp".into(),
@@ -696,7 +996,10 @@ mod tests {
                 source_date_epoch: 1_790_347_034,
             }),
             blobs: Some(BlobsPin {
-                atf: "rk3588_bl31_v1.51.elf@sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
+                source: "https://example.invalid/rkbin.git".into(),
+                reference: "master".into(),
+                commit: "c".repeat(40),
+                atf: Some("rk3588_bl31_v1.51.elf@sha256:0000000000000000000000000000000000000000000000000000000000000000".into()),
                 tpl: "rk3588_ddr_lp4_2112MHz_lp5_2400MHz_v1.19.bin@sha256:1111111111111111111111111111111111111111111111111111111111111111".into(),
                 bl32: None,
             }),
@@ -738,6 +1041,8 @@ mod tests {
                 source: "https://k.example/k.git".into(),
                 reference: "v1".into(),
                 commit: "a".repeat(40),
+                revision: 1,
+                config_sha256: "d".repeat(64),
             }),
             patches: Some(PatchesPin {
                 series: vec!["rk3588-accel".into()],
@@ -749,8 +1054,11 @@ mod tests {
                 source: "https://u.example/u.git".into(),
                 reference: "v2".into(),
                 commit: "c".repeat(40),
+                revision: 1,
+                config_sha256: "9".repeat(64),
             }),
             uboot_patches: None,
+            tfa: None,
             userspace: vec![
                 UserspacePin {
                     name: "mpp".into(),
@@ -791,8 +1099,13 @@ mod tests {
                 source_date_epoch: 1_790_347_034,
             }),
             blobs: Some(BlobsPin {
-                atf: "atf@sha256:0000000000000000000000000000000000000000000000000000000000000000"
-                    .into(),
+                source: "https://example.invalid/rkbin.git".into(),
+                reference: "master".into(),
+                commit: "c".repeat(40),
+                atf: Some(
+                    "atf@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                        .into(),
+                ),
                 tpl: "tpl@sha256:1111111111111111111111111111111111111111111111111111111111111111"
                     .into(),
                 bl32: None,
@@ -802,6 +1115,406 @@ mod tests {
             extra_debs: vec![],
             snapshot: None,
         }
+    }
+
+    fn tfa_pin() -> TfaPin {
+        TfaPin {
+            source: "https://example.invalid/trusted-firmware-a.git".into(),
+            reference: "v2.16.0".into(),
+            commit: "e".repeat(40),
+        }
+    }
+
+    #[test]
+    fn a_tfa_lock_round_trips_without_an_rkbin_bl31() {
+        let mut lock = base_lock();
+        lock.blobs.as_mut().unwrap().atf = None;
+        lock.tfa = Some(tfa_pin());
+        let text = lock.to_toml_string().unwrap();
+        assert!(text.contains("[tfa]\n"), "{text}");
+        assert!(
+            !text.contains("atf ="),
+            "the rkbin BL31 is not pinned: {text}"
+        );
+        assert_eq!(Lock::from_toml_str(&text, "t").unwrap(), lock);
+        assert_eq!(lock.bl31_provider(), Some(crate::model::Bl31Provider::Tfa));
+        assert_eq!(
+            base_lock().bl31_provider(),
+            Some(crate::model::Bl31Provider::Rkbin)
+        );
+        // The TF-A commit is held to the full-sha shape like every other.
+        let short = text.replace(&"e".repeat(40), "eeee");
+        assert!(Lock::from_toml_str(&short, "t").is_err());
+    }
+
+    #[test]
+    fn a_lock_pins_exactly_one_bl31_where_it_builds_u_boot() {
+        let shape = |lock: &Lock| {
+            let text = lock.to_toml_string().unwrap();
+            match Lock::from_toml_str(&text, "t.lock") {
+                Err(crate::ConfigError::LockShape { path, .. }) => {
+                    assert_eq!(path, "t.lock");
+                    false
+                }
+                Err(other) => panic!("expected LockShape, got {other:?}"),
+                Ok(_) => true,
+            }
+        };
+        assert!(shape(&base_lock()), "rkbin BL31 alone");
+        let mut both = base_lock();
+        both.tfa = Some(tfa_pin());
+        assert!(!shape(&both), "rkbin and TF-A at once");
+        let mut neither = base_lock();
+        neither.blobs.as_mut().unwrap().atf = None;
+        assert!(!shape(&neither), "no BL31 at all");
+        let mut orphan = base_lock();
+        orphan.blobs = None;
+        orphan.tfa = Some(tfa_pin());
+        assert!(!shape(&orphan), "a TF-A BL31 with no DDR TPL");
+        // No u-boot, no BL31: a depthcharge lock pins neither and is well formed.
+        let mut none = base_lock();
+        none.blobs = None;
+        assert!(shape(&none));
+        assert_eq!(none.bl31_provider(), None);
+    }
+
+    /// The kernel revision: kept while nothing reaching the kernel moved, moved on by one
+    /// when the commit, the configuration or the patch series moved under the same ref,
+    /// and back to 1 for a new ref, which is a new version.
+    #[test]
+    fn the_kernel_revision_moves_with_what_reaches_the_kernel() {
+        let mut prev = base_lock();
+        prev.kernel.as_mut().unwrap().revision = 3;
+        let carried = |edit: &dyn Fn(&mut Lock)| {
+            let mut next = base_lock();
+            edit(&mut next);
+            next.carry_kernel_revision(&prev);
+            next.kernel.unwrap().revision
+        };
+
+        assert_eq!(carried(&|_| {}), 3);
+        assert_eq!(
+            carried(&|l| l.kernel.as_mut().unwrap().config_sha256 = "e".repeat(64)),
+            4
+        );
+        assert_eq!(
+            carried(&|l| l.kernel.as_mut().unwrap().commit = "b".repeat(40)),
+            4
+        );
+        assert_eq!(
+            carried(&|l| l.patches.as_mut().unwrap().commit = "c".repeat(40)),
+            4
+        );
+        assert_eq!(
+            carried(&|l| l.patches.as_mut().unwrap().series.push("more".into())),
+            4
+        );
+        // Moving a pin that does not reach the kernel keeps the revision.
+        assert_eq!(
+            carried(&|l| l.rootfs.as_mut().unwrap().suite = "sid".into()),
+            3
+        );
+        // A new ref is a new version, and so is another kernel definition.
+        assert_eq!(
+            carried(&|l| l.kernel.as_mut().unwrap().reference = "v7.1.6".into()),
+            1
+        );
+        assert_eq!(
+            carried(&|l| l.kernel.as_mut().unwrap().id = "other".into()),
+            1
+        );
+        // A lock that compiles no kernel has no revision to carry.
+        let mut none = base_lock();
+        none.kernel = None;
+        none.carry_kernel_revision(&prev);
+        assert!(none.kernel.is_none());
+    }
+
+    /// A blob pin as `update` writes it: the file name and a digest of one repeated
+    /// hex digit.
+    fn blob(file: &str, digit: char) -> String {
+        format!("{file}@sha256:{}", digit.to_string().repeat(64))
+    }
+
+    /// [`base_lock`] with the u-boot pins spelled as a shipped RK3588 lock spells them:
+    /// a release ref and versioned rkbin blobs.
+    fn uboot_lock() -> Lock {
+        let mut lock = base_lock();
+        lock.uboot.as_mut().unwrap().reference = "v2026.10".into();
+        let blobs = lock.blobs.as_mut().unwrap();
+        blobs.atf = Some(blob("rk3588_bl31_v1.56.elf", '0'));
+        blobs.tpl = blob("rk3588_ddr_lp4_2112MHz_lp5_2400MHz_v1.24.bin", '1');
+        lock
+    }
+
+    /// [`uboot_lock`] with TF-A in place of the rkbin BL31.
+    fn uboot_tfa_lock() -> Lock {
+        let mut lock = uboot_lock();
+        lock.blobs.as_mut().unwrap().atf = None;
+        lock.tfa = Some(tfa_pin());
+        lock
+    }
+
+    /// The u-boot package's revision: kept while nothing the package is built from
+    /// moved, moved on by one when an input outside its upstream version moved, and
+    /// back to 1 for a new upstream version.
+    #[test]
+    fn the_uboot_revision_moves_with_what_reaches_the_package() {
+        let carried = |prev: &Lock, edit: &dyn Fn(&mut Lock)| {
+            let mut prev = prev.clone();
+            prev.uboot.as_mut().unwrap().revision = 3;
+            let mut next = prev.clone();
+            next.uboot.as_mut().unwrap().revision = 1;
+            edit(&mut next);
+            next.carry_uboot_revision(&prev);
+            next.uboot.unwrap().revision
+        };
+        let rkbin = uboot_lock();
+
+        assert_eq!(carried(&rkbin, &|_| {}), 3);
+        // Under the same u-boot ref and BL31, every other input of the package moves it
+        // on: the DDR TPL, whether its bytes or its file moved, and the BL32.
+        let ddr = |l: &mut Lock| {
+            l.blobs.as_mut().unwrap().tpl =
+                blob("rk3588_ddr_lp4_2112MHz_lp5_2400MHz_v1.24.bin", '2')
+        };
+        assert_eq!(carried(&rkbin, &ddr), 4);
+        assert_eq!(
+            carried(&rkbin, &|l| l.blobs.as_mut().unwrap().tpl =
+                blob("rk3588_ddr_lp4_2112MHz_lp5_2736MHz_v1.25.bin", '1')),
+            4
+        );
+        assert_eq!(
+            carried(&rkbin, &|l| l.blobs.as_mut().unwrap().bl32 =
+                Some(blob("rk3588_bl32_v1.20.bin", '3'))),
+            4
+        );
+        // An rkbin BL31 whose bytes moved under the same file name.
+        assert_eq!(
+            carried(&rkbin, &|l| l.blobs.as_mut().unwrap().atf =
+                Some(blob("rk3588_bl31_v1.56.elf", '4'))),
+            4
+        );
+        // The u-boot tree: its commit, and its patch series and pin.
+        assert_eq!(
+            carried(&rkbin, &|l| l.uboot.as_mut().unwrap().commit =
+                "d".repeat(40)),
+            4
+        );
+        let patches = PatchesPin {
+            series: vec!["rk3588-uboot".into()],
+            source: "https://example.invalid/patches.git".into(),
+            reference: "main".into(),
+            commit: "6".repeat(40),
+        };
+        assert_eq!(
+            carried(&rkbin, &|l| l.uboot_patches = Some(patches.clone())),
+            4
+        );
+        let mut patched = rkbin.clone();
+        patched.uboot_patches = Some(patches.clone());
+        assert_eq!(
+            carried(&patched, &|l| l.uboot_patches.as_mut().unwrap().commit =
+                "7".repeat(40)),
+            4
+        );
+        // The configuration digest stands for the config-tree inputs.
+        assert_eq!(
+            carried(&rkbin, &|l| l.uboot.as_mut().unwrap().config_sha256 =
+                "8".repeat(64)),
+            4
+        );
+        // A commit that moved under a branch ref is a new package under one version.
+        let mut branch = rkbin.clone();
+        branch.uboot.as_mut().unwrap().reference = "master".into();
+        assert_eq!(
+            carried(&branch, &|l| l.uboot.as_mut().unwrap().commit =
+                "d".repeat(40)),
+            4
+        );
+        // What does not reach the package keeps the revision: the rkbin commit the
+        // blobs are fetched at, whose hashes decide the bytes, and any other axis.
+        assert_eq!(
+            carried(&rkbin, &|l| l.blobs.as_mut().unwrap().commit =
+                "f".repeat(40)),
+            3
+        );
+        assert_eq!(
+            carried(&rkbin, &|l| l.kernel.as_mut().unwrap().commit =
+                "b".repeat(40)),
+            3
+        );
+        // A new u-boot ref or a new rkbin BL31 version is a new upstream version.
+        assert_eq!(
+            carried(&rkbin, &|l| l.uboot.as_mut().unwrap().reference =
+                "v2027.01".into()),
+            1
+        );
+        assert_eq!(
+            carried(&rkbin, &|l| l.blobs.as_mut().unwrap().atf =
+                Some(blob("rk3588_bl31_v1.57.elf", '0'))),
+            1
+        );
+
+        // Under TF-A, a new commit under the same TF-A ref moves the revision on, and a
+        // new TF-A ref is a new upstream version, as is a move between providers.
+        let tfa = uboot_tfa_lock();
+        assert_eq!(carried(&tfa, &|_| {}), 3);
+        assert_eq!(
+            carried(&tfa, &|l| l.tfa.as_mut().unwrap().commit = "f".repeat(40)),
+            4
+        );
+        assert_eq!(carried(&tfa, &ddr), 4);
+        assert_eq!(
+            carried(&tfa, &|l| l.tfa.as_mut().unwrap().reference =
+                "v2.17.0".into()),
+            1
+        );
+        assert_eq!(
+            carried(&tfa, &|l| {
+                l.tfa = None;
+                l.blobs.as_mut().unwrap().atf = Some(blob("rk3588_bl31_v1.56.elf", '0'));
+            }),
+            1
+        );
+
+        // A lock that builds no u-boot has no revision to carry, and a lock that gains
+        // a u-boot starts it at 1.
+        let mut none = rkbin.clone();
+        none.uboot = None;
+        none.carry_uboot_revision(&rkbin);
+        assert!(none.uboot.is_none());
+        let mut gained = rkbin.clone();
+        gained.carry_uboot_revision(&none);
+        assert_eq!(gained.uboot.unwrap().revision, 1);
+    }
+
+    /// The package version: the u-boot ref and the BL31's own version, then the
+    /// revision, spelled as a legal Debian version.
+    #[test]
+    fn the_uboot_deb_version_names_the_ref_the_bl31_and_the_revision() {
+        let version = |edit: &dyn Fn(&mut Lock)| {
+            let mut lock = uboot_lock();
+            edit(&mut lock);
+            lock.uboot_deb_version()
+        };
+        assert_eq!(version(&|_| {}).as_deref(), Some("2026.10+rkbin1.56-1"));
+        assert_eq!(
+            version(&|l| l.uboot.as_mut().unwrap().revision = 12).as_deref(),
+            Some("2026.10+rkbin1.56-12")
+        );
+        // A prerelease ref's `-` is a `~`, so the revision's `-` is the only one.
+        assert_eq!(
+            version(&|l| l.uboot.as_mut().unwrap().reference = "v2026.10-rc1".into()).as_deref(),
+            Some("2026.10~rc1+rkbin1.56-1")
+        );
+        assert_eq!(
+            version(&|l| l.uboot.as_mut().unwrap().reference = "master".into()).as_deref(),
+            Some("0master+rkbin1.56-1")
+        );
+        // A blob whose name states no version contributes its stem.
+        assert_eq!(
+            version(&|l| l.blobs.as_mut().unwrap().atf = Some(blob("bl31.elf", '0'))).as_deref(),
+            Some("2026.10+rkbinbl31-1")
+        );
+        let mut tfa = uboot_tfa_lock();
+        assert_eq!(
+            tfa.uboot_deb_version().as_deref(),
+            Some("2026.10+tfa2.16.0-1")
+        );
+        tfa.tfa.as_mut().unwrap().reference = "v2.17-rc0".into();
+        assert_eq!(
+            tfa.uboot_deb_version().as_deref(),
+            Some("2026.10+tfa2.17~rc0-1")
+        );
+        // No u-boot, or no BL31 to name, is no version.
+        assert_eq!(version(&|l| l.uboot = None), None);
+        assert_eq!(version(&|l| l.blobs.as_mut().unwrap().atf = None), None);
+    }
+
+    /// Each package a re-pin produces sorts after the one it replaces, by dpkg's own
+    /// ordering: a new revision under one upstream version, past revision 9, a
+    /// prerelease to its release, a new BL31 and a new u-boot release, under either
+    /// provider. A re-pin that reset to revision 1 under one upstream version would be
+    /// read by apt as a downgrade, and one that kept the revision as the same package.
+    #[test]
+    fn each_re_pinned_uboot_package_sorts_after_the_last() {
+        use crate::debdep::compare_versions;
+        use std::cmp::Ordering;
+        let chain = |mut prev: Lock, steps: &[&dyn Fn(&mut Lock)]| {
+            for step in steps {
+                let mut next = prev.clone();
+                next.uboot.as_mut().unwrap().revision = 1;
+                step(&mut next);
+                next.carry_uboot_revision(&prev);
+                let (was, now) = (
+                    prev.uboot_deb_version().unwrap(),
+                    next.uboot_deb_version().unwrap(),
+                );
+                assert_eq!(
+                    compare_versions(&was, &now),
+                    Ordering::Less,
+                    "{was} -> {now}"
+                );
+                prev = next;
+            }
+        };
+        let ddr = |l: &mut Lock| {
+            l.blobs.as_mut().unwrap().tpl =
+                blob("rk3588_ddr_lp4_2112MHz_lp5_2400MHz_v1.25.bin", '2')
+        };
+        let mut rc = uboot_lock();
+        rc.uboot.as_mut().unwrap().reference = "v2026.10-rc1".into();
+        chain(
+            rc,
+            &[
+                &ddr,
+                &|l| l.uboot.as_mut().unwrap().reference = "v2026.10".into(),
+                &|l| l.blobs.as_mut().unwrap().atf = Some(blob("rk3588_bl31_v1.57.elf", '0')),
+                &|l| l.uboot.as_mut().unwrap().commit = "d".repeat(40),
+                &|l| l.uboot.as_mut().unwrap().reference = "v2027.01".into(),
+            ],
+        );
+        let mut tfa_rc = uboot_tfa_lock();
+        tfa_rc.tfa.as_mut().unwrap().reference = "v2.16-rc0".into();
+        chain(
+            tfa_rc,
+            &[
+                &|l| l.tfa.as_mut().unwrap().commit = "f".repeat(40),
+                &|l| l.tfa.as_mut().unwrap().reference = "v2.16.0".into(),
+                &ddr,
+                &|l| l.uboot.as_mut().unwrap().reference = "v2027.01".into(),
+            ],
+        );
+        // Revisions order numerically, not as text.
+        let mut nine = uboot_lock();
+        nine.uboot.as_mut().unwrap().revision = 9;
+        chain(nine, &[&ddr]);
+    }
+
+    /// The revision and digest are required: a `[uboot]` table without them describes
+    /// a package whose version nothing fixes, so it is refused at parse.
+    #[test]
+    fn a_uboot_pin_without_its_revision_or_digest_is_refused() {
+        let text = base_lock().to_toml_string().unwrap();
+        let digest = format!("config_sha256 = \"{}\"\n", "9".repeat(64));
+        assert!(text.contains(&digest), "{text}");
+        for (from, to) in [
+            (digest.as_str(), ""),
+            (digest.as_str(), "config_sha256 = \"short\"\n"),
+        ] {
+            let bad = text.replacen(from, to, 1);
+            assert!(Lock::from_toml_str(&bad, "t").is_err(), "{bad}");
+        }
+        let uboot_table = text.find("[uboot]").unwrap();
+        let revision = uboot_table + text[uboot_table..].find("revision = 1\n").unwrap();
+        let without = format!(
+            "{}{}",
+            &text[..revision],
+            &text[revision + "revision = 1\n".len()..]
+        );
+        let err = Lock::from_toml_str(&without, "t").unwrap_err().to_string();
+        assert!(err.contains("revision"), "{err}");
     }
 
     /// An update that moves no pin keeps the epoch, and one that moves any pin takes
@@ -920,12 +1633,18 @@ mod tests {
             commit: "7".repeat(40),
         }];
         lock.apps = vec![dotnet_app_pin()];
+        // A TF-A BL31 in place of the rkbin one, so the TF-A tree is a commit too.
+        lock.blobs.as_mut().unwrap().atf = None;
+        lock.tfa = Some(tfa_pin());
+        lock.blobs.as_mut().unwrap().commit = "f".repeat(40);
         let pinned = lock.pinned_commits();
         let expected: std::collections::BTreeSet<String> = [
             "a", // kernel
             "b", // patches
             "c", // u-boot
             "6", // u-boot patches
+            "e", // TF-A
+            "f", // rkbin
             "1", "2", "3", // userspace
             "4", // ffmpeg base
             "5", // ffmpeg rockchip provenance
@@ -944,14 +1663,15 @@ mod tests {
 
     #[test]
     fn a_lock_that_fetches_nothing_pins_no_commits() {
-        // The C201 shape (distro kernel, depthcharge, no blobs): the blob and rootfs
-        // pins are content hashes, not commits, so the sweep must not read them as
-        // liveness for a checkout directory that happens to share their hex shape.
+        // The C201 shape (distro kernel, depthcharge, no blobs): the rootfs pin is a
+        // content hash, not a commit, so the sweep must not read it as liveness for a
+        // checkout directory that happens to share its hex shape.
         let lock = Lock {
             kernel: None,
             patches: None,
             uboot: None,
             uboot_patches: None,
+            tfa: None,
             userspace: Vec::new(),
             ffmpeg: None,
             rootfs: Some(RootfsPin {
@@ -961,11 +1681,7 @@ mod tests {
                 manifest_sha256: None,
                 source_date_epoch: 1_790_347_034,
             }),
-            blobs: Some(BlobsPin {
-                atf: format!("atf@sha256:{}", "0".repeat(64)),
-                tpl: format!("tpl@sha256:{}", "1".repeat(64)),
-                bl32: None,
-            }),
+            blobs: None,
             kmods: vec![],
             apps: vec![],
             extra_debs: vec![],
@@ -986,6 +1702,7 @@ mod tests {
             patches: None,
             uboot: None,
             uboot_patches: None,
+            tfa: None,
             userspace: Vec::new(),
             ffmpeg: None,
             rootfs: Some(RootfsPin {

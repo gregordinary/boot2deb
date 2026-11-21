@@ -1,0 +1,43 @@
+<!--
+  Imported into every project of a dotnet-deb app's build through
+  CustomAfterMicrosoftCommonTargets, which boot2deb sets in the build environment.
+
+  A publish ships a static web asset endpoint manifest (*.staticwebassets.endpoints.json)
+  with a Last-Modified header per asset, taken from each asset file's modification time.
+  The source assets have the commit's time, which boot2deb sets on the tree. The .gz and
+  .br variants the SDK compresses during the build are written with the time of the
+  build. These targets stamp them with SOURCE_DATE_EPOCH as soon as they are written,
+  before the SDK defines their assets and endpoints, so the manifest is the same on
+  every build. Without SOURCE_DATE_EPOCH in the environment both targets do nothing.
+
+  The compiler also names each file-local type a source generator emits, such as the
+  Regex generator's, after a hash of the generated file's path. That path is under the
+  project's obj directory, so it contains the directory the build ran in. The PathMap
+  below maps Boot2debBuildRoot, the directory every path of the build is under, to /_,
+  so the assemblies are the same wherever the build runs.
+-->
+<Project>
+  <PropertyGroup>
+    <Boot2debSourceDate Condition="'$(SOURCE_DATE_EPOCH)' != ''">$([System.DateTime]::UnixEpoch.AddSeconds($(SOURCE_DATE_EPOCH)).ToString('o'))</Boot2debSourceDate>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Boot2debBuildRoot)' != ''">
+    <Boot2debPathMap>$(Boot2debBuildRoot)=/_</Boot2debPathMap>
+    <PathMap Condition="'$(PathMap)' != ''">$(Boot2debPathMap),$(PathMap)</PathMap>
+    <PathMap Condition="'$(PathMap)' == ''">$(Boot2debPathMap)</PathMap>
+  </PropertyGroup>
+
+  <Target Name="Boot2debStampBuildCompressedAssets"
+          AfterTargets="GenerateBuildCompressedStaticWebAssets"
+          Condition="'$(Boot2debSourceDate)' != ''">
+    <Touch Files="@(_GZipCompressedStaticWebAssets);@(_BrotliCompressedStaticWebAssets)"
+           Time="$(Boot2debSourceDate)" />
+  </Target>
+
+  <Target Name="Boot2debStampPublishCompressedAssets"
+          AfterTargets="GeneratePublishCompressedStaticWebAssets"
+          Condition="'$(Boot2debSourceDate)' != ''">
+    <Touch Files="@(_GZipCompressedStaticWebAssetsForPublish);@(_BrotliCompressedStaticWebAssetsForPublish)"
+           Time="$(Boot2debSourceDate)" />
+  </Target>
+</Project>

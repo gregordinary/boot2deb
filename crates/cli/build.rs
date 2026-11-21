@@ -1,7 +1,7 @@
-//! Build script: stamp the boot2deb git commit and dirty flag into the binary as
-//! compile-time env vars (`BOOT2DEB_GIT_COMMIT`, `BOOT2DEB_GIT_DIRTY`), so a built
-//! image's provenance manifest records which boot2deb checkout produced it. Absent a
-//! git checkout of its own (a source tarball, even one unpacked inside another
+//! Build script: stamp the boot2deb git commit and the state of its sources into the
+//! binary as compile-time env vars (`BOOT2DEB_GIT_COMMIT`, `BOOT2DEB_GIT_DIRTY`), so a
+//! built image's provenance manifest records which boot2deb checkout produced it. Absent
+//! a git checkout of its own (a source tarball, even one unpacked inside another
 //! repository) the commit is emitted empty and the crate version alone identifies the
 //! builder.
 
@@ -33,9 +33,9 @@ fn main() {
         println!("cargo:rerun-if-changed={marker}");
     }
     // Re-stamp on every edit to the sources as well. Cargo scans a directory
-    // recursively, so a change anywhere under crates/ re-runs this script. Without it
-    // the rebuild that compiles an edit keeps the dirty answer from the last HEAD move,
-    // and the binary claims a clean tree it was not built from.
+    // recursively, so a change anywhere under crates/, a new file included, re-runs
+    // this script. Without it the rebuild that compiles an edit keeps the dirty answer
+    // from the last HEAD move, and the binary claims a clean tree it was not built from.
     for path in SOURCE_PATHS {
         println!("cargo:rerun-if-changed=../../{path}");
     }
@@ -50,21 +50,19 @@ fn main() {
     } else {
         String::new()
     };
-    // "Dirty" is tracked content under SOURCE_PATHS differing from HEAD (`git diff`),
-    // staged or not. Untracked files do not change the build output, and neither does
-    // an edit outside SOURCE_PATHS: a recipe or a doc page is build input, which the
-    // config stamp records. Unknown without a commit.
-    let dirty = !commit.is_empty()
-        && Command::new("git")
-            .arg("-C")
-            .arg(&root)
-            .args(["diff", "--quiet", "HEAD", "--"])
-            .args(SOURCE_PATHS)
-            .output()
-            .is_ok_and(|o| o.status.code() == Some(1));
+    // The state of SOURCE_PATHS against that commit, by the rule `SourceState::of`
+    // states: a tracked change, or any file git does not track, ignored or not, makes the
+    // tree dirty. A git read that fails stamps `unknown`, never `false`. Unknown without
+    // a commit, where there is nothing to stand against. An edit outside SOURCE_PATHS,
+    // such as a recipe or a doc page, is build input, which the config stamp records.
+    let state = if commit.is_empty() {
+        SourceState::Unknown
+    } else {
+        SourceState::of(tracked_changes(&root), untracked_files(&root).as_deref())
+    };
 
     println!("cargo:rustc-env=BOOT2DEB_GIT_COMMIT={commit}");
-    println!("cargo:rustc-env=BOOT2DEB_GIT_DIRTY={dirty}");
+    println!("cargo:rustc-env=BOOT2DEB_GIT_DIRTY={}", state.stamp());
 }
 
 /// The workspace root, two levels above this crate. `SOURCE_PATHS` are relative to it,
@@ -88,4 +86,41 @@ fn git(dir: &Path, args: &[&str]) -> Option<String> {
     }
     let s = String::from_utf8(out.stdout).ok()?.trim().to_string();
     (!s.is_empty()).then_some(s)
+}
+
+/// Whether tracked content under SOURCE_PATHS differs from HEAD, staged or not.
+/// `git diff --quiet` exits 1 for differences and 0 for none. Anything else, such as
+/// 128 for "not a repository" or a git that will not spawn, is `None`.
+fn tracked_changes(root: &Path) -> Option<bool> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["diff", "--quiet", "HEAD", "--"])
+        .args(SOURCE_PATHS)
+        .output()
+        .ok()?;
+    match out.status.code() {
+        Some(0) => Some(false),
+        Some(1) => Some(true),
+        _ => None,
+    }
+}
+
+/// Every file under SOURCE_PATHS that git does not track, ignored ones included, or
+/// `None` when git fails.
+fn untracked_files(root: &Path) -> Option<Vec<String>> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "--others", "-z", "--"])
+        .args(SOURCE_PATHS)
+        .output()
+        .ok()?;
+    out.status.success().then(|| {
+        out.stdout
+            .split(|&b| b == 0)
+            .filter(|f| !f.is_empty())
+            .map(|f| String::from_utf8_lossy(f).into_owned())
+            .collect()
+    })
 }

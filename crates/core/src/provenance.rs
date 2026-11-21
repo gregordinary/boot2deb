@@ -6,7 +6,9 @@
 //! hold, plus the build-time facts the engine supplies ([`BuildFacts`]). Those are the
 //! solved manifest's content hash and package count, and the host/cross identity. They
 //! also include the filesystem contract, the sandbox profile every build command ran
-//! under, and the per-image first-boot credential.
+//! under, and who can reach the image's default account. The generated first-boot
+//! password is not among them: it is written to a private document of its own
+//! ([`crate::credential`]), and this one contains no secret.
 //!
 //! So the assembly and its canonical TOML form are unit-testable without a build. It is
 //! a join of pins the build already computes, rather than new tracking. License and
@@ -25,8 +27,8 @@ use std::collections::BTreeMap;
 /// Banner prepended to a serialized provenance manifest.
 const BANNER: &str = "\
 # boot2deb provenance manifest: the resolved build point + every pin.
-# Emitted per built image. Contains the image's initial first-boot password
-# ([credentials]) — treat this file as sensitive.
+# Emitted per built image. Contains no secret: the first-boot password is in the
+# image's private <stem>.credentials.toml beside it, and nowhere else.
 ";
 
 /// Banner prepended to a serialized [`SystemIdentity`].
@@ -34,8 +36,9 @@ const IDENTITY_BANNER: &str = "\
 # boot2deb image identity. Written at build time, and read by tools that operate on
 # this system from outside it — including when it cannot be booted or mounted.
 #
-# Carries no secrets. The build's provenance manifest holds the first-boot credential
-# and the full pin list; it stays with the build and never ships inside the image.
+# Contains no secret. The build's provenance manifest holds the full pin list and stays
+# with the build; the first-boot password is in a private file beside it. Neither ships
+# inside the image.
 ";
 
 /// Schema version of [`SystemIdentity`]. Bumped when a field changes meaning or is
@@ -43,11 +46,12 @@ const IDENTITY_BANNER: &str = "\
 const IDENTITY_VERSION: u32 = 1;
 
 /// The build-time facts the engine supplies to [`assemble`], beyond the [`Lock`]
-/// and [`ImageBuild`]. Those are the host/cross identity, the solved manifest's digest
-/// and size, and the generated first-boot credential.
+/// and [`ImageBuild`]. Those are the host/cross identity and the solved manifest's digest
+/// and size, among others.
 ///
 /// The engine supplies these because they are side effects (hashing the manifest, reading
-/// the RNG) that the pure core does not perform.
+/// the formatter's record) that the pure core does not perform. The generated first-boot
+/// password is deliberately not one of them, so no manifest can contain it.
 pub struct BuildFacts<'a> {
     /// Detected build-host architecture (e.g. `x86_64`, `arm64`).
     pub host_arch: &'a str,
@@ -73,10 +77,6 @@ pub struct BuildFacts<'a> {
     pub archives: &'a [ArchiveProvenance],
     /// Default account name the image ships with.
     pub user: &'a str,
-    /// The per-image first-boot password. Deliberately unique per
-    /// build, so it is not derivable and the rootfs `/etc/shadow` is intentionally
-    /// outside the byte-reproducibility claim.
-    pub password: &'a str,
     /// boot2deb crate version that ran the build (`CARGO_PKG_VERSION`).
     pub builder_version: &'a str,
     /// Version of the sandbox and Debian provisioning library the build ran on
@@ -86,8 +86,8 @@ pub struct BuildFacts<'a> {
     /// Short git commit of the boot2deb checkout that ran the build, or `None` when
     /// built outside a git checkout (e.g. from a source tarball).
     pub builder_commit: Option<&'a str>,
-    /// Whether that checkout had uncommitted changes at build time. Only meaningful
-    /// when `builder_commit` is `Some`.
+    /// Whether that checkout's sources differed from its commit at build time, or git
+    /// could not tell. Only meaningful when `builder_commit` is `Some`.
     pub builder_dirty: bool,
     /// Short git commit of the *config tree* the build resolved from, or `None` when
     /// the config root is not a git checkout. A separate coordinate from
@@ -502,7 +502,8 @@ pub struct ProvenanceManifest {
     pub toolchain: ToolchainProvenance,
     /// Which boot2deb produced the image — the builder axis of provenance.
     pub built_with: BuiltWithProvenance,
-    /// First-boot credential — the per-image secret.
+    /// Who can reach the image's default account, and what reaching root costs them.
+    /// Contains no secret ([`CredentialsProvenance`]).
     pub credentials: CredentialsProvenance,
     /// How every sandboxed build command is rooted, who it is, what it can reach, and
     /// what confines it. See [`SandboxProvenance`] for what the three keys record
@@ -629,8 +630,9 @@ pub struct SourceDurability {
 /// image is all such a tool has.
 ///
 /// It is deliberately a **subset** of [`ProvenanceManifest`] rather than the same
-/// document, and the line between them is a security boundary. The manifest contains the
-/// per-image first-boot password, and nothing that ships inside an image can.
+/// document. The manifest records who can reach the image's account and with which
+/// keys. That is the build's record to keep, not the image's to publish to every reader of
+/// its disk.
 ///
 /// The manifest also contains the solved-manifest digest, which *cannot* be here. That
 /// digest is an output of the rootfs bootstrap. It is therefore not yet known when the
@@ -729,6 +731,12 @@ pub struct IdentityImage {
     /// `depthchargectl --board` needs. Absent under a boot method with no board profile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub board: Option<String>,
+    /// The [`Bl31Provider`](crate::model::Bl31Provider) of the bootloader built with
+    /// this image (`rkbin` or `tfa`). A reader cannot tell the two apart from the
+    /// rootfs, and on `split` the bootloader is not even on the same medium. Absent
+    /// under a boot method that builds no u-boot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bl31: Option<String>,
     /// The [distro layer](crate::distro::DistroLayer) the image was built from, such
     /// as `debian`. `/etc/os-release` says the same thing on the disk itself. This is
     /// the build's account of it, and a disagreement is worth reporting.
@@ -741,6 +749,12 @@ pub struct IdentityImage {
     /// filesystem live on *different media*. A reader that finds no bootloader beside
     /// this rootfs is therefore looking at an expected state, not a fault.
     pub layout: String,
+    /// What starts the kernel (`extlinux` / `efi`). It tells a reader where the boot
+    /// configuration lives: an extlinux menu on the rootfs, or GRUB on an EFI system
+    /// partition beside it. Absent under a boot method whose firmware loads the kernel
+    /// itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loader: Option<String>,
     /// Image hostname.
     pub hostname: String,
 }
@@ -800,6 +814,10 @@ pub struct ImageProvenance {
     pub features: Vec<String>,
     /// Image layout (`combined` / `split`).
     pub layout: String,
+    /// The loader (`extlinux` / `efi`), absent under a boot method whose firmware loads
+    /// the kernel itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loader: Option<String>,
     /// Image size as the recipe authored it — `4G`, or `fit+20%`.
     pub image_size: String,
     /// The whole-disk size the build realized, in bytes.
@@ -825,7 +843,7 @@ pub struct ImageProvenance {
     /// The `tzdata` zone the image's `/etc/localtime` points at.
     pub timezone: String,
     /// The NTP servers the image prefers. Empty is the common case, and means the image
-    /// contains no `timesyncd` drop-in and uses Debian's fallback pool.
+    /// configures none and uses its distribution's own servers.
     ///
     /// That is worth being able to tell apart from a configured server after the fact. A
     /// board that came up with the wrong time was asking *something*, and this says what.
@@ -874,6 +892,14 @@ pub struct SourcesProvenance {
     /// u-boot commit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uboot_commit: Option<String>,
+    /// Trusted Firmware-A ref. Absent, with [`tfa_commit`](Self::tfa_commit), unless
+    /// the BL31 provider is `tfa`. The rkbin provider's BL31 is a blob, recorded in
+    /// [`BlobsProvenance::atf`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tfa_ref: Option<String>,
+    /// Trusted Firmware-A commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tfa_commit: Option<String>,
     /// The media-accel source pins, present only when the image built the HW
     /// transcode stack (a `requires_media_accel` feature was selected). Omitted
     /// from the manifest for a base image, which has no such sources.
@@ -1193,11 +1219,21 @@ pub struct FilesystemGeometry {
     pub max_grow_blocks: u64,
 }
 
-/// Verified rkbin blob pins (`"<filename>@sha256:<hex>"`).
+/// Verified rkbin blob pins (`"<filename>@sha256:<hex>"`) and the rkbin commit they
+/// were fetched at, copied from the lock's [`BlobsPin`](crate::lock::BlobsPin).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlobsProvenance {
-    /// ATF/BL31 blob pin.
-    pub atf: String,
+    /// Clone URL of the rkbin repository.
+    pub source: String,
+    /// The branch the commit was resolved from.
+    pub reference: String,
+    /// The rkbin commit the files were fetched at. A `--blobs-dir` build read them
+    /// from a local directory instead. It is held to the same hashes, so the bytes are
+    /// this commit's either way.
+    pub commit: String,
+    /// rkbin BL31 blob pin, present only when the BL31 provider is `rkbin`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub atf: Option<String>,
     /// DDR TPL blob pin.
     pub tpl: String,
     /// OP-TEE BL32 blob pin, present only when the build has one.
@@ -1358,9 +1394,10 @@ pub struct BuiltWithProvenance {
     /// build tree was not a git checkout, leaving `version` the only builder coordinate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit: Option<String>,
-    /// Whether the boot2deb checkout had uncommitted changes at build time. `true` means
-    /// `commit` alone does not identify the builder — the image is not reproducible from
-    /// that commit.
+    /// Whether the boot2deb checkout's sources differed from `commit` at build time
+    /// (a tracked edit, or a file git does not track under the source paths), or git
+    /// could not tell. `true` means `commit` alone does not identify the builder — the
+    /// image is not reproducible from that commit.
     pub dirty: bool,
     /// Short git commit of the config tree the build read its layers, recipes and lock
     /// from. Absent when the config root is not a git checkout, which an unpacked or
@@ -1394,28 +1431,30 @@ pub struct BuiltWithProvenance {
     pub ferroday_cage: String,
 }
 
-/// The image's initial first-boot credential, and the rest of what can reach the
-/// default account. It is the whole answer to "who can log in to this image, and what
-/// does reaching root cost them".
+/// What can reach the image's default account. It is the whole answer to "who can log
+/// in to this image, and what does reaching root cost them", short of the password.
+///
+/// The generated password itself is not here. It is the one secret a build produces. It
+/// is written to the image's credential document ([`crate::credential`]), created
+/// readable by its owner only. This manifest, and everything rendered from it, can
+/// therefore be shared.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CredentialsProvenance {
     /// Default account name.
     pub user: String,
-    /// The per-image password.
-    pub password: String,
-    /// How the credential behaves on the shipped image.
+    /// How the generated password behaves on the shipped image, and where it is.
     pub note: String,
     /// What `sudo` asks of the account, as
     /// [`SudoPolicy::as_str`](crate::model::SudoPolicy::as_str) spells it. Recorded
-    /// because it decides what the password above is worth: under `nopasswd` it is root.
+    /// because it decides what the generated password is worth: under `nopasswd` it is
+    /// root.
     pub sudo: String,
     /// The SSH public keys the image authorizes for the account, verbatim, in the order
     /// the file lists them. Empty when it authorizes nobody.
     ///
     /// The keys themselves rather than fingerprints of them. They are public key
-    /// material, and this file is already the sensitive one, since it contains the
-    /// password. A reader auditing who can reach a built image is better served by the
-    /// value than by a digest they would have to resolve.
+    /// material, so recording the value costs nothing. A reader auditing who can reach a
+    /// built image is better served by it than by a digest they would have to resolve.
     pub authorized_keys: Vec<String>,
 }
 
@@ -1426,8 +1465,8 @@ pub struct CredentialsProvenance {
 /// possible at all. Every value here is known *before* the rootfs is bootstrapped, so it
 /// can be staged into the rootfs it describes.
 ///
-/// The provenance manifest cannot be. Its solved-manifest digest and per-image password
-/// are both produced by the bootstrap it would have to be written into.
+/// The provenance manifest cannot be. Its solved-manifest digest is produced by the
+/// bootstrap it would have to be written into.
 pub fn system_identity(ib: ImageBuild, lock: &Lock) -> SystemIdentity {
     let kernel = &ib.image.kernel;
     SystemIdentity {
@@ -1439,10 +1478,12 @@ pub fn system_identity(ib: ImageBuild, lock: &Lock) -> SystemIdentity {
             soc: ib.build.soc.to_string(),
             boot_method: ib.build.boot_method.to_string(),
             board: ib.build.depthcharge_boot().map(|b| b.board.clone()),
+            bl31: ib.build.rkbin_boot().map(|b| b.bl31.provider().to_string()),
             distro: ib.build.distro.name.clone(),
             suite: ib.image.suite.clone(),
             features: ib.image.features.clone(),
             layout: ib.build.layout.to_string(),
+            loader: ib.image.loader.as_ref().map(|l| l.loader().to_string()),
             hostname: ib.image.hostname.clone(),
         },
         kernel: IdentityKernel {
@@ -1506,8 +1547,9 @@ impl SystemIdentity {
 
 /// Read just the `[credentials]` table out of a provenance manifest.
 ///
-/// For a reader that wants the account and password and nothing else. `boot2deb try`
-/// logs in with them.
+/// For a reader that wants the account's access record and nothing else. `boot2deb try`
+/// reads the account and its sudo policy from it, and the password from the image's
+/// credential document.
 ///
 /// Scoped to the one table it reads rather than deserializing the whole
 /// [`ProvenanceManifest`]. A reader of the credential is then a reader of the credential,
@@ -1572,6 +1614,7 @@ pub fn assemble(ib: ImageBuild, lock: &Lock, facts: &BuildFacts) -> ProvenanceMa
             suite: ib.image.suite.clone(),
             features: ib.image.features.clone(),
             layout: ib.build.layout.to_string(),
+            loader: ib.image.loader.as_ref().map(|l| l.loader().to_string()),
             image_size: ib.image.image_size.clone(),
             image_bytes: facts.image_bytes,
             hostname: ib.image.hostname.clone(),
@@ -1602,6 +1645,8 @@ pub fn assemble(ib: ImageBuild, lock: &Lock, facts: &BuildFacts) -> ProvenanceMa
             patches_commit: lock.patches.as_ref().map(|p| p.commit.clone()),
             uboot_ref: lock.uboot.as_ref().map(|u| u.reference.clone()),
             uboot_commit: lock.uboot.as_ref().map(|u| u.commit.clone()),
+            tfa_ref: lock.tfa.as_ref().map(|t| t.reference.clone()),
+            tfa_commit: lock.tfa.as_ref().map(|t| t.commit.clone()),
             // Present in lockstep: resolution pins userspace and ffmpeg together or
             // not at all, so a single `zip` yields the whole block or `None`.
             media_accel: lock.ffmpeg.as_ref().map(|ff| MediaAccelProvenance {
@@ -1628,6 +1673,9 @@ pub fn assemble(ib: ImageBuild, lock: &Lock, facts: &BuildFacts) -> ProvenanceMa
             rootfs: facts.rootfs_verified_with.to_vec(),
         },
         blobs: lock.blobs.as_ref().map(|b| BlobsProvenance {
+            source: b.source.clone(),
+            reference: b.reference.clone(),
+            commit: b.commit.clone(),
             atf: b.atf.clone(),
             tpl: b.tpl.clone(),
             bl32: b.bl32.clone(),
@@ -1650,10 +1698,13 @@ pub fn assemble(ib: ImageBuild, lock: &Lock, facts: &BuildFacts) -> ProvenanceMa
         },
         credentials: CredentialsProvenance {
             user: facts.user.to_string(),
-            password: facts.password.to_string(),
-            note: "expired at first login (passwd -e); unique per built image".to_string(),
+            note: format!(
+                "the generated password is in the image's private credentials file, not \
+                 here; {}",
+                crate::credential::NOTE
+            ),
             // From the resolved build rather than from `BuildFacts`: both are properties
-            // of the build point, known before anything is built, unlike the password.
+            // of the build point, known before anything is built.
             sudo: ib.image.sudo.as_str().to_string(),
             authorized_keys: ib.image.ssh_authorized_keys.clone(),
         },
@@ -1847,9 +1898,8 @@ impl ProvenanceManifest {
     /// did not run (`diff`, `sbom`). The banner is a TOML comment, so the canonical
     /// document parses as-is.
     ///
-    /// The parsed value contains the image's first-boot password, since the document
-    /// does. A caller that only wants the builder coordinate takes [`builder_stamp`]
-    /// instead, which reads that one section and holds no secret.
+    /// A caller that only wants the builder coordinate takes [`builder_stamp`] instead,
+    /// which reads that one section.
     ///
     /// Unknown keys are ignored, so a reader accepts a manifest a later boot2deb wrote
     /// with sections this one does not know. Absent optional sections deserialize to
@@ -1896,6 +1946,8 @@ pub(crate) mod tests {
                 source: "ks".into(),
                 reference: "v7.1.1".into(),
                 commit: "kc".into(),
+                revision: 1,
+                config_sha256: "d".repeat(64),
             }),
             patches: Some(PatchesPin {
                 series: vec!["rk3588-accel".into()],
@@ -1907,8 +1959,11 @@ pub(crate) mod tests {
                 source: "us".into(),
                 reference: "v2026.04".into(),
                 commit: "uc".into(),
+                revision: 1,
+                config_sha256: "9".repeat(64),
             }),
             uboot_patches: None,
+            tfa: None,
             userspace: vec![
                 named_pin("mpp", git("mainline-cma-fix", "mc")),
                 named_pin("librga", git("master", "rc")),
@@ -1926,7 +1981,10 @@ pub(crate) mod tests {
                 source_date_epoch: 1_790_347_034,
             }),
             blobs: Some(BlobsPin {
-                atf: "atf@sha256:0".into(),
+                source: "https://example.invalid/rkbin.git".into(),
+                reference: "master".into(),
+                commit: "c".repeat(40),
+                atf: Some("atf@sha256:0".into()),
                 tpl: "tpl@sha256:1".into(),
                 bl32: None,
             }),
@@ -2180,7 +2238,6 @@ pub(crate) mod tests {
                 plan_sha256: "beef",
                 archives: &archives,
                 user: "debian",
-                password: "pw",
                 builder_version: "0.1.0",
                 cage_version: "0.4.4",
                 builder_commit: Some("abc1234"),
@@ -2219,11 +2276,8 @@ pub(crate) mod tests {
             .contains("restored_nodes"));
     }
 
-    /// The identity document ships **inside** the image, so the one thing it must never
-    /// contain is the one thing the provenance manifest exists to record: the per-image
-    /// first-boot password. The two documents are assembled from overlapping inputs, so
-    /// this asserts the boundary rather than trusting it — a field added to
-    /// `SystemIdentity` by copying a line from `assemble` would fail here.
+    /// The scoped reader returns the `[credentials]` table and validates nothing else in
+    /// the manifest, and the table it returns holds no password.
     #[test]
     fn manifest_credentials_reads_one_table_and_only_its_shape() {
         // A full manifest, rendered and read back through the scoped reader:
@@ -2241,7 +2295,6 @@ pub(crate) mod tests {
             plan_sha256: "0d0e",
             archives: &sample_archives(),
             user: "debian",
-            password: "Kp7rTx",
             builder_version: "0.0.0-test",
             cage_version: "0.4.4",
             builder_commit: None,
@@ -2260,11 +2313,10 @@ pub(crate) mod tests {
         let manifest = assembled(sample_build(), &sample_lock(), &facts);
         let text = manifest.to_toml_string().unwrap();
         let creds = manifest_credentials(&text, "m.toml").unwrap();
-        assert_eq!(creds.password, "Kp7rTx");
-        assert_eq!(creds.user, manifest.credentials.user);
+        assert_eq!(creds, manifest.credentials);
 
         let scoped = "[image]\nnot_a_real_key = 1\n\n[credentials]\nuser = \"debian\"\n\
-                      password = \"pw\"\nnote = \"n\"\nsudo = \"nopasswd\"\n\
+                      note = \"n\"\nsudo = \"nopasswd\"\n\
                       authorized_keys = []\n";
         assert_eq!(
             manifest_credentials(scoped, "m.toml").unwrap().user,
@@ -2278,6 +2330,10 @@ pub(crate) mod tests {
         assert!(err.contains("old.toml"), "{err}");
     }
 
+    /// The identity document ships **inside** the image, so it must not contain the
+    /// account record the provenance manifest keeps. The two documents are assembled from
+    /// overlapping inputs, so this asserts the boundary rather than trusting it: a field
+    /// added to `SystemIdentity` by copying a line from `assemble` fails here.
     #[test]
     fn the_on_device_identity_contains_no_secret() {
         let lock = sample_lock();
@@ -2289,19 +2345,14 @@ pub(crate) mod tests {
             .filter(|l| !l.trim_start().starts_with('#'))
             .collect();
 
-        // The password `assemble` would have put in the manifest.
-        assert!(
-            !body.contains("Kp7rTx"),
-            "identity leaked the first-boot password:\n{text}"
-        );
         for forbidden in ["password", "credentials", "shadow", "secret"] {
             assert!(
                 !body.contains(forbidden),
                 "identity data contains `{forbidden}`, which must not ship inside an image:\n{text}"
             );
         }
-        // And it is genuinely a subset — the manifest *does* contain the secret, so the
-        // two documents are being compared, not two spellings of the same thing.
+        // And it is genuinely a subset: the manifest *does* contain the account record,
+        // so the two documents are being compared, not two spellings of the same thing.
         let facts = BuildFacts {
             restored_nodes: &[],
             outputs: &[],
@@ -2314,7 +2365,6 @@ pub(crate) mod tests {
             plan_sha256: "0d0e",
             archives: &sample_archives(),
             user: "debian",
-            password: "Kp7rTx",
             builder_version: "0.0.0-test",
             cage_version: "0.4.4",
             builder_commit: Some("deadbeef1234"),
@@ -2339,8 +2389,56 @@ pub(crate) mod tests {
             .to_toml_string()
             .unwrap();
         assert!(
-            manifest.contains("Kp7rTx"),
+            manifest.contains("[credentials]"),
             "the manifest is the document that has it"
+        );
+    }
+
+    /// The manifest is made to be shared, so the generated password is in neither its
+    /// text nor its parsed form: no key in `[credentials]` holds it, and the note says
+    /// where it is instead.
+    #[test]
+    fn the_manifest_contains_no_password() {
+        let facts = BuildFacts {
+            restored_nodes: &[],
+            outputs: &[],
+            host_arch: "x86_64",
+            cross: true,
+            manifest_sha256: "abc",
+            package_count: 1,
+            plan: "sample.plan",
+            image_bytes: 2 << 30,
+            plan_sha256: "0d0e",
+            archives: &sample_archives(),
+            user: "debian",
+            builder_version: "0.0.0-test",
+            cage_version: "0.4.4",
+            builder_commit: None,
+            builder_dirty: false,
+            config_commit: None,
+            config_dirty: false,
+            filesystem: sample_filesystem(),
+            rootfs_verified_with: &sample_verified_with(),
+            qemu: None,
+            jobs: 8,
+            sandbox: sample_sandbox(),
+            build_sandbox: None,
+            cross_sandbox: None,
+            packaging_root: None,
+        };
+        let text = assembled(sample_build(), &sample_lock(), &facts)
+            .to_toml_string()
+            .unwrap();
+        let parsed: toml::Value = toml::from_str(&text).unwrap();
+        let credentials = parsed["credentials"].as_table().unwrap();
+        assert!(!credentials.contains_key("password"), "{text}");
+        assert!(!text.contains("password ="), "{text}");
+        assert!(
+            credentials["note"]
+                .as_str()
+                .unwrap()
+                .contains("credentials file"),
+            "{text}"
         );
     }
 
@@ -2362,6 +2460,12 @@ pub(crate) mod tests {
         assert_eq!(rk.image.boot_method, "rockchip-rkbin");
         assert_eq!(rk.image.board, None);
         assert!(!rk.to_toml_string().unwrap().contains("board"));
+
+        // The BL31 provider is the u-boot board's counterpart: recorded where the build
+        // packed one, absent where the firmware is the board's own.
+        assert_eq!(rk.image.bl31.as_deref(), Some("rkbin"));
+        assert_eq!(dc.image.bl31, None);
+        assert!(!dc.to_toml_string().unwrap().contains("bl31"));
     }
 
     /// The document is a wire format read by independently-versioned programs, so the
@@ -2412,7 +2516,6 @@ pub(crate) mod tests {
             plan_sha256: "beef",
             archives: &archives,
             user: "debian",
-            password: "pw",
             builder_version: "0.0.0-test",
             cage_version: "0.4.4",
             builder_commit: None,
@@ -2480,7 +2583,6 @@ pub(crate) mod tests {
             plan_sha256: "beef",
             archives: &archives,
             user: "debian",
-            password: "pw",
             builder_version: "0.0.0-test",
             cage_version: "0.4.4",
             builder_commit: None,
@@ -2528,7 +2630,6 @@ pub(crate) mod tests {
             plan_sha256: "beef",
             archives: &archives,
             user: "debian",
-            password: "pw",
             builder_version: "0.4.2",
             cage_version: "0.4.4",
             builder_commit: Some("deadbeef1234"),
@@ -2567,6 +2668,7 @@ pub(crate) mod tests {
             patches: None,
             uboot: None,
             uboot_patches: None,
+            tfa: None,
             userspace: Vec::new(),
             ffmpeg: None,
             rootfs: Some(RootfsPin {
@@ -2626,7 +2728,6 @@ pub(crate) mod tests {
                 plan_sha256: "beef",
                 archives: &archives,
                 user: "debian",
-                password: "pw",
                 builder_version: "0.4.2",
                 cage_version: "0.4.4",
                 builder_commit: Some("deadbeef1234"),
@@ -2669,7 +2770,6 @@ pub(crate) mod tests {
                 plan_sha256: "beef",
                 archives: &[],
                 user: "debian",
-                password: "pw",
                 builder_version: "0.4.2",
                 cage_version: "0.4.4",
                 builder_commit: None,
@@ -2790,7 +2890,6 @@ pub(crate) mod tests {
             plan_sha256: "0d0e",
             archives: &sample_archives(),
             user: "debian",
-            password: "Kp7rTx",
             builder_version: "0.0.0-test",
             cage_version: "0.4.4",
             builder_commit: Some("cafef00dbabe"),
@@ -2824,7 +2923,6 @@ pub(crate) mod tests {
         assert_eq!(prov.rootfs.package_count, 223);
         assert_eq!(prov.toolchain.host_arch, "x86_64");
         assert!(prov.toolchain.cross);
-        assert_eq!(prov.credentials.password, "Kp7rTx");
         // Per-source durability form is recorded offline: the sample pins all
         // use named refs (a ref that is not the bare commit), so every one is named-ref.
         assert_eq!(
@@ -2858,7 +2956,6 @@ pub(crate) mod tests {
             "[credentials]",
             "kernel_commit = \"kc\"",
             "manifest_sha256 = \"abc123\"",
-            "password = \"Kp7rTx\"",
             "version = \"0.0.0-test\"",
         ] {
             assert!(
@@ -3014,10 +3111,10 @@ pub(crate) mod tests {
             .any(|r| r.source.starts_with("app:")));
     }
 
-    /// `[credentials]` is the whole answer to "who can reach this image": the password,
-    /// what `sudo` costs, and every authorized key. A manifest recording only the
-    /// password would understate the access an image grants — under `nopasswd` that
-    /// password is root, and a key holder needs no password at all.
+    /// `[credentials]` is the whole answer to "who can reach this image" short of the
+    /// secret itself: the account, what `sudo` costs, and every authorized key. Under
+    /// `nopasswd` the generated password is root, and a key holder needs no password at
+    /// all, so the account alone would understate the access an image grants.
     #[test]
     fn credentials_record_the_whole_access_picture() {
         const KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBl5Nn9dY/aLK4WVQ5c4tYlYCkkC1J3Ry+d0nc3TgtDe operator@workstation";
@@ -3043,7 +3140,6 @@ pub(crate) mod tests {
             plan_sha256: "0d0e",
             archives: &sample_archives(),
             user: "debian",
-            password: "pw",
             builder_version: "0.0.0-test",
             cage_version: "0.4.4",
             builder_commit: None,
@@ -3111,7 +3207,6 @@ pub(crate) mod tests {
             plan_sha256: "0d0e",
             archives: &sample_archives(),
             user: "debian",
-            password: "pw",
             builder_version: "0.0.0-test",
             cage_version: "0.4.4",
             builder_commit: None,
@@ -3174,7 +3269,6 @@ pub(crate) mod tests {
             plan_sha256: "0d0e",
             archives: &sample_archives(),
             user: "debian",
-            password: "pw",
             builder_version: "0.0.0-test",
             cage_version: "0.4.4",
             builder_commit: None,
@@ -3261,7 +3355,6 @@ pub(crate) mod tests {
             plan_sha256: "0d0e",
             archives: &archives,
             user: "debian",
-            password: "pw",
             builder_version: "0.0.0-test",
             cage_version: "0.4.4",
             builder_commit: None,
@@ -3340,7 +3433,6 @@ pub(crate) mod tests {
             plan_sha256: "0d0e",
             archives: &archives,
             user: "debian",
-            password: "pw",
             builder_version: "0.0.0-test",
             cage_version: "0.4.4",
             builder_commit: None,
@@ -3432,7 +3524,6 @@ pub(crate) mod tests {
             plan_sha256: "0d0e",
             archives: &archives,
             user: "debian",
-            password: "pw",
             builder_version: "0.0.0-test",
             cage_version: "0.4.4",
             builder_commit: None,

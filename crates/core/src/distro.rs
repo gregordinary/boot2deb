@@ -20,8 +20,9 @@
 //! [`ConfigRoot::distro_for_suite`]: crate::loader::ConfigRoot::distro_for_suite
 
 use crate::error::ConfigError;
-use crate::model::PackageEntry;
+use crate::model::{Arch, PackageEntry};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fmt;
 
 /// The program that builds an image's initramfs. One is installed per image, because
@@ -59,8 +60,44 @@ impl fmt::Display for InitramfsGenerator {
     }
 }
 
-/// One `distros/<name>.toml`: a distribution's archive facts, its default account and
-/// initramfs generator, and the packages its images add to the base set.
+/// The NTP client an image runs. The two read their servers from different files, and
+/// each has its own unit that waits for the first synchronization. The build therefore
+/// has to know which one an image has.
+///
+/// A distro layer names it in [`time_client`](DistroLayer::time_client), and the
+/// resolved value is
+/// [`ResolvedImage::time_client`](crate::model::ResolvedImage::time_client). Its package
+/// joins the rootfs set from there, as the [`InitramfsGenerator`]'s does, so the
+/// client the build configures is the one the image installs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TimeClient {
+    /// `systemd-timesyncd`, an SNTP client configured through `timesyncd.conf`
+    /// drop-ins.
+    SystemdTimesyncd,
+    /// `chrony`, which reads its servers from `/etc/chrony/sources.d`.
+    Chrony,
+}
+
+impl TimeClient {
+    /// The package that installs this client. It is also the name a layer writes.
+    pub fn package(self) -> &'static str {
+        match self {
+            TimeClient::SystemdTimesyncd => "systemd-timesyncd",
+            TimeClient::Chrony => "chrony",
+        }
+    }
+}
+
+impl fmt::Display for TimeClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.package())
+    }
+}
+
+/// One `distros/<name>.toml`: a distribution's archive facts, its default account,
+/// initramfs generator and time client, and the packages its images add to the base
+/// set.
 ///
 /// Validated by [`validate`](Self::validate) before resolution reads any of it. A
 /// malformed URL or component therefore fails on the layer that contains it, not in a
@@ -120,6 +157,8 @@ pub struct DistroLayer {
     /// The initramfs generator an image of this distribution installs unless its recipe
     /// picks the other one.
     pub initramfs_generator: InitramfsGenerator,
+    /// The NTP client every image of this distribution runs.
+    pub time_client: TimeClient,
     /// Packages an image of this distribution adds to the base set, merged after the
     /// base layer's.
     #[serde(default)]
@@ -128,6 +167,15 @@ pub struct DistroLayer {
     /// exclude set.
     #[serde(default)]
     pub exclude: Vec<String>,
+    /// The generic kernel package a QEMU `virt` guest of this distribution boots, by
+    /// Debian architecture name (`arm64`, `armhf`).
+    ///
+    /// `boot2deb try` boots a built rootfs under it, because no board's kernel runs on
+    /// an emulated machine. The name is the distribution's own: a metapackage that
+    /// follows its current kernel. An architecture absent here has no `try` on this
+    /// distribution, and `try` says so.
+    #[serde(default)]
+    pub virt_kernels: BTreeMap<String, String>,
 }
 
 /// One pocket beside a suite's release pocket: `-updates`, `-security`, `-backports`.
@@ -179,6 +227,9 @@ pub struct ResolvedDistro {
     pub keyring: String,
     /// The path the image's apt sources name in `Signed-By`.
     pub image_keyring: String,
+    /// The layer's [`virt_kernels`](DistroLayer::virt_kernels), keyed by Debian
+    /// architecture name. Read through [`virt_kernel`](Self::virt_kernel).
+    pub virt_kernels: BTreeMap<String, String>,
 }
 
 impl ResolvedDistro {
@@ -186,6 +237,14 @@ impl ResolvedDistro {
     pub fn release(&self) -> &Pocket {
         // `DistroLayer::resolve` always emits the release pocket first.
         &self.pockets[0]
+    }
+
+    /// The generic kernel package a QEMU `virt` guest of `arch` boots, or `None` when
+    /// the distribution names none for it.
+    pub fn virt_kernel(&self, arch: Arch) -> Option<&str> {
+        self.virt_kernels
+            .get(arch.debian_arch())
+            .map(String::as_str)
     }
 }
 
@@ -229,6 +288,7 @@ impl DistroLayer {
             components: self.components.clone(),
             keyring: self.keyring.clone(),
             image_keyring: self.image_keyring.clone(),
+            virt_kernels: self.virt_kernels.clone(),
         }
     }
 
@@ -254,6 +314,8 @@ impl DistroLayer {
     /// - Every component is a bare token, and the free set is a non-empty subset.
     /// - The keyring is a bare file name, and the image keyring an absolute path.
     /// - The default user is a login `useradd` accepts.
+    /// - Every `virt_kernels` key is the Debian name of an architecture boot2deb builds
+    ///   for, and every value a Debian package name.
     pub fn validate(&self, name: &str) -> Result<(), ConfigError> {
         let bad = |field: &'static str, value: &str, why: &'static str| {
             Err(ConfigError::DistroField {
@@ -342,8 +404,30 @@ impl DistroLayer {
         for entry in &self.packages {
             entry.validate(&format!("distro '{name}'"))?;
         }
+        for (arch, package) in &self.virt_kernels {
+            if !Arch::all().iter().any(|a| a.debian_arch() == arch) {
+                return bad(
+                    "virt_kernels",
+                    arch,
+                    "is not the Debian name of an architecture boot2deb builds for",
+                );
+            }
+            if !is_package_name(package) {
+                return bad("virt_kernels", package, "is not a Debian package name");
+            }
+        }
         Ok(())
     }
+}
+
+/// Whether `name` is a Debian package name: lower-case letters, digits, `+`, `-` and
+/// `.`, at least two characters, starting with a letter or digit.
+fn is_package_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_lowercase() || c.is_ascii_digit())
+        && name.len() >= 2
+        && chars
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '+' | '-' | '.'))
 }
 
 /// Reject a suite that is not a bare archive token. The suite becomes an apt sources
@@ -432,7 +516,8 @@ fn check_user_name(name: &str) -> Result<(), &'static str> {
 }
 
 /// A minimal `distros/debian.toml` for a test's config tree: the Debian suites the
-/// tests name, no packages of its own, and initramfs-tools as the generator.
+/// tests name, no packages of its own, initramfs-tools as the generator and
+/// systemd-timesyncd as the time client.
 #[cfg(test)]
 pub(crate) const TEST_DEBIAN: &str = r#"
 description = "Debian"
@@ -446,6 +531,7 @@ keyring = "debian-archive-keyring.gpg"
 image_keyring = "/usr/share/keyrings/debian-archive-keyring.gpg"
 default_user = "debian"
 initramfs_generator = "initramfs-tools"
+time_client = "systemd-timesyncd"
 [[pockets]]
 suffix = "-updates"
 [[pockets]]
@@ -455,7 +541,8 @@ snapshot = "https://snapshot.debian.org/archive/debian-security"
 "#;
 
 /// A minimal `distros/ubuntu.toml` for a test's config tree: one suite, no free
-/// component set, a package and an exclude of its own, and dracut as the generator.
+/// component set, a package and an exclude of its own, dracut as the generator and
+/// chrony as the time client.
 #[cfg(test)]
 pub(crate) const TEST_UBUNTU: &str = r#"
 description = "Ubuntu"
@@ -467,6 +554,7 @@ keyring = "ubuntu-archive-keyring.gpg"
 image_keyring = "/usr/share/keyrings/ubuntu-archive-keyring.gpg"
 default_user = "ubuntu"
 initramfs_generator = "dracut"
+time_client = "chrony"
 packages = ["ubuntu-only"]
 exclude = ["ubuntu-excluded"]
 [[pockets]]
@@ -505,12 +593,16 @@ mod tests {
             image_keyring = "/usr/share/keyrings/debian-archive-keyring.gpg"
             default_user = "debian"
             initramfs_generator = "initramfs-tools"
+            time_client = "systemd-timesyncd"
             [[pockets]]
             suffix = "-updates"
             [[pockets]]
             suffix = "-security"
             mirror = "http://deb.debian.org/debian-security"
             snapshot = "https://snapshot.debian.org/archive/debian-security"
+            [virt_kernels]
+            arm64 = "linux-image-arm64"
+            armhf = "linux-image-armmp"
             "#,
         )
     }
@@ -557,6 +649,17 @@ mod tests {
         assert_eq!(r.pockets.len(), 3);
     }
 
+    /// The table is keyed by the Debian architecture name, so 32-bit Arm is found under
+    /// `armhf` rather than its ISA spelling. An architecture the layer names nothing for
+    /// has no fixture kernel.
+    #[test]
+    fn the_virt_kernel_is_looked_up_by_debian_architecture() {
+        let r = debian().resolve("debian", "forky");
+        assert_eq!(r.virt_kernel(Arch::Arm64), Some("linux-image-arm64"));
+        assert_eq!(r.virt_kernel(Arch::Armv7), Some("linux-image-armmp"));
+        assert_eq!(r.virt_kernel(Arch::Riscv64), None);
+    }
+
     #[test]
     fn a_libre_image_takes_the_free_subset_or_nothing() {
         let d = debian();
@@ -580,6 +683,22 @@ mod tests {
             .try_into()
             .unwrap();
         assert_eq!(parsed, InitramfsGenerator::InitramfsTools);
+    }
+
+    #[test]
+    fn the_time_client_is_named_by_its_package() {
+        assert_eq!(TimeClient::SystemdTimesyncd.package(), "systemd-timesyncd");
+        assert_eq!(TimeClient::Chrony.package(), "chrony");
+        assert_eq!(TimeClient::Chrony.to_string(), "chrony");
+        for client in [TimeClient::SystemdTimesyncd, TimeClient::Chrony] {
+            let parsed: TimeClient = toml::Value::String(client.package().into())
+                .try_into()
+                .unwrap();
+            assert_eq!(parsed, client);
+        }
+        assert!(toml::Value::String("timesyncd".into())
+            .try_into::<TimeClient>()
+            .is_err());
     }
 
     #[test]
@@ -631,6 +750,16 @@ mod tests {
             l.default_user = user.into();
             assert_eq!(field_of(l), "default_user", "{user:?}");
         }
+        // The ISA spelling of 32-bit Arm, where the table takes Debian's.
+        let mut l = debian();
+        l.virt_kernels
+            .insert("armv7".into(), "linux-image-armmp".into());
+        assert_eq!(field_of(l), "virt_kernels");
+        for package in ["Linux-Image-Arm64", "l", "-linux", "linux image"] {
+            let mut l = debian();
+            l.virt_kernels.insert("arm64".into(), package.into());
+            assert_eq!(field_of(l), "virt_kernels", "{package:?}");
+        }
     }
 
     #[test]
@@ -660,6 +789,7 @@ mod tests {
             image_keyring = "/k.gpg"
             default_user = "u"
             initramfs_generator = "dracut"
+            time_client = "chrony"
             mirorr = "http://b"
         "#;
         assert!(toml::from_str::<DistroLayer>(text).is_err());

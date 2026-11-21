@@ -38,7 +38,7 @@ caveats = [
 [[apps]]
 name         = "jellyfin"
 git          = "https://github.com/jellyfin/jellyfin.git"
-ref          = "v12.2"
+ref          = "v12.4"
 deb          = "jellyfin-server"
 patch_series = ["jellyfin"]
 patches_url  = "https://github.com/gregordinary/patches.git"
@@ -49,7 +49,7 @@ patches_url  = "https://github.com/gregordinary/patches.git"
 # names.
 [apps.build]
 kind       = "dotnet-deb"
-packaging  = { git = "https://github.com/jellyfin/jellyfin-packaging.git", ref = "v12.2-202610051851" }
+packaging  = { git = "https://github.com/jellyfin/jellyfin-packaging.git", ref = "v12.4-202610261649" }
 source_dir = "jellyfin-server"
 project    = "Jellyfin.Server"
 

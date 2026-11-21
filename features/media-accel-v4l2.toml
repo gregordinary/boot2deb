@@ -27,11 +27,12 @@ description  = "HW video decode via V4L2 stateless (VDPU383) + RGA 2D, for RK357
 # media paths, and a board that asked for no media capability has no consumer for them.
 #
 # No Vulkan driver is installed. The FFmpeg this feature builds is configured
-# `--enable-vulkan --enable-libplacebo`, but Mesa's PanVk declines this SoC's Mali-G52
-# unless forced, and forced it computes wrong chroma. `mesa-vulkan-drivers` would add
-# only `lvp`, a software device that runs the Vulkan filters on the CPU more slowly
-# than swscale, under a name that reads as a GPU path. Without a driver those filters
-# fail at device creation and say so.
+# `--enable-vulkan`, and `--enable-libplacebo` on a suite that ships a libplacebo new
+# enough for it, but Mesa's PanVk declines this SoC's Mali-G52 unless forced, and
+# forced it computes wrong chroma. `mesa-vulkan-drivers` would add only `lvp`, a
+# software device that runs the Vulkan filters on the CPU more slowly than swscale,
+# under a name that reads as a GPU path. Without a driver those filters fail at device
+# creation and say so.
 packages     = ["ffmpeg-rk", "librga2", "libegl1", "libgles2"]
 requires_soc = ["rk3576"]
 

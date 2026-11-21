@@ -5,7 +5,9 @@
 //! image with no `sudo`, no loop device, and no mount:
 //!
 //! - The ext4 filesystem is formatted in-process by the pure-Rust `ferrosys` formatter,
-//!   straight from the rootfs tar (the `ext4` submodule).
+//!   straight from the rootfs tar (the `ext4` submodule). Under the `efi` loader the
+//!   tree's `/boot/efi/` subtree is formatted into a FAT32 EFI system partition instead
+//!   (the `esp` submodule).
 //! - The partition table is written in Rust (`gpt`).
 //! - The boot payload is placed by seek+write.
 //! - The result is compressed with pure-Rust encoders, `.xz` via `lzma-rust2` and `.gz`
@@ -30,10 +32,12 @@
 //!   combination for any method that does not.
 
 mod depthcharge;
+mod esp;
 mod ext4;
 pub mod files;
 mod geometry;
 mod gpt;
+pub(crate) mod gptread;
 pub mod inspect;
 pub(crate) mod vboot;
 
@@ -44,12 +48,13 @@ use crate::event::{EventSink, Step};
 use crate::press::additions::TreeAdditions;
 use crate::press::identity::{PressIdentity, TreeRekey};
 use boot2deb_core::chromeos::MAX_KPART_SLOTS;
+use boot2deb_core::inventory::DiskDigest;
 use boot2deb_core::model::{Layout, ResolvedBoot};
 use boot2deb_core::press::ArtifactRole;
 use boot2deb_core::provenance::FilesystemProvenance;
 use boot2deb_core::size::{parse_image_size, ImageSize};
 use boot2deb_core::{ImageBuild, ResolvedBuild};
-use geometry::{BootGeometry, Geometry};
+use geometry::{BootGeometry, EspRegion, Geometry};
 use lzma_rust2::{XzOptions, XzWriterMt};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -240,6 +245,10 @@ pub struct ImageIdentity {
     /// A `--seed-only` rewrite (which reads the GUID back off the GPT)
     /// reproduces the same serial.
     pub seed_partuuid: Uuid,
+    /// The EFI system partition's GUID, its **PARTUUID**, which the rootfs's
+    /// `/etc/fstab` mounts it by. Its leading four bytes double as the FAT volume's
+    /// serial, as the seed's do. Unused under a loader with no partition.
+    pub esp_partuuid: Uuid,
     /// The ChromeOS kernel slots' partition GUIDs, in on-disk order. Unused under a
     /// boot method that writes no kernel partition.
     ///
@@ -265,6 +274,7 @@ impl ImageIdentity {
             disk_guid: derive_uuid(seed, device, "gpt-disk"),
             rootfs_partuuid: derive_uuid(seed, device, "gpt-partition"),
             seed_partuuid: derive_uuid(seed, device, "gpt-seed-partition"),
+            esp_partuuid: derive_uuid(seed, device, "gpt-esp-partition"),
             // A distinct domain per slot, so the slots never collide with each other
             // (see the field's own note on why that matters), while each stays a pure
             // function of the seed.
@@ -295,12 +305,25 @@ impl ImageIdentity {
     /// the GPT it finds on the medium.
     #[must_use]
     pub fn seed_volume_id(&self) -> u32 {
-        u32::from_le_bytes(
-            self.seed_partuuid.as_bytes()[..4]
-                .try_into()
-                .expect("a UUID has 16 bytes"),
-        )
+        volume_id(self.seed_partuuid)
     }
+
+    /// The EFI system partition FAT's volume serial: the
+    /// [`esp_partuuid`](Self::esp_partuuid)'s leading four bytes. The volume therefore
+    /// needs no identity source of its own, and a fresh identity gives it a fresh serial.
+    #[must_use]
+    pub fn esp_volume_id(&self) -> u32 {
+        volume_id(self.esp_partuuid)
+    }
+}
+
+/// A FAT volume serial taken from a partition GUID's leading four bytes.
+fn volume_id(guid: Uuid) -> u32 {
+    u32::from_le_bytes(
+        guid.as_bytes()[..4]
+            .try_into()
+            .expect("a UUID has 16 bytes"),
+    )
 }
 
 /// The image artifact(s) produced, per the resolved [`Layout`].
@@ -345,10 +368,20 @@ pub struct ImageArtifacts {
     /// Whether the raw image files were deleted after compression, so a
     /// consumer knows only the compressed forms remain.
     pub raw_removed: bool,
+    /// Each raw image's own length and sha256, in [`ImageOutput::images`] order, taken
+    /// before anything was compressed from it. A consumer that decompresses a container
+    /// holds what comes out to these. The check is then against the build's record, not
+    /// against the bytes the consumer itself read.
+    pub disks: Vec<(PathBuf, DiskDigest)>,
+    /// The image node's earlier outputs this run removed, because it did not write them
+    /// again. They are the containers the run's `--compress` did not ask for, and the
+    /// images of the other layout. Left in place, each would read as current.
+    pub retired: Vec<PathBuf>,
     /// The per-image first-boot password spliced into the image's account
-    /// ([`ResolvedImage::user`](boot2deb_core::ResolvedImage::user)). It is unique per build, and expired so it must be changed at first
-    /// login. The caller surfaces it and records it in the provenance manifest. It
-    /// is written to no committed file.
+    /// ([`ResolvedImage::user`](boot2deb_core::ResolvedImage::user)). It is unique per
+    /// build, and expired so it must be changed at first login. The caller writes it to
+    /// the image's private credential document ([`boot2deb_core::credential`]) and to
+    /// nothing else.
     pub password: String,
     /// The checks the rootfs filesystem passed before it shipped, in the order they
     /// ran. Reported rather than re-probed by the caller. One of them is present only
@@ -375,6 +408,29 @@ pub struct ImageArtifacts {
     pub image_bytes: u64,
 }
 
+/// What the rootfs names of the partitions this node will write for `ib` under
+/// `identity`: their identifiers, and the rootfs partition's GPT entry number.
+///
+/// The rootfs node takes these as inputs ([`crate::rootfs::RootfsOptions::partitions`])
+/// because files in the tree name the partitions before they exist. They come from the
+/// same geometry and identity [`build_image`] then writes, so the two cannot disagree.
+///
+/// # Errors
+///
+/// [`EngineError::ImageGeometry`] when the boot region does not resolve.
+pub fn partitions(
+    ib: ImageBuild,
+    identity: &ImageIdentity,
+) -> Result<crate::rootfs::Partitions, EngineError> {
+    let region = geometry::BootRegion::resolve(&ib.build.boot, esp::esp_bytes(ib.image)?)?;
+    Ok(crate::rootfs::Partitions {
+        rootfs_partuuid: identity.rootfs_partuuid,
+        rootfs_fs_uuid: identity.ext4_uuid,
+        rootfs_index: region.rootfs_index(),
+        esp_partuuid: region.esp.map(|_| identity.esp_partuuid),
+    })
+}
+
 /// Validate the resolved build's image geometry (offsets, size, GPT/rootfs fit)
 /// without writing anything. It is the cheap up-front check `build` runs right after
 /// resolution, so a bad layout fails before any stage compiles.
@@ -387,15 +443,22 @@ pub struct ImageArtifacts {
 ///
 /// A u-boot deliverable has neither a size nor a rootfs, so only the boot region is
 /// resolved. That is the whole of the disk it writes.
+///
+/// Under the `efi` loader the EFI system partition's size is checked here too. It has
+/// to plan as a conformant FAT32 volume, which only the formatter can say.
 pub fn validate_geometry(build: &ResolvedBuild) -> Result<(), EngineError> {
     let Some(image) = build.image.as_ref() else {
-        return geometry::BootRegion::resolve(&build.boot).map(|_| ());
+        return geometry::BootRegion::resolve(&build.boot, None).map(|_| ());
     };
+    let esp_bytes = esp::esp_bytes(image)?;
+    if let Some(bytes) = esp_bytes {
+        esp::check_size(bytes)?;
+    }
     match parse_image_size(&image.image_size)? {
-        ImageSize::Fixed(total) => Geometry::resolve(&build.boot, total).map(|_| ()),
+        ImageSize::Fixed(total) => Geometry::resolve(&build.boot, esp_bytes, total).map(|_| ()),
         ImageSize::Fit(slack) => {
             geometry::fit_slack(&image.image_size, slack)?;
-            geometry::BootRegion::resolve(&build.boot).map(|_| ())
+            geometry::BootRegion::resolve(&build.boot, esp_bytes).map(|_| ())
         }
     }
 }
@@ -445,8 +508,10 @@ pub fn build_image(
     // rest of the layout answers to the filesystem rather than the other way round: the
     // format decides how large the rootfs is, and the disk is then sized to contain it. The
     // boot region is the half that is the same either way, and it is the half the payload
-    // check below asks about.
-    let region = geometry::BootRegion::resolve(&build.boot)?;
+    // check below asks about. The EFI system partition is in it: its size is the loader's,
+    // not the filesystem's.
+    let esp_bytes = esp::esp_bytes(image)?;
+    let region = geometry::BootRegion::resolve(&build.boot, esp_bytes)?;
     std::fs::create_dir_all(opts.out_dir).map_err(|s| EngineError::io(opts.out_dir, s))?;
     std::fs::create_dir_all(opts.work_dir).map_err(|s| EngineError::io(opts.work_dir, s))?;
 
@@ -482,6 +547,11 @@ pub fn build_image(
     let password = crate::secret::generate_password(image.first_boot_password_length as usize)?;
     let password_hash = crate::secret::crypt_password(&password)?;
 
+    // The tree both filesystems are formatted from. Under the efi loader the ESP's
+    // subtree comes off it first, so the rootfs keeps only the empty mount point.
+    let mut tree = ext4::read_tree(opts.rootfs_tar, None, &step)?;
+    let esp_tree = split_esp(ib, &mut tree, &region, &step)?;
+
     // The ext4 rootfs partition is identical across layouts — build it once. An authored
     // size lays out the disk first and formats into the partition it leaves; a fitted one
     // formats first and lays out the disk around the size the search returned. Both end
@@ -490,7 +560,7 @@ pub fn build_image(
     let ext4 = opts.work_dir.join("rootfs.ext4");
     let (geom, rootfs_size) = match size {
         ImageSize::Fixed(total) => {
-            let geom = Geometry::resolve(&build.boot, total)?;
+            let geom = Geometry::resolve(&build.boot, esp_bytes, total)?;
             let rootfs_size = ext4::RootfsSize::Exact(geom.rootfs_bytes);
             (Some(geom), rootfs_size)
         }
@@ -502,14 +572,20 @@ pub fn build_image(
     let rootfs_fs = ext4::build_rootfs_ext4(
         &ext4,
         rootfs_size,
-        opts.rootfs_tar,
+        tree,
         opts.rootfs_label,
         opts.identity.ext4_uuid,
         ext4::FirstBoot {
             user: &image.user,
             password_hash: &password_hash,
         },
-        None,
+        &step,
+    )?;
+    let esp_image = format_esp(
+        esp_tree,
+        &opts.work_dir.join("esp.fat"),
+        &opts.identity,
+        rootfs_fs.time_secs,
         &step,
     )?;
     // The listing of what the formatted filesystem holds, read back from it once the scan
@@ -519,7 +595,7 @@ pub fn build_image(
     let geom = match geom {
         Some(geom) => geom,
         None => {
-            let geom = Geometry::around_rootfs(&build.boot, rootfs_fs.size_bytes)?;
+            let geom = Geometry::around_rootfs(&build.boot, esp_bytes, rootfs_fs.size_bytes)?;
             step.log(format!(
                 "sized the image to its contents: {} bytes on disk",
                 geom.total_size
@@ -549,6 +625,7 @@ pub fn build_image(
                 &DiskContents {
                     ext4: &ext4,
                     seed_image: &seed_image,
+                    esp: esp_image.as_deref(),
                     kpart: kpart.as_deref(),
                 },
                 Some(&opts.boot),
@@ -579,7 +656,8 @@ pub fn build_image(
                 });
             };
             // Rootfs image: GPT + rootfs partition, empty raw gap (bootloader-agnostic).
-            // The seed belongs with the rootfs — it is the OS that reads it.
+            // The seed belongs with the rootfs — it is the OS that reads it — and so does
+            // the ESP, which the firmware finds on whichever medium holds it.
             let rootfs = opts.out_dir.join(format!("{}-rootfs.img", opts.stem));
             assemble_disk(
                 &rootfs,
@@ -587,6 +665,7 @@ pub fn build_image(
                 &DiskContents {
                     ext4: &ext4,
                     seed_image: &seed_image,
+                    esp: esp_image.as_deref(),
                     kpart: None,
                 },
                 None,
@@ -606,6 +685,14 @@ pub fn build_image(
         }
     };
     step.progress(80);
+
+    // The disks' own digests, taken while the raw images exist: a container is a
+    // record of these bytes, and the raw images may not outlive compression.
+    let mut disks = Vec::new();
+    for image in output.images() {
+        let (bytes, sha256) = crate::blobs::sha256_file(image)?;
+        disks.push((image.to_path_buf(), DiskDigest { bytes, sha256 }));
+    }
 
     let mut compressed = Vec::new();
     let mut raw_removed = false;
@@ -642,18 +729,72 @@ pub fn build_image(
         }
     }
 
+    let written: Vec<&Path> = compressed
+        .iter()
+        .map(|c| c.path.as_path())
+        .chain(output.images().into_iter().filter(|_| !raw_removed))
+        .collect();
+    let retired = retire_stale_outputs(opts.out_dir, opts.stem, &written)?;
+    for path in &retired {
+        step.log(format!(
+            "removed {}: an earlier run's output, which this run did not write",
+            path.display()
+        ));
+    }
+
     step.progress(100);
     step.finish();
     Ok(ImageArtifacts {
         output,
         compressed,
         raw_removed,
+        disks,
+        retired,
         password,
         rootfs_verified_with: rootfs_fs.verified_with,
         rootfs_filesystem: rootfs_fs.provenance,
         files_manifest,
         image_bytes: geom.total_size,
     })
+}
+
+/// Remove every file the image node can publish for `stem` that this run did not write.
+///
+/// The names are fixed: each [`ArtifactRole`]'s image, raw and in each container. A run
+/// that switches `--compress` or `--layout` writes a different subset of them, and the
+/// rest are an earlier run's. They are removed only once this run has written its own, so
+/// a run that fails leaves the previous one's outputs where they were.
+///
+/// The raw boot image is the exception. `--stage uboot` publishes the same file as its
+/// standalone bootloader medium, so its presence says nothing about an image run. The
+/// artifact inventory ([`boot2deb_core::inventory`]) says which run each file belongs
+/// to, and every consumer reads that rather than the directory.
+fn retire_stale_outputs(
+    out_dir: &Path,
+    stem: &str,
+    written: &[&Path],
+) -> Result<Vec<PathBuf>, EngineError> {
+    let mut retired = Vec::new();
+    for role in [
+        ArtifactRole::Combined,
+        ArtifactRole::Boot,
+        ArtifactRole::Rootfs,
+    ] {
+        let raw = out_dir.join(role.file_name(stem));
+        let names = [
+            (role != ArtifactRole::Boot).then(|| raw.clone()),
+            Some(append_ext(&raw, ImageCompression::Xz.extension())),
+            Some(append_ext(&raw, ImageCompression::Gz.extension())),
+        ];
+        for path in names.into_iter().flatten() {
+            if written.contains(&path.as_path()) || std::fs::symlink_metadata(&path).is_err() {
+                continue;
+            }
+            std::fs::remove_file(&path).map_err(|s| EngineError::io(&path, s))?;
+            retired.push(path);
+        }
+    }
+    Ok(retired)
 }
 
 /// Assemble just the bootloader image from the u-boot payloads, returning its path.
@@ -679,7 +820,7 @@ pub fn build_bootloader_image(
     let step = Step::start(sink, "bootloader-image");
     // Only the head of the disk: this image *is* the boot region, so it has no rootfs
     // partition and no backup GPT, and the recipe's `image_size` says nothing about it.
-    let region = geometry::BootRegion::resolve(&build.boot)?;
+    let region = geometry::BootRegion::resolve(&build.boot, None)?;
     // The same fail-fast fit check the full image node runs before placing bytes.
     region.check_payload_fit(&[
         ("idbloader.img", file_len(idbloader)?),
@@ -708,6 +849,9 @@ pub struct PressOptions<'a> {
     pub role: ArtifactRole,
     /// The file to write — the caller's named output, not an artifact directory.
     pub output: &'a Path,
+    /// Where to write the pressed rootfs's file manifest. Named by the caller, which
+    /// publishes the image and its manifest together.
+    pub files_manifest: &'a Path,
     /// Scratch directory for the intermediate ext4 partition image.
     pub work_dir: &'a Path,
     /// ext4 volume label and GPT partition name (≤ 16 bytes), e.g. `rootfs`.
@@ -726,16 +870,17 @@ pub struct PressOptions<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PressedImage {
     /// The pressed image's own first-boot password, fresh for this file, since
-    /// re-assembly runs the same per-image credential step a build does. The
-    /// caller surfaces it. The recipe's provenance manifest still describes the
-    /// build's artifact, not this derivative.
+    /// re-assembly runs the same per-image credential step a build does. The caller
+    /// writes it to the pressed image's private credential document
+    /// ([`boot2deb_core::credential`]). The recipe's provenance manifest still
+    /// describes the build's artifact, not this derivative.
     pub password: String,
     /// The whole-disk size this press laid out, in bytes. Under a fitted
     /// `image_size` it grows with the additions.
     pub image_bytes: u64,
-    /// The pressed rootfs's file manifest, written beside the output with its extension
-    /// replaced by `rootfs.uapi16`. A press formats a new filesystem, so it lists that one
-    /// and not the build's.
+    /// The pressed rootfs's file manifest, written where
+    /// [`PressOptions::files_manifest`] names. A press formats a new filesystem, so it
+    /// lists that one and not the build's.
     pub files_manifest: PathBuf,
 }
 
@@ -782,7 +927,8 @@ pub fn press_image(
         }
     };
     let size = parse_image_size(&image.image_size)?;
-    let region = geometry::BootRegion::resolve(&build.boot)?;
+    let esp_bytes = esp::esp_bytes(image)?;
+    let region = geometry::BootRegion::resolve(&build.boot, esp_bytes)?;
     std::fs::create_dir_all(opts.work_dir).map_err(|s| EngineError::io(opts.work_dir, s))?;
     if let Some(parent) = opts.output.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent).map_err(|s| EngineError::io(parent, s))?;
@@ -830,7 +976,7 @@ pub fn press_image(
     let rekey = match opts.identity {
         PressIdentity::Built(_) => None,
         PressIdentity::Fresh { built, fresh } => {
-            let rekey = TreeRekey::new(built, fresh, &build.boot);
+            let rekey = TreeRekey::new(built, fresh, image);
             Some(match &kpart {
                 Some(kpart) => rekey.with_kpart(depthcharge::tree_path(kpart), kpart.clone()),
                 None => rekey,
@@ -844,10 +990,23 @@ pub fn press_image(
     let password = crate::secret::generate_password(image.first_boot_password_length as usize)?;
     let password_hash = crate::secret::crypt_password(&password)?;
 
+    // The pressed tree, rekeyed and with the additions merged, before anything is split
+    // off it: an addition under the ESP's mount point lands on the partition, and the
+    // rekey's check has seen every file the firmware will read.
+    let mut tree = ext4::read_tree(
+        opts.rootfs_tar,
+        Some(ext4::PressTree {
+            additions: opts.additions,
+            rekey: rekey.as_ref(),
+        }),
+        &step,
+    )?;
+    let esp_tree = split_esp(ib, &mut tree, &region, &step)?;
+
     let ext4 = opts.work_dir.join("press-rootfs.ext4");
     let (geom, rootfs_size) = match size {
         ImageSize::Fixed(total) => {
-            let geom = Geometry::resolve(&build.boot, total)?;
+            let geom = Geometry::resolve(&build.boot, esp_bytes, total)?;
             let rootfs_size = ext4::RootfsSize::Exact(geom.rootfs_bytes);
             (Some(geom), rootfs_size)
         }
@@ -859,25 +1018,23 @@ pub fn press_image(
     let rootfs_fs = ext4::build_rootfs_ext4(
         &ext4,
         rootfs_size,
-        opts.rootfs_tar,
+        tree,
         opts.rootfs_label,
         identity.ext4_uuid,
         ext4::FirstBoot {
             user: &image.user,
             password_hash: &password_hash,
         },
-        Some(ext4::PressTree {
-            additions: opts.additions,
-            rekey: rekey.as_ref(),
-        }),
         &step,
     )?;
-    let files_manifest = opts.output.with_extension("rootfs.uapi16");
+    let esp_path = opts.work_dir.join("press-esp.fat");
+    let esp_image = format_esp(esp_tree, &esp_path, &identity, rootfs_fs.time_secs, &step)?;
+    let files_manifest = opts.files_manifest.to_path_buf();
     files::write_manifest(&ext4, &files_manifest, &step)?;
     let geom = match geom {
         Some(geom) => geom,
         None => {
-            let geom = Geometry::around_rootfs(&build.boot, rootfs_fs.size_bytes)?;
+            let geom = Geometry::around_rootfs(&build.boot, esp_bytes, rootfs_fs.size_bytes)?;
             step.log(format!(
                 "sized the pressed image to its contents: {} bytes on disk",
                 geom.total_size
@@ -900,6 +1057,7 @@ pub fn press_image(
         &DiskContents {
             ext4: &ext4,
             seed_image: &seed_image,
+            esp: esp_image.as_deref(),
             kpart: kpart.as_deref(),
         },
         opts.boot.as_ref().filter(|_| with_boot),
@@ -907,9 +1065,12 @@ pub fn press_image(
         &identity,
         &step,
     )?;
-    // The scratch ext4 is press-local; a build's is kept for stage reuse, but a
+    // The scratch filesystems are press-local; a build's are kept for stage reuse, but a
     // press leaves nothing behind except its output.
     std::fs::remove_file(&ext4).map_err(|s| EngineError::io(&ext4, s))?;
+    if esp_image.is_some() {
+        std::fs::remove_file(&esp_path).map_err(|s| EngineError::io(&esp_path, s))?;
+    }
     step.log(format!(
         "pressed {} ({} bytes)",
         opts.output.display(),
@@ -950,14 +1111,61 @@ fn boot_payloads<'a>(
     }
 }
 
+/// Split the EFI system partition's subtree off `tree` under the `efi` loader, with the
+/// partition the geometry placed it in. `None` under a loader with no partition.
+fn split_esp(
+    ib: ImageBuild,
+    tree: &mut Vec<ferrosys::SourceEntry>,
+    region: &geometry::BootRegion,
+    step: &Step,
+) -> Result<Option<(Vec<ferrosys::SourceEntry>, EspRegion)>, EngineError> {
+    let Some(efi) = ib.image.loader.as_ref().and_then(|l| l.efi()) else {
+        return Ok(None);
+    };
+    let partition = region.esp.ok_or_else(|| EngineError::ImageGeometry {
+        detail: "the efi loader resolved, but the geometry placed no EFI system partition".into(),
+    })?;
+    let esp_tree = esp::split_tree(tree, efi, step)?;
+    Ok(Some((esp_tree, partition)))
+}
+
+/// Format the ESP tree [`split_esp`] returned into `dest`, returning the file the disk
+/// assembly splices, or `None` under a loader with no partition. The serial is the
+/// identity's and the label time the rootfs's own, so the volume is a function of the
+/// lock as the rootfs is.
+fn format_esp(
+    split: Option<(Vec<ferrosys::SourceEntry>, EspRegion)>,
+    dest: &Path,
+    identity: &ImageIdentity,
+    time_secs: i64,
+    step: &Step,
+) -> Result<Option<PathBuf>, EngineError> {
+    let Some((tree, partition)) = split else {
+        return Ok(None);
+    };
+    esp::format(
+        dest,
+        tree,
+        partition.bytes,
+        identity.esp_volume_id(),
+        time_secs,
+        partition.first_lba(),
+        step,
+    )?;
+    Ok(Some(dest.to_path_buf()))
+}
+
 /// What goes onto a disk beyond its table: the filesystems, and (for a combined
-/// image) the signed kernel partition. One value because the three travel
-/// together through both `assemble_disk` calls.
+/// image) the signed kernel partition. One value because they travel together
+/// through both `assemble_disk` calls.
 struct DiskContents<'a> {
     /// The rootfs ext4 partition image, spliced at the rootfs offset.
     ext4: &'a Path,
     /// The seed partition's whole content, spliced at the seed offset.
     seed_image: &'a [u8],
+    /// The EFI system partition's FAT image, under the `efi` loader, spliced at the
+    /// partition offset.
+    esp: Option<&'a Path>,
     /// The signed kernel partition, under `depthcharge` with a boot payload.
     kpart: Option<&'a Path>,
 }
@@ -977,16 +1185,20 @@ fn assemble_disk(
 ) -> Result<(), EngineError> {
     let kpart = contents.kpart;
     create_sized_image(image, geom.total_size)?;
-    gpt::write_table(
-        image,
-        geom,
-        rootfs_label,
-        identity.disk_guid,
-        identity.rootfs_partuuid,
-        identity.seed_partuuid,
-        &identity.kpart_guids,
-    )?;
+    gpt::write_table(image, geom, rootfs_label, identity)?;
     splice_bytes(image, geom.seed_off, contents.seed_image)?;
+    match (geom.esp, contents.esp) {
+        (Some(partition), Some(esp)) => splice_file(image, partition.offset, esp)?,
+        (None, None) => {}
+        // Both come from the same resolved loader, so they cannot disagree — but a table
+        // with a partition and nothing in it is a board that finds no loader.
+        _ => {
+            return Err(EngineError::StageNotApplicable {
+                stage: "image",
+                why: "the EFI system partition's table entry and its filesystem disagree",
+            })
+        }
+    }
     splice_file(image, geom.rootfs_off, contents.ext4)?;
     if let Some(boot) = boot {
         match (&geom.boot, boot) {
@@ -1033,7 +1245,12 @@ fn assemble_disk(
         }
     }
     step.log(format!(
-        "laid GPT + rootfs partition{} into {}",
+        "laid GPT + {}rootfs partition{} into {}",
+        if geom.esp.is_some() {
+            "EFI system partition + "
+        } else {
+            ""
+        },
         if boot.is_some() {
             " + boot payload"
         } else {
@@ -1064,7 +1281,7 @@ fn assemble_bootloader(
             why: "this boot method writes no bootloader into a raw gap",
         });
     };
-    create_sized_image(image, region.rootfs_off)?;
+    create_sized_image(image, region.partition_off())?;
     splice_file(image, idbloader_off, idbloader)?;
     splice_file(image, uboot_itb_off, uboot_itb)?;
     step.log(format!("laid bootloader payloads into {}", image.display()));
@@ -1603,7 +1820,16 @@ mod tests {
         additions.copy(&site, "/opt/site/site.conf").unwrap();
         additions.copy(&hostname, "/etc/hostname").unwrap();
         additions.deb(&deb).unwrap();
-        additions.embed_image(&embedded).unwrap();
+        additions
+            .embed_image(
+                &embedded,
+                &"e".repeat(64),
+                &DiskDigest {
+                    bytes: 4096,
+                    sha256: "d".repeat(64),
+                },
+            )
+            .unwrap();
 
         let pressed_path = tmp.path().join("card.img");
         let pressed = press_image(
@@ -1616,6 +1842,7 @@ mod tests {
                 }),
                 role: ArtifactRole::Combined,
                 output: &pressed_path,
+                files_manifest: &pressed_path.with_extension("rootfs.uapi16"),
                 work_dir: &tmp.path().join("work-press"),
                 rootfs_label: "rootfs",
                 identity: PressIdentity::Built(identity),
@@ -1638,7 +1865,11 @@ mod tests {
         // from its own GPT entry and held to that partition's extent.
         type Snapshot = BTreeMap<Vec<u8>, (u16, u32, Option<Vec<u8>>)>;
         let walk = |path: &Path| -> Snapshot {
-            let part = inspect::rootfs_partition(path).unwrap();
+            let raw = inspect::RawImage::open(path, tmp.path()).unwrap();
+            let part = inspect::read_table(&raw)
+                .unwrap()
+                .by_guid(&raw, identity.rootfs_partuuid)
+                .unwrap();
             let file = std::fs::File::open(path).unwrap();
             let mut reader =
                 ExtReader::open_with(file, &ExtOpen::new().base(part.start).len(part.bytes))
@@ -1680,6 +1911,20 @@ mod tests {
                 .as_deref(),
             Some(b"EMBEDDED-ARTIFACT".as_slice())
         );
+        // Beside it, the record the installer checks the payload and the disk against.
+        let info = press_map[b"/var/lib/boot2deb/install/turing-rk1-forky.img.xz.info".as_slice()]
+            .2
+            .clone()
+            .unwrap();
+        let info = String::from_utf8(info).unwrap();
+        for line in [
+            "file=turing-rk1-forky.img.xz",
+            &format!("sha256={}", "e".repeat(64)),
+            "image_bytes=4096",
+            &format!("image_sha256={}", "d".repeat(64)),
+        ] {
+            assert!(info.lines().any(|l| l == line), "{line} missing:\n{info}");
+        }
 
         // The marker names the source and everything added, by kind.
         let marker = press_map[b"/etc/boot2deb/image.toml".as_slice()]
@@ -1824,6 +2069,7 @@ mod tests {
                 }),
                 role: ArtifactRole::Combined,
                 output: &card,
+                files_manifest: &card.with_extension("rootfs.uapi16"),
                 work_dir: &tmp.path().join("work-press"),
                 rootfs_label: "rootfs",
                 identity,
@@ -1908,6 +2154,7 @@ mod tests {
                 boot: Some(BootPayload::Depthcharge),
                 role: ArtifactRole::Combined,
                 output: &card,
+                files_manifest: &card.with_extension("rootfs.uapi16"),
                 work_dir: &tmp.path().join("work-press"),
                 rootfs_label: "rootfs",
                 identity,
@@ -2075,7 +2322,7 @@ mod tests {
         else {
             unreachable!("the fixture names an explicit size")
         };
-        let geom = Geometry::resolve(&build.boot, total).unwrap();
+        let geom = Geometry::resolve(&build.boot, None, total).unwrap();
         let sb = 16 * 1024 * 1024 + 1024;
         let blocks_count = u32::from_le_bytes(bytes[sb + 4..sb + 8].try_into().unwrap()) as u64;
         assert_eq!(
@@ -2104,6 +2351,202 @@ mod tests {
             );
             let dump = String::from_utf8_lossy(&o.stdout);
             assert!(dump.contains("label: gpt"), "sfdisk dump: {dump}");
+        }
+    }
+
+    /// The efi loader end to end: the ESP at the partition offset holds the tree's
+    /// `/boot/efi/` as FAT32, the rootfs behind it keeps only the empty mount point,
+    /// and the table marks the ESP, not the rootfs, bootable.
+    #[test]
+    fn an_efi_image_lays_the_esp_ahead_of_the_rootfs() {
+        use std::os::unix::fs::PermissionsExt;
+        if !require_host_tools(&["tar"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let rootfs_tar = tmp.path().join("rootfs.tar");
+        let esp_files: [(&str, &[u8]); 3] = [
+            ("/boot/efi/EFI/BOOT/BOOTAA64.EFI", b"MZ-REMOVABLE"),
+            ("/boot/efi/EFI/debian/grubaa64.efi", b"MZ-REMOVABLE"),
+            (
+                "/boot/efi/dtb/rockchip/rk3588-turing-rk1.dtb",
+                b"\xd0\x0d\xfe\xed",
+            ),
+        ];
+        make_rootfs_tar_with(tmp.path(), &rootfs_tar, &[]);
+        // Root's modes, as the customize step leaves them: the only ones FAT records.
+        let root = tmp.path().join("rootfs");
+        for (path, content) in esp_files {
+            let dest = root.join(path.trim_start_matches('/'));
+            std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+            std::fs::write(&dest, content).unwrap();
+        }
+        for dir in [
+            "boot",
+            "boot/efi",
+            "boot/efi/EFI",
+            "boot/efi/EFI/BOOT",
+            "boot/efi/EFI/debian",
+            "boot/efi/dtb",
+            "boot/efi/dtb/rockchip",
+        ] {
+            std::fs::set_permissions(root.join(dir), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+        for (path, _) in esp_files {
+            std::fs::set_permissions(
+                root.join(path.trim_start_matches('/')),
+                std::fs::Permissions::from_mode(0o644),
+            )
+            .unwrap();
+        }
+        let status = Command::new("tar")
+            .args(["--owner=0", "--group=0", "--numeric-owner", "-C"])
+            .arg(&root)
+            .arg("-cf")
+            .arg(&rootfs_tar)
+            .arg(".")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let idb = tmp.path().join("idbloader.img");
+        let itb = tmp.path().join("u-boot.itb");
+        std::fs::write(&idb, b"IDBLOADER-PAYLOAD").unwrap();
+        std::fs::write(&itb, b"UBOOT-ITB-PAYLOAD").unwrap();
+
+        let mut build = resolve_recipe(
+            &repo_root(),
+            "turing-rk1/forky",
+            &Overrides {
+                loader: Some(boot2deb_core::model::Loader::Efi),
+                ..Overrides::default()
+            },
+        )
+        .unwrap();
+        // 16 MiB of raw gap, the 128 MiB ESP, and the 128 MiB rootfs minimum.
+        build.image.as_mut().unwrap().image_size = "320MiB".into();
+        let out = tmp.path().join("out");
+        let opts = ImageOptions {
+            rootfs_tar: &rootfs_tar,
+            boot: BootPayload::RockchipRkbin {
+                idbloader: &idb,
+                uboot_itb: &itb,
+            },
+            out_dir: &out,
+            stem: "turing-rk1-efi",
+            work_dir: &tmp.path().join("work"),
+            rootfs_label: "rootfs",
+            identity: ImageIdentity::derive("test-seed", "turing-rk1"),
+            compress: &[],
+            keep_raw: false,
+            jobs: None,
+        };
+        let sink = |_: crate::event::Event| {};
+        let arts = build_image(pair_of(&build), &opts, &sink).unwrap();
+        let ImageOutput::Combined { image } = &arts.output else {
+            panic!("expected a combined image");
+        };
+
+        let table = crate::press::verify::read_back_table(image).unwrap();
+        let names: Vec<&str> = table.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["b2d-seed", esp::ESP_PARTLABEL, "rootfs"]);
+        let esp_entry = &table[1];
+        assert_eq!(esp_entry.first_lba, 16 * 1024 * 1024 / 512);
+        assert_eq!(esp_entry.flags, 1 << 2, "the ESP is the bootable partition");
+        assert_eq!(
+            esp_entry.part_guid,
+            opts.identity.esp_partuuid.hyphenated().to_string()
+        );
+        assert_eq!(table[2].first_lba, 144 * 1024 * 1024 / 512);
+        assert_eq!(table[2].flags, 0);
+
+        // The ESP holds the tree's /boot/efi, read back through the FAT reader.
+        let bytes = std::fs::read(image).unwrap();
+        let esp_bytes = &bytes[16 << 20..144 << 20];
+        let mut fat = ferrosys::fat::Reader::open(std::io::Cursor::new(esp_bytes)).unwrap();
+        for (path, content) in esp_files {
+            let node = fat
+                .lookup(path.trim_start_matches("/boot/efi").as_bytes())
+                .unwrap();
+            assert_eq!(fat.read_data(&node).unwrap(), content, "{path}");
+        }
+
+        // The rootfs keeps the mount point and nothing under it.
+        let (_, hostname) = read_back_rootfs(image, b"/etc/hostname");
+        assert_eq!(hostname, b"turing-rk1\n");
+        let table_rootfs = &table[2];
+        let mut reader = ferrosys::ext::Reader::open_with(
+            std::fs::File::open(image).unwrap(),
+            &ferrosys::ext::OpenOptions::new()
+                .base(table_rootfs.first_lba * 512)
+                .len((table_rootfs.last_lba - table_rootfs.first_lba + 1) * 512),
+        )
+        .unwrap();
+        let paths: Vec<Vec<u8>> = reader.walk().unwrap().into_iter().map(|e| e.path).collect();
+        assert!(
+            paths.contains(&b"/boot/efi".to_vec()),
+            "the mount point stays"
+        );
+        assert!(!paths.iter().any(|p| p.starts_with(b"/boot/efi/")));
+
+        // The gate's read-back agrees, and names what a volume lacks.
+        let raw = inspect::RawImage::open(image, tmp.path()).unwrap();
+        let read = inspect::read_table(&raw).unwrap();
+        assert_eq!(
+            read.backup,
+            Ok(()),
+            "the backup table agrees with the primary"
+        );
+        let part = read.by_guid(&raw, opts.identity.esp_partuuid).unwrap();
+        let report = inspect::esp(
+            &raw,
+            &part,
+            &["/EFI/BOOT/BOOTAA64.EFI".into(), "/dtb/absent.dtb".into()],
+        )
+        .unwrap();
+        assert!(
+            report.efi_type && report.bootable && report.fat32,
+            "{report:?}"
+        );
+        assert_eq!(report.findings, None);
+        assert_eq!(report.missing, ["/dtb/absent.dtb"]);
+    }
+
+    /// A run removes the image node's earlier outputs it did not write again (another
+    /// container, the other layout's images), and nothing else: not what it wrote, not
+    /// the raw boot image `--stage uboot` also publishes, not another point's files, and
+    /// not another stage's.
+    #[test]
+    fn a_run_retires_the_image_outputs_it_did_not_write_and_only_those() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path();
+        for name in [
+            "p.img.xz",
+            "p.img.gz",
+            "p-rootfs.img",
+            "p-rootfs.img.xz",
+            "p-boot.img",
+            "p-boot.img.xz",
+            "p-rootfs.tar",
+            "q.img.xz",
+        ] {
+            std::fs::write(out.join(name), b"x").unwrap();
+        }
+        let gz = out.join("p.img.gz");
+        let mut retired = retire_stale_outputs(out, "p", &[gz.as_path()]).unwrap();
+        retired.sort();
+        assert_eq!(
+            retired,
+            [
+                "p-boot.img.xz",
+                "p-rootfs.img",
+                "p-rootfs.img.xz",
+                "p.img.xz"
+            ]
+            .map(|n| out.join(n))
+        );
+        for kept in ["p.img.gz", "p-boot.img", "p-rootfs.tar", "q.img.xz"] {
+            assert!(out.join(kept).exists(), "{kept} was removed");
         }
     }
 

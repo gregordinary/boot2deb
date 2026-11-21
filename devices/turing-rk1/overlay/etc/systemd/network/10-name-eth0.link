@@ -1,0 +1,10 @@
+# Turing RK1: the GMAC is eth0 from the first boot on. The first-boot hook
+# 20-network rewrites this file with the unit's own MAC address and keeps the
+# name, so the name never changes across that hook. A first-boot hook that
+# configures the interface by name, such as the seed's static_ip for dhcpcd,
+# reads the name every later boot uses. The GMAC lives at
+# platform-fe1c0000.ethernet in this board's RK3588 wiring.
+[Match]
+Path=platform-fe1c0000.ethernet
+[Link]
+Name=eth0

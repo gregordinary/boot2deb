@@ -134,14 +134,12 @@ pub(crate) fn is_clean(repo: &Path) -> Result<bool, EngineError> {
 /// This is the *identity* notion of dirty, asking whether a commit still names what
 /// is on disk. It is deliberately narrower than this module's `is_clean`.
 ///
-/// Untracked files are not counted, because they are not build input. A scratch file
-/// beside a config tree must not make an otherwise-identified build report itself
+/// Untracked files are not counted. A caller whose untracked files are input asks
+/// [`has_untracked`] or [`untracked_files`] as well, under the paths it reads. A scratch
+/// file beside a config tree must not make an otherwise-identified build report itself
 /// unidentifiable. `is_clean` answers a different question for a different caller. It
 /// refuses untracked files and in-progress `am`/rebase state, because it guards a tree
 /// about to be patched and reset.
-///
-/// Matches what the CLI's build script stamps as `BOOT2DEB_GIT_DIRTY`. The binary's
-/// dirty flag and a config tree's then mean the same thing in one provenance record.
 ///
 /// `paths` narrows the question to the part of the tree the caller's identity depends
 /// on. An empty `paths` asks about the whole checkout.
@@ -153,6 +151,7 @@ pub(crate) fn is_clean(repo: &Path) -> Result<bool, EngineError> {
 /// Best-effort, and false on anything that is not a clean question. `git diff --quiet`
 /// exits 1 for "differences" but 128 for "not a repository", and only the former is
 /// dirtiness. A path that is not a checkout has no commit to differ from.
+/// [`tracked_changes`] keeps a failed read apart from a clean answer.
 pub fn has_tracked_changes(repo: &Path, paths: &[&str]) -> bool {
     let ctx = format!("diff --quiet HEAD in {}", repo.display());
     let mut args = vec!["diff", "--quiet", "HEAD"];
@@ -183,6 +182,52 @@ pub fn has_untracked(repo: &Path, paths: &[&str]) -> bool {
     run(Some(repo), &args, &ctx)
         .map(|out| out.status.success() && !out.stdout.is_empty())
         .unwrap_or(false)
+}
+
+/// Whether `repo`'s tracked content under `paths` differs from `HEAD`, staged or not.
+/// `None` is a read that failed.
+///
+/// The three-valued form of [`has_tracked_changes`], for a caller that must not read a
+/// failed inspection as a clean tree. A builder's own identity is one: a stamp that says
+/// "clean" because git was missing names a commit nobody checked against what compiled.
+/// `git diff --quiet` exits 1 for differences and 0 for none. Any other exit, such as 128
+/// for "not a repository", is `None`, as is a git that does not spawn.
+///
+/// An empty `paths` asks about the whole checkout.
+pub fn tracked_changes(repo: &Path, paths: &[&str]) -> Option<bool> {
+    let ctx = format!("diff --quiet HEAD in {}", repo.display());
+    let mut args = vec!["diff", "--quiet", "HEAD"];
+    if !paths.is_empty() {
+        args.push("--");
+        args.extend_from_slice(paths);
+    }
+    match run(Some(repo), &args, &ctx).ok()?.status.code() {
+        Some(0) => Some(false),
+        Some(1) => Some(true),
+        _ => None,
+    }
+}
+
+/// Every file under `paths` that `repo` does not track, *ignored files included*, as
+/// paths relative to the repository root. `None` is a read that failed.
+///
+/// [`has_untracked`] skips what git ignores, which suits a tree whose ignored files are
+/// output. This listing is for a caller that decides for itself which untracked files
+/// matter. An ignore rule says what is not committed, never what is not read: an
+/// ignored source file still compiles once a tracked module declares it. An empty
+/// `paths` lists the whole checkout.
+pub fn untracked_files(repo: &Path, paths: &[&str]) -> Option<Vec<String>> {
+    let ctx = format!("ls-files --others in {}", repo.display());
+    let mut args = vec!["ls-files", "--others", "-z", "--"];
+    args.extend_from_slice(paths);
+    let out = run(Some(repo), &args, &ctx).ok()?;
+    out.status.success().then(|| {
+        out.stdout
+            .split(|&b| b == 0)
+            .filter(|f| !f.is_empty())
+            .map(|f| String::from_utf8_lossy(f).into_owned())
+            .collect()
+    })
 }
 
 /// Whether `repo` holds `commit` as a commit object.
@@ -362,10 +407,16 @@ const AM_IDENTITY: [&str; 4] = [
 
 /// Apply one patch with `git am --3way`, returning the raw [`Output`] so the
 /// caller can distinguish a clean apply from a conflict.
+///
+/// The commit it makes takes its committer date from the patch's own `Date:`, and its
+/// committer from [`AM_IDENTITY`]. The patched tree's `HEAD` is therefore the same
+/// commit on every build of the same base and series. A build that records its tree's
+/// commit, as the .NET SDK does in an assembly's informational version and FFmpeg does
+/// in its version string, records the same one each time.
 pub(crate) fn am_3way(repo: &Path, patch: &Path) -> Result<Output, EngineError> {
     command(Some(repo))
         .args(AM_IDENTITY)
-        .args(["am", "--3way"])
+        .args(["am", "--3way", "--committer-date-is-author-date"])
         .arg(patch)
         .output()
         .map_err(|source| EngineError::GitSpawn {
@@ -534,6 +585,58 @@ c9acdc466e9aa96352f658b9276aa8a45b8e817d\trefs/tags/v7.1.1^{}\n";
             !has_tracked_changes(repo, &[]),
             "and git diff alone does not see it"
         );
+    }
+
+    /// The three-valued reads keep a failed read apart from a clean tree, and the
+    /// listing includes what git ignores under the paths asked about, and only there.
+    #[test]
+    fn the_three_valued_reads_answer_none_on_failure_and_list_ignored_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join("crates/cli/src")).unwrap();
+        let git = |args: &[&str]| {
+            assert!(Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success());
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@boot2deb"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(repo.join("crates/cli/src/main.rs"), "fn main() {}").unwrap();
+        std::fs::write(repo.join(".gitignore"), "/target\n*.gen.rs\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "one"]);
+        assert_eq!(tracked_changes(&repo, &["crates"]), Some(false));
+        assert_eq!(untracked_files(&repo, &["crates"]), Some(vec![]));
+
+        // Ignored output outside the paths asked about is not listed.
+        std::fs::create_dir_all(repo.join("target/debug")).unwrap();
+        std::fs::write(repo.join("target/debug/boot2deb"), "x").unwrap();
+        assert_eq!(untracked_files(&repo, &["crates"]), Some(vec![]));
+        // An ignored file under them is, where the ignore-aware form skips it.
+        std::fs::write(repo.join("crates/cli/src/table.gen.rs"), "x").unwrap();
+        assert_eq!(
+            untracked_files(&repo, &["crates"]),
+            Some(vec!["crates/cli/src/table.gen.rs".to_string()])
+        );
+        assert!(!has_untracked(&repo, &["crates"]));
+
+        std::fs::write(repo.join("crates/cli/src/main.rs"), "fn main() { }").unwrap();
+        assert_eq!(tracked_changes(&repo, &["crates"]), Some(true));
+
+        // A `.git` that git cannot read gives no answer, where the best-effort form
+        // answers "clean".
+        let broken = tmp.path().join("broken");
+        std::fs::create_dir_all(&broken).unwrap();
+        std::fs::write(broken.join(".git"), "").unwrap();
+        assert_eq!(tracked_changes(&broken, &["crates"]), None);
+        assert_eq!(untracked_files(&broken, &["crates"]), None);
+        assert!(!has_tracked_changes(&broken, &["crates"]));
     }
 
     #[test]

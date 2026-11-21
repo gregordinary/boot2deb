@@ -233,13 +233,14 @@ crates/cli      the boot2deb binary
 
 arches/ socs/ boot-methods/ devices/ kernels/ kmods/ features/ recipes/
                                                 config layers (TOML)
-blobs/ fragments/                               vendored blobs, kconfig
+blobs/ fragments/                               apt keyrings, kconfig
 docs/                                           the mdBook
 ```
 
 ## License
 
 boot2deb is licensed under the GNU General Public License v3.0 or later. See
-[`LICENSE`](LICENSE). Vendored third-party components keep their own licenses, listed in
+[`LICENSE`](LICENSE). Third-party components keep their own licenses, listed in
 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md). Those components are the Rockchip
-`rkbin` firmware blobs, the boot and kernel-hook scripts, and the Debian archive keyring.
+`rkbin` firmware blobs a build fetches, the boot and kernel-hook scripts, and the Debian
+archive keyring.

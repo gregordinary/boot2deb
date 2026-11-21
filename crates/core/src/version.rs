@@ -7,7 +7,7 @@
 //! Two places deciding it differently is a silent wrong answer. One example is a
 //! range gate that admits a tag an upgrade survey calls incomparable, or the reverse.
 //!
-//! Two questions live here:
+//! Three questions live here:
 //!
 //! - **What version is this tag?** [`parse_tag`], used by the patch-series range
 //!   gate ([`crate::series`]) to decide whether a series claims a kernel, and by the
@@ -15,6 +15,8 @@
 //! - **Is this tag spelled like that one?** [`TagShape`], used only by the survey.
 //!   A repo advertises tags from several naming schemes at once, and only the ones
 //!   spelled like the pin are candidates to upgrade it to.
+//! - **How is this version written for Debian?** [`sanitize_deb_version`], used by
+//!   every package boot2deb versions itself.
 
 use crate::error::ConfigError;
 use semver::Version;
@@ -186,6 +188,38 @@ fn normalize_core(core: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(".")
+}
+
+/// Write a raw upstream version as a Debian upstream version. Alphanumerics and
+/// `. + ~ -` are kept, and anything else becomes `+`, since an underscore is **not**
+/// legal in a Debian version. A result that would not start with a digit, which Debian
+/// requires, gets a leading `0`. That covers the empty input too.
+///
+/// Callers strip their own release prefix first (FFmpeg's `n`, u-boot's `v`). Every
+/// package boot2deb versions itself reads its upstream version through here, so the
+/// rule for a legal version is stated once.
+///
+/// ```
+/// use boot2deb_core::version::sanitize_deb_version;
+/// assert_eq!(sanitize_deb_version("2026.10+rkbin1.56"), "2026.10+rkbin1.56");
+/// assert_eq!(sanitize_deb_version("v4l2_request"), "0v4l2+request");
+/// assert_eq!(sanitize_deb_version(""), "0");
+/// ```
+pub fn sanitize_deb_version(raw: &str) -> String {
+    let mut out: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '+' | '~' | '-') {
+                c
+            } else {
+                '+'
+            }
+        })
+        .collect();
+    if !out.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        out.insert(0, '0');
+    }
+    out
 }
 
 /// Apply [`normalize_core`] to every comparator in a comma-separated semver

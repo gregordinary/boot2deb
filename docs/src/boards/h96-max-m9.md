@@ -3,13 +3,18 @@
 The H96 MAX M9 (and the M9S, the same board) is an Android TV box built on the
 Rockchip **RK3576**. It has an octa-core CPU (4x Cortex-A72 + 4x Cortex-A53) with a
 Mali-G52 MC3, LPDDR4X memory, eMMC 5.1 storage, Gigabit ethernet and HDMI. boot2deb turns
-it into a mainline Debian box: kernel `v7.3`, u-boot `v2026.10`, no vendor BSP.
+it into a mainline Debian box: kernel `v7.3.3`, u-boot `v2026.10`, no vendor BSP.
 
 It is a cheap and widely available RK3576 board, which makes it a practical target, and
 an awkward one. There is no SD slot (the pads are depopulated), no reset button, and no
 exposed serial header until you open it. Most of the work of supporting it is therefore
 having a bootloader that can recover the board without a cable. That is what the
 [RK3576 u-boot images](../reference/rk3576-uboot-images.md) exist for.
+
+Every shipped recipe packs Rockchip's prebuilt BL31 from rkbin. The board also lists
+Trusted Firmware-A as a BL31 provider, so `bl31 = "tfa"` in a recipe builds the same
+bootloader around an upstream BL31 instead. The DDR init stays rkbin's either way. See
+[The BL31 is its own axis](../reference/config-model.md#the-bl31-is-its-own-axis).
 
 ## Recipes
 

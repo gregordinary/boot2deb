@@ -1,11 +1,13 @@
 #!/bin/sh
 set -e
-# Turing RK1: pin a stable eth0 name and a random-but-fixed MAC on first boot.
-# The GMAC lives at platform-fe1c0000.ethernet on this board's RK3588 wiring, so
-# this step is device-specific and does not belong in the generic base.
-
-# Disable consistent network device naming
-ln -sf /dev/null /etc/systemd/network/99-default.link
+# Turing RK1: give the GMAC a random-but-fixed MAC address on first boot.
+# The image already names the GMAC eth0 through
+# /etc/systemd/network/10-name-eth0.link, with predictable naming masked by
+# 99-default.link. This hook rewrites that file with the unit's own address and
+# the same name, so the name is eth0 on every boot and the address applies
+# from the second boot on. The GMAC lives at platform-fe1c0000.ethernet on this
+# board's RK3588 wiring, so this step is device-specific and does not belong in
+# the generic base.
 
 # Generate a locally-administered unicast MAC address: clear the multicast bit
 # (byte 0 bit 0, via the leading 0xfe) and set the locally-administered bit

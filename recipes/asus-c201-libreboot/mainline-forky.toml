@@ -27,4 +27,4 @@ image_size = "2G"
 # Nothing it moves is firmware-coupled, so the libreboot opt-in does not change it.
 [support]
 status = "expected"
-date   = "2026-10-19"
+date   = "2026-11-07"

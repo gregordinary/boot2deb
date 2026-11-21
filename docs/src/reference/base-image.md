@@ -10,7 +10,7 @@ Three inputs, in order:
 
 1. **Debian's `required` + `important` priority set.** This is the base system — a
    working Debian userland with `apt`, `systemd`, `bash`, `less`, `nano`, `vim-tiny`,
-   `procps`, `fdisk`, `iputils-ping`, and `tzdata`.
+   `procps`, `iputils-ping`, and `tzdata`.
 2. **The `packages` list in `base.toml`**, below.
 3. **The layers**: `arches` → `socs` → `boot-methods` → `devices`, then any features the
    recipe names. Wi-Fi tooling, Mesa, `bluez`, and the media stack all arrive this way,
@@ -39,7 +39,8 @@ is the closure most of these parentheses are describing.
 
 | packages | why |
 |---|---|
-| `initramfs-tools`, `dbus`, `dhcpcd`, `libpam-systemd`, `systemd-timesyncd`, `sudo` | boot, session, clock, privilege. A board with no RTC gets its time from the network. |
+| `dbus`, `libpam-systemd`, `sudo` | session, privilege. |
+| `fdisk` | `sfdisk`, which first boot grows the root partition with. Debian's `important` set has it and Ubuntu's does not. |
 | `openssh-server`, `openssh-client` | Remote access both ways. The server's `Depends` already pull `openssh-sftp-server`, so `scp`/`sftp` *to* a board work without the client. The client is what provides `scp`, `sftp`, `ssh-keygen`, and `ssh-copy-id` *from* it. The server is enabled, so a booted board is reachable before anyone has logged in — see [The account, sudo, and SSH keys](../access.md). |
 | `ca-certificates`, `curl`, `wget`, `rsync` | Fetching and moving files, https included. |
 | `bind9-dnsutils` (~6 MiB with `bind9-libs`) | `dig` and `host`, for triaging a board whose network is the thing that is wrong. |
@@ -49,8 +50,24 @@ is the closure most of these parentheses are describing.
 | `bash-completion`, `man-db` (~9.2 MiB) | Shell usability. `man-db` pulls `groff-base`, `bsdextrautils`, and `libpipeline1`. It gives access to the ~3.9 MiB of manual pages every *other* package already puts on the image and that nothing else can read. |
 | `locales`, `keyboard-configuration`, `console-setup` (~44 MiB) | What makes a **pre-built** image reconfigurable with no network. See [Locale, timezone, and keyboard](../localization.md). |
 
-`isc-dhcp-client` is excluded. `dhcpcd` is the DHCP client, and boards whose SoC layer
-brings NetworkManager exclude `dhcpcd` in turn.
+Three parts of the system differ between distributions, so the distro layer under
+`distros/` supplies them rather than `base.toml`:
+
+| | Debian | Ubuntu |
+|---|---|---|
+| initramfs generator | `initramfs-tools` | `dracut` |
+| time client | `systemd-timesyncd` | `chrony` |
+| wired network | `dhcpcd` | netplan, rendered to `systemd-networkd` |
+
+The generator and the time client are named by the layer's `initramfs_generator` and
+`time_client`, and resolution adds their packages. A recipe can pick the other
+generator. A board with no RTC gets its time from the network, see
+[The clock and time sync](../clock.md).
+
+On Debian, `isc-dhcp-client` is excluded. `dhcpcd` is the DHCP client, and boards whose
+SoC layer brings NetworkManager exclude `dhcpcd` in turn. On Ubuntu, `ubuntu-minimal`
+brings netplan, and the Ubuntu layer's overlay tree ships the netplan file that brings
+up every wired interface by DHCP.
 
 ## What is deliberately absent
 

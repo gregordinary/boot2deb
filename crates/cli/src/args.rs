@@ -4,7 +4,9 @@
 
 use crate::commands;
 use boot2deb_core::lock::SnapshotMode;
-use boot2deb_core::model::{BootMethod, Keymap, Layout, Overrides, SudoPolicy};
+use boot2deb_core::model::{
+    Bl31Provider, BootMethod, Keymap, Layout, Loader, Overrides, SudoPolicy,
+};
 use boot2deb_core::series::Scope;
 use boot2deb_engine::image::ImageCompression;
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -133,7 +135,7 @@ pub(crate) enum Command {
         #[command(flatten)]
         overrides: OverrideArgs,
     },
-    /// Resolve upstream refs + hash blobs and write the recipe's `.lock`.
+    /// Resolve upstream refs, pin the rkbin blobs, and write the recipe's `.lock`.
     /// The sole path that consults upstream. `build` reads only the lock.
     Update {
         /// Recipe to resolve (e.g. turing-rk1/forky).
@@ -525,6 +527,11 @@ pub(crate) struct BuildArgs {
     /// `uboot_source`.
     #[arg(long)]
     pub(crate) uboot_src: Option<String>,
+    /// Trusted Firmware-A clone source (git URL or local path), for a build point
+    /// whose BL31 provider is `tfa`. Default: the SoC's `[tfa].git`. A mirror with the
+    /// same tags serves where the canonical host is unreachable.
+    #[arg(long)]
+    pub(crate) tfa_src: Option<String>,
     /// Media-accel userspace clone source, as `NAME=SRC`, repeatable. Default: that
     /// tree's own `[[userspace]]` URL. The SoC declares which trees it has, so each
     /// override names one (`--userspace-src mpp=../mpp-rockchip`). A local checkout is
@@ -567,7 +574,9 @@ pub(crate) struct BuildArgs {
     /// checkout.
     #[arg(long)]
     pub(crate) patches_url: Option<String>,
-    /// Vendored rkbin blob directory (default: blobs/SOC under the config root).
+    /// Read the rkbin blobs from this directory instead of fetching them from the
+    /// rkbin repository at the locked commit. Each file is still verified against
+    /// the lock's sha256 pin. For an offline build or a blob under test.
     #[arg(long)]
     pub(crate) blobs_dir: Option<PathBuf>,
     /// Debian archive keyring every root this build provisions is verified
@@ -726,6 +735,9 @@ pub(crate) enum ShellStageArg {
     Kernel,
     /// The cross root u-boot compiles in.
     Uboot,
+    /// The cross root Trusted Firmware-A compiles in, for a build point whose BL31
+    /// provider is `tfa`.
+    Tfa,
     /// The cross root an out-of-tree module compiles in.
     Kmod,
     /// The target-arch root the MPP/RGA/Mali packages compile in.
@@ -742,6 +754,7 @@ impl From<ShellStageArg> for boot2deb_engine::shell::ShellStage {
         match stage {
             ShellStageArg::Kernel => Self::Kernel,
             ShellStageArg::Uboot => Self::Uboot,
+            ShellStageArg::Tfa => Self::Tfa,
             ShellStageArg::Kmod => Self::Kmod,
             ShellStageArg::Userspace => Self::Userspace,
             ShellStageArg::Ffmpeg => Self::Ffmpeg,
@@ -844,8 +857,9 @@ pub(crate) struct CleanArgs {
     /// empties the store outright.
     #[arg(long, conflicts_with = "all_caches")]
     pub(crate) artifacts: bool,
-    /// Prune the auto-fetched source checkouts (`<root>/cache/verify-trees`, and the
-    /// `patches` checkouts beside them) down to what is still pinned. A checkout is
+    /// Prune the auto-fetched source checkouts (`<root>/cache/verify-trees`, the
+    /// `patches` checkouts beside them, and the fetched rkbin blobs in
+    /// `<root>/cache/rkbin`) down to what is still pinned. A checkout is
     /// commit-addressed, so one whose commit no `recipes/*/*.lock` names can only be
     /// re-fetched, never reconstructed from, and is dead. Root-scoped. Pinned
     /// checkouts stay, and `--all-caches` is what takes those too. Pass the same
@@ -969,6 +983,12 @@ pub(crate) struct PressArgs {
     /// faster, and only the re-read is saved.
     #[arg(long)]
     pub(crate) no_verify: bool,
+    /// Replace output files that already exist. Without it a press refuses, before
+    /// writing anything, when any file it would produce (the image, its file manifest,
+    /// its credentials file) is already there. A replaced file is swapped in whole once
+    /// its replacement is verified, never written into.
+    #[arg(long)]
+    pub(crate) overwrite: bool,
     /// Print what would be pressed — artifacts, outputs, additions, seed keys —
     /// without writing anything.
     #[arg(long)]
@@ -1103,6 +1123,12 @@ pub(crate) struct UpdateArgs {
     /// deliberate hand-pin only this flag can have created.
     #[arg(long)]
     pub(crate) uboot_ref: Option<String>,
+    /// Trusted Firmware-A ref to pin, for a recipe whose BL31 provider is `tfa`.
+    /// Defaults to the SoC's `[tfa].ref`, re-read on every update. A feature-release
+    /// tag does not move, so the pin moves only when the constraint or this flag does.
+    /// A lock pinned to a bare commit sha is kept instead.
+    #[arg(long)]
+    pub(crate) tfa_ref: Option<String>,
     /// Media-accel userspace ref to pin, as `NAME=REF`, repeatable. Defaults to that
     /// tree's own `[[userspace]]` ref, re-read on every update. A lock pinned to a bare
     /// commit sha is kept instead. The SoC declares which trees it has, so each override
@@ -1124,9 +1150,6 @@ pub(crate) struct UpdateArgs {
     /// auto-fetches the already-pinned commit and needs no checkout.
     #[arg(long)]
     pub(crate) patches_path: Option<PathBuf>,
-    /// Vendored rkbin blob directory (default: blobs/SOC under the config root).
-    #[arg(long)]
-    pub(crate) blobs_dir: Option<PathBuf>,
     /// Name recorded for the solved package manifest the rootfs stage writes
     /// (default: RECIPE.pkgs.lock).
     #[arg(long)]
@@ -1330,6 +1353,11 @@ pub(crate) struct OverrideArgs {
     /// `default_uboot_series`. Must be one of the device's `supported_uboot_series`.
     #[arg(long = "uboot-series")]
     pub(crate) uboot_series: Option<String>,
+    /// Where the BL31 inside `u-boot.itb` comes from: `rkbin` (Rockchip's prebuilt
+    /// blob) or `tfa` (Trusted Firmware-A built from source). Default: the
+    /// recipe/device `default_bl31`. Must be one of the device's `supported_bl31`.
+    #[arg(long, value_parser = parse_bl31)]
+    pub(crate) bl31: Option<Bl31Provider>,
     /// Debian suite the image is built for (e.g. `forky`, `trixie`). Default: the
     /// recipe/device `default_suite`. Re-pinning it for a build is `update`'s job —
     /// here it resolves a different build point.
@@ -1340,6 +1368,12 @@ pub(crate) struct OverrideArgs {
     /// Default: the recipe/device `default_layout`.
     #[arg(long, value_parser = parse_layout)]
     pub(crate) layout: Option<Layout>,
+    /// What finds the kernel on the image and starts it: `extlinux` (u-boot reads
+    /// `/boot/extlinux/extlinux.conf`) or `efi` (the firmware starts GRUB from an EFI
+    /// system partition). Default: the recipe's `loader`, else the boot method's
+    /// `default_loader`. Must be one of the boot method's `loaders`.
+    #[arg(long, value_parser = parse_loader)]
+    pub(crate) loader: Option<Loader>,
     /// How the board boots: `rockchip-rkbin` (u-boot compiled into a raw gap) or
     /// `depthcharge` (a signed ChromeOS kernel partition). Default: the device's own.
     /// Must be one of the device's `supported_boot_methods`.
@@ -1374,10 +1408,10 @@ pub(crate) struct OverrideArgs {
     #[arg(long)]
     pub(crate) timezone: Option<String>,
     /// NTP server the image prefers, repeatable (`--ntp-server ntp.lan`). Default: the
-    /// recipe/base `ntp_servers`. When any is given, replaces that list. Debian's
-    /// fallback pool is kept either way, so this sets a preference rather than the only
-    /// source. It is worth setting for a board that boots on a network the public pool
-    /// cannot be reached from.
+    /// recipe/base `ntp_servers`. When any is given, replaces that list. The
+    /// distribution's own servers are kept either way, so this sets a preference rather
+    /// than the only source. It is worth setting for a board that boots on a network the
+    /// public servers cannot be reached from.
     #[arg(long = "ntp-server")]
     pub(crate) ntp_servers: Vec<String>,
     /// Console keyboard layout (e.g. `gb`). Default: the recipe/device `keymap`, and
@@ -1406,11 +1440,13 @@ impl From<OverrideArgs> for Overrides {
             deliverable: Default::default(),
             kernel: a.kernel,
             uboot_series: a.uboot_series,
+            bl31: a.bl31,
             suite: a.suite,
             // Recipe-only: the generator decides what the image's own kernel upgrades
             // run, which is a property of the build point rather than of one invocation.
             initramfs_generator: None,
             layout: a.layout,
+            loader: a.loader,
             boot_method: a.boot_method,
             board: a.board,
             features: (!a.features.is_empty()).then_some(a.features),
@@ -1439,7 +1475,13 @@ impl From<OverrideArgs> for Overrides {
 fn parse_layout(s: &str) -> Result<Layout, String> {
     s.parse()
 }
+fn parse_loader(s: &str) -> Result<Loader, String> {
+    s.parse()
+}
 fn parse_boot_method(s: &str) -> Result<BootMethod, String> {
+    s.parse()
+}
+fn parse_bl31(s: &str) -> Result<Bl31Provider, String> {
     s.parse()
 }
 fn parse_sudo_policy(s: &str) -> Result<SudoPolicy, String> {

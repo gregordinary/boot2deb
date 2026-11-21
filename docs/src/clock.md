@@ -8,14 +8,24 @@ for it.
 This page is about *when* the clock is right. For the timezone it is rendered in, see
 [Locale, timezone, and keyboard](localization.md).
 
+Each distribution has its own time client, and the image runs that one:
+
+| Distribution | Time client | Wait unit |
+|---|---|---|
+| Debian | `systemd-timesyncd` | `systemd-time-wait-sync.service` |
+| Ubuntu | `chrony` | `chrony-wait.service` |
+
 ## What a board with no RTC does at boot
 
 The kernel starts at the epoch. `systemd` then advances the clock to the later of its
-own compiled-in epoch and the mtime of `/var/lib/systemd/timesync/clock`. That is a
-file `systemd-timesyncd` rewrites periodically while it runs. So a board comes up at
-*roughly whenever it was last powered on* — a plausible time, and as stale as the gap
-since then. Seconds later, once the network is up, `timesyncd` reaches an NTP server and
-steps the clock to the real one.
+own compiled-in epoch and the mtime of `/var/lib/systemd/timesync/clock`.
+`systemd-timesyncd` rewrites that file periodically while it runs. On Debian a board
+therefore comes up at *roughly whenever it was last powered on*. That is a plausible
+time, and as stale as the gap since then. On Ubuntu nothing rewrites that file, so a
+board comes up at the date its `systemd` was built.
+
+Seconds later, once the network is up, the time client reaches an NTP server and steps
+the clock to the real one.
 
 The window between those two events is short and entirely real. Run `apt update` inside
 it and you get:
@@ -31,18 +41,20 @@ a date comparison against it. Wait a few seconds and run it again.
 
 ## What the image does about it
 
-Debian already orders its maintenance jobs behind `time-sync.target` — `apt-daily`,
-`apt-daily-upgrade`, `logrotate`, `man-db`, `fstrim`, `e2scrub_all`, `dpkg-db-backup`,
-and `anacron` all declare `After=time-sync.target`. On a stock system that ordering is
-inert, because nothing *reaches* that target unless `systemd-time-wait-sync` is enabled.
-Every boot2deb image enables it, so the ordering means what it says: those jobs do not
-run until the clock is trustworthy.
+Both distributions order their maintenance jobs behind `time-sync.target`. `apt-daily`,
+`apt-daily-upgrade`, `logrotate`, `man-db`, `fstrim`, `e2scrub_all` and `dpkg-db-backup`
+all declare `After=time-sync.target`, and so does Debian's `anacron`. On a stock system
+that ordering is inert. Nothing *reaches* that target unless the time client's wait unit
+is enabled, and neither distribution enables it. Every boot2deb image enables it, so the
+ordering means what it says: those jobs do not run until the clock is trustworthy.
 
 The image also **bounds the wait at 45 seconds**, which matters more than enabling it.
-The stock unit ships `TimeoutStartSec=infinity`, and Debian's `anacron.service` is both
-`After=time-sync.target` and `Before=multi-user.target`. With no reachable time source,
-the unmodified unit leaves `multi-user.target`, `graphical.target`, and `timers.target`
-permanently inactive, and `systemctl is-system-running` stuck at `starting` forever.
+The stock `systemd-time-wait-sync` ships `TimeoutStartSec=infinity`, and Debian's
+`anacron.service` is both `After=time-sync.target` and `Before=multi-user.target`. With
+no reachable time source, the unmodified unit leaves `multi-user.target`,
+`graphical.target`, and `timers.target` permanently inactive, and
+`systemctl is-system-running` stuck at `starting` forever. The stock `chrony-wait` gives
+up after three minutes, and then counts as a failed unit.
 
 Logins still work, which is what makes it a bad failure. `sshd`, `getty`, and a display
 manager are all pulled in by their targets rather than ordered behind them. The board
@@ -52,33 +64,48 @@ With the bound, a board that cannot find a time source gives up and finishes boo
 Measured on the H96 MAX M9: 13.7 s to `graphical.target` with NTP reachable, 50.9 s with
 it unreachable, and no failed units either way.
 
-The drop-in that does this ships in the base overlay at
-`base/overlay/etc/systemd/system/systemd-time-wait-sync.service.d/bounded.conf`.
+The build writes the bound as a drop-in, `/etc/systemd/system/<unit>.d/bounded.conf`,
+that replaces the unit's command:
+
+| Wait unit | Bounded command |
+|---|---|
+| `systemd-time-wait-sync.service` | `timeout 45 /usr/lib/systemd/systemd-time-wait-sync` |
+| `chrony-wait.service` | `chronyc -h 127.0.0.1,::1 waitsync 45 0.1 0.0 1` |
 
 ## Choosing a time server
 
 | field | layer | default | what it sets |
 |---|---|---|---|
-| `ntp_servers` | `base.toml` | empty | `NTP=` in `/etc/systemd/timesyncd.conf.d/10-boot2deb.conf` |
+| `ntp_servers` | `base.toml` | empty | `systemd-timesyncd`: `NTP=` in `/etc/systemd/timesyncd.conf.d/10-boot2deb.conf`. `chrony`: one `server` line each in `/etc/chrony/sources.d/boot2deb.sources` |
 
-Empty is the default and writes no configuration at all. Debian compiles its own pool
-into `systemd` as `FallbackNTP`. That is correct on any network with a route out, and
-assumes nothing about where a board is plugged in. `timedatectl show-timesync` on a
-stock image shows exactly that:
+Empty is the default and writes no configuration at all. Each distribution ships
+servers of its own. They are correct on any network with a route out, and assume nothing
+about where a board is plugged in. Debian compiles its pool into `systemd` as
+`FallbackNTP`, and `timedatectl show-timesync` on a stock Debian image shows exactly that:
 
 ```
 FallbackNTPServers: 0.debian.pool.ntp.org 1.debian.pool.ntp.org ...
 ServerName:         2.debian.pool.ntp.org
 ```
 
-Naming servers sets `NTP=`, which `timesyncd` prefers, and **leaves the fallback pool
-alone**. A configured server is therefore a preference rather than a commitment: an
-image built for one network still finds the time on another. That is deliberate, and it
-is why this never writes `FallbackNTP=`.
+Ubuntu's chrony asks Ubuntu's NTS pools, from
+`/etc/chrony/sources.d/ubuntu-ntp-pools.sources`. `chronyc sources` lists them.
+
+Naming servers **leaves the distribution's servers alone**. A configured server is
+therefore a preference rather than a commitment: an image built for one network still
+finds the time on another. That is deliberate, and it is how each client is written:
+
+- **`systemd-timesyncd`.** Naming servers sets `NTP=`, which `timesyncd` prefers, and
+  never writes `FallbackNTP=`.
+- **`chrony`.** Each server becomes `server <host> iburst prefer require trust`, beside
+  Ubuntu's pools. Those pools authenticate with NTS. In chrony's default
+  `authselectmode mix`, an unauthenticated server is then usable only while an
+  authenticated one is reachable and agrees with it. `require trust` lets a server named
+  here set the clock on its own, on a network that cannot reach Ubuntu's pools.
 
 Two reasons to set it:
 
-- **An isolated network**, where the public pool cannot be reached at all. Without a
+- **An isolated network**, where the public servers cannot be reached at all. Without a
   server it can reach, a board never syncs — it boots, waits its 45 seconds, and continues
   with a stale clock.
 - **A LAN time source on any network.** It answers in about a millisecond instead of an
@@ -92,7 +119,7 @@ ntp_servers = ["ntp.lan", "192.168.1.1"]
 
 or in a recipe, for one build point only. A recipe's list *replaces* the base list
 rather than adding to it. `ntp_servers = []` in a recipe is therefore how one point
-opts back out to the Debian pool.
+opts back out to the distribution's own servers.
 
 `resolve` and `doctor` take `--ntp-server` (repeatable) so you can see what a choice
 resolves to before writing it down:
@@ -106,9 +133,9 @@ timezone     : UTC
 ntp servers  : ntp.lan
 ```
 
-An unconfigured image prints `(Debian fallback pool)` there rather than an empty line.
-"No servers configured" and "no time source" are different things, and only the first
-is true.
+An unconfigured image prints `(distribution default, through systemd-timesyncd)` there,
+naming its time client, rather than an empty line. "No servers configured" and "no time
+source" are different things, and only the first is true.
 
 Like the localization flags, `build` takes none of these. An image's time config comes
 from the config its lock was resolved against, not from a flag at build time.
@@ -116,14 +143,15 @@ from the config its lock was resolved against, not from a flag at build time.
 ## What resolution checks
 
 Each entry must be a **bare host** — a hostname or an IP address, with no scheme, no
-port, and no whitespace. `timesyncd` parses `NTP=` by splitting on spaces, so an entry
-with a space in it silently becomes two servers. One with a scheme or a port becomes a
-server the resolver can never answer. All of these are rejected at resolve time rather
-than at boot:
+port, and no whitespace. Both clients split their configuration on whitespace:
+`timesyncd` reads `NTP=` as a space-separated list, and chrony reads a `server` line as
+fields. An entry with a space in it therefore silently becomes two servers, or a server
+with a stray option. One with a scheme or a port becomes a server the resolver can never
+answer. All of these are rejected at resolve time rather than at boot:
 
 ```
 ntp://ntp.example.org      a scheme
-ntp.example.org:123        a port (timesyncd always uses 123)
+ntp.example.org:123        a port (the time client always uses 123)
 [fd00::1]                  the bracketed form is for URLs
 ntp.a ntp.b                whitespace: two servers in one entry
 ```
@@ -132,7 +160,7 @@ IPv6 goes in unbracketed: `fd00::1`.
 
 ## Changing it on a running image
 
-The ordinary systemd path, no rebuild needed:
+No rebuild is needed. On a Debian image:
 
 ```sh
 sudo timedatectl show-timesync        # what it is asking now
@@ -140,15 +168,21 @@ sudoedit /etc/systemd/timesyncd.conf.d/10-boot2deb.conf
 sudo systemctl restart systemd-timesyncd
 ```
 
-To force a resync immediately:
+On an Ubuntu image:
 
 ```sh
-sudo systemctl restart systemd-timesyncd
-timedatectl                            # "System clock synchronized: yes"
+chronyc sources                       # what it is asking now
+sudoedit /etc/chrony/sources.d/boot2deb.sources
+sudo chronyc reload sources
 ```
 
+To force a resync immediately, restart the client: `sudo systemctl restart
+systemd-timesyncd` or `sudo systemctl restart chrony`. Then `timedatectl` reports
+"System clock synchronized: yes" once it succeeds.
+
 To set the clock by hand on a board that has no time source at all, turn NTP off
-first. `timesyncd` will otherwise overwrite you the moment it succeeds:
+first. The time client will otherwise overwrite you the moment it succeeds. Both clients
+register with `timedatectl`, so this is the same on either distribution:
 
 ```sh
 sudo timedatectl set-ntp false
@@ -159,20 +193,32 @@ That does not persist across a power cycle. Nothing does, without an RTC.
 
 ## Notes for the curious
 
-- **A drop-in, not an edit.** `/etc/systemd/timesyncd.conf` is a `systemd` conffile.
-  Rewriting it would make every future `systemd` upgrade prompt about a modified
-  conffile on a running board, so the config goes in `timesyncd.conf.d/` instead.
-- **`-` before `ExecStart`.** The bounded wait runs `timeout 45 …` with a leading `-`,
-  which tells `systemd` to ignore the exit status. Without it, a timed-out oneshot
-  counts as a failed unit and `systemctl is-system-running` reports `degraded` on every
-  offline boot. The boot is released either way — ordering is satisfied when a job
-  *finishes*, not when it succeeds, and `time-sync.target` only `Wants` the service.
+- **A file beside the distribution's, not an edit.** `/etc/systemd/timesyncd.conf` is a
+  `systemd` conffile. Rewriting it would make every future `systemd` upgrade prompt
+  about a modified conffile on a running board, so the config goes in
+  `timesyncd.conf.d/` instead. The chrony client reads every file in `sources.d/`, so
+  boot2deb's sits beside Ubuntu's.
+- **`-` before `ExecStart`.** The bounded command has a leading `-`, which tells
+  `systemd` to ignore its exit status. Without it, a wait that runs out counts as a
+  failed unit and `systemctl is-system-running` reports `degraded` on every offline
+  boot. The boot is released either way — ordering is satisfied when a job *finishes*,
+  not when it succeeds, and `time-sync.target` only `Wants` the service.
+- **The chrony wait bounds itself.** `chronyc waitsync` takes a try count, so its bound
+  is 45 tries one second apart rather than `timeout(1)`. The stock `chrony-wait` runs
+  `chronyc` under a system-call filter written for it, and the bounded command is the
+  same program with a different count.
+- **NTS on a stale clock.** NTS checks the server's TLS certificate against the clock,
+  which on a board with no RTC is wrong. Ubuntu's pools include
+  `ntp-bootstrap.ubuntu.com`, whose certificate authority is valid for decades either
+  side of today. Its certificate checks out however far off the clock starts.
 - **DHCP does not help here.** Option 42 is the standard way for a network to
-  advertise a time server. `NetworkManager` manages the interface on these images and
-  has no path to feed it to `timesyncd`, and most home routers do not advertise it
-  anyway. Hence a config key rather than "let the network say".
+  advertise a time server. On the Debian images that run `NetworkManager`, it has no
+  path to feed one to `timesyncd`. The chrony client reads advertised servers only
+  through NetworkManager's and `dhclient`'s hooks, while the Ubuntu image configures its
+  network through `systemd-networkd`. Most home routers do not advertise one anyway.
+  Hence a config key rather than "let the network say".
 - **Enabled after the packages, not before.** The `.wants` symlink is written by the
-  build's customize step rather than staged in the base overlay, because the unit ships
-  inside the `systemd` package. A symlink laid down before that package installs is one
+  build's customize step rather than staged in an overlay, because the unit ships inside
+  the time client's package. A symlink laid down before that package installs is one
   `deb-systemd-helper` can still have an opinion about when it applies the unit's
   preset.

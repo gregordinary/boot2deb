@@ -2,18 +2,31 @@
 
 The [Turing RK1](https://turingpi.com/product/turing-rk1/) is an RK3588 compute
 module that seats in a Turing Pi 2 cluster board. boot2deb ships it as a small family
-of recipes over one hardware base. That base is kernel `v7.3` (linux-stable), u-boot
+of recipes over one hardware base. That base is kernel `v7.3.3` (linux-stable), u-boot
 `v2026.10`, and the RGA / VEPU / VDPU (and NPU) drivers included in-kernel via the
 `rk3588-accel` patch series. It is a supported configuration in its own right, and a good
 starting point for any RK3588 board.
 
-The variants differ along two independent axes, the Debian suite and whether the
-Rockchip media **userspace** is built in:
+Every shipped recipe packs Rockchip's prebuilt BL31 from rkbin. The board also lists
+Trusted Firmware-A as a BL31 provider, so `bl31 = "tfa"` in a recipe builds the same
+bootloader around an upstream BL31 instead. The DDR init stays rkbin's either way. See
+[The BL31 is its own axis](../reference/config-model.md#the-bl31-is-its-own-axis).
+
+u-boot applies one SoC fix ahead of the board's own patches: SPL sets SPLL on every
+boot device. SPLL clocks the RK3588's center interconnect, the fabric between the bus
+masters and the DDR controllers, and only SPL can program it. Upstream v2026.10 sets it
+only on a boot from microSD. The RK1 boots from eMMC, so there the fabric would stay at
+the BootROM's rate while Linux reports 702 MHz. With the fix the NPU reads DDR in half
+the time. The fix is upstream from v2027.01.
+
+The variants differ along two independent axes, the suite and whether the Rockchip
+media **userspace** is built in:
 
 | Recipe | Suite | Media userspace |
 | --- | --- | --- |
-| `turing-rk1/forky` | forky | — (base) |
-| `turing-rk1/trixie` | trixie | — (base) |
+| `turing-rk1/forky` | forky | none (base) |
+| `turing-rk1/trixie` | trixie | none (base) |
+| `turing-rk1/resolute` | resolute (Ubuntu 26.04) | none (base) |
 | `turing-rk1/media-accel-forky` | forky | ffmpeg-rk + MPP + RGA + Vulkan |
 | `turing-rk1/media-accel-trixie` | trixie | ffmpeg-rk + MPP + RGA + Vulkan |
 | `turing-rk1/jellyfin-forky` | forky | ffmpeg-rk + MPP + RGA, plus Jellyfin |
@@ -32,6 +45,13 @@ there but dark. A **media-accel** image adds the `media-accel-rockchip` feature,
 builds and installs `ffmpeg-rk`, `librockchip-mpp1`, and `librga2` on top. The split is
 deliberate: because the kernel already has the capability, those debs can equally be
 installed onto a running base image later. `forky` is the RK1's validated suite.
+
+`turing-rk1/resolute` is the base image on Ubuntu 26.04 LTS, with
+`turing-rk1/forky`'s kernel, u-boot and accel drivers. Its userland is a minimal
+Ubuntu server. Netplan brings up the wired port through systemd-networkd, chrony keeps
+the time, `sudo` is sudo-rs, and dracut builds the initrd. It has no snapd and no
+cloud-init. It has no media-accel variant, since the Rockchip userspace debs are built
+against Debian.
 
 ### Two RGA drivers exist; this image builds the out-of-tree one
 
@@ -256,10 +276,11 @@ then from an ssh session:
 sudo boot2deb-install-to /dev/nvme0n1
 ```
 
-`boot2deb-install-to` ships in every image. It refuses anything that is not a
-whole disk, and refuses the disk the system is running from. It refuses a disk with
-anything mounted on it, and requires you to type the device's name. It then writes
-the embedded artifact and syncs.
+`boot2deb-install-to` ships in every image. It checks the embedded image against the
+record pressed beside it. It refuses anything that is not a whole disk, and the disk the
+system is running from. It refuses a disk with anything mounted on it, and one too small
+for the image. It requires you to type the device's name, then writes the embedded artifact. It
+reads the disk back against the image's digest before it reports the install done.
 
 Power off, and the node boots from the NVMe. The rootfs grows to fill it on that first
 boot. Re-running it is safe and still writes, so an interrupted write is repaired by
@@ -392,12 +413,12 @@ Power the node on. On first boot the image does two things:
 - **Grows the rootfs** to fill the whole medium, so the 2 GB image expands to the
   disk's capacity. That happens online, in the same boot, with no reboot involved.
 
-Log in as user **`debian`** with the password the build printed. It is expired, so you
-are required to set a new one immediately. `sudo` asks for that password, and the
+Log in as user **`debian`** (**`ubuntu`** on `turing-rk1/resolute`) with the password
+the build printed. It is expired, so you are required to set a new one immediately. `sudo` asks for that password, and the
 hostname is `turing-rk1`.
 
-That is a booted Debian system. The kernel's transcode devices come up on **every**
-variant, so check for `/dev/dri` and `/dev/rga`. A **media-accel** image also installs
+That is a booted Debian or Ubuntu system. The kernel's transcode devices come up on
+**every** variant, so check for `/dev/dri` and `/dev/rga`. A **media-accel** image also installs
 the `ffmpeg-rk` userspace, so you can exercise the `rkmpp` / `rkrga` paths directly. On
 a base image the blocks are present but idle until you install the media-accel debs, or
 build a `turing-rk1/media-accel-*` image.

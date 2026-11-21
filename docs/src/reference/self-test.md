@@ -45,13 +45,14 @@ entry (see [Running it every boot](#running-it-every-boot)).
 
 The checks are not written on the device and the runner parses no TOML. Each
 config layer can declare an `[[expect]]` array: the SoC, the boot method, the
-device, the kernel definition, a feature, a kmod. The build flattens each
-layer's entries into its own file under `/etc/boot2deb/selftest.d/`:
+loader, the device, the kernel definition, a feature, a kmod. The build flattens
+each layer's entries into its own file under `/etc/boot2deb/selftest.d/`:
 
 ```
 identity.checks                 derived from the build itself (see below)
 soc-rk3588.checks               socs/rk3588.toml [[expect]]
 boot-method-rockchip-rkbin.checks
+loader-extlinux.checks
 device-turing-rk1.checks
 kernel-rk3588-mainline-7.3.checks
 feature-media-accel-rockchip.checks
@@ -66,8 +67,9 @@ change another's file.
 
 `identity.checks` is generated, never authored. It restates what the lock and
 the resolved device already define: the pinned kernel version, the `uname -r`
-flavor suffix, the board's DTB. A layer restating any of those could drift from
-the pin. It also contains `single-kernel`, which restates nothing and belongs to
+flavor suffix, the board's DTB. Under the `efi` loader the DTB is checked where the
+firmware reads it, on the EFI system partition, beside the loader at the
+removable-media path. A layer restating any of those could drift from the pin. It also contains `single-kernel`, which restates nothing and belongs to
 no layer. That is a claim about how every boot2deb image is built, and only the
 build is in a position to make it.
 
@@ -88,6 +90,7 @@ any.
 | Kind | Passes when | Example |
 | --- | --- | --- |
 | `file` | the absolute path (globs allowed) matches something | `file /boot/initrd.img-*` |
+| `esp-file` | the path (globs allowed) exists on the EFI system partition, mounted at `/boot/efi` | `esp-file /EFI/BOOT/BOOTAA64.EFI` |
 | `dtb` | the blob is installed in any layout the shipped kernels use | `dtb rockchip/rk3588-turing-rk1.dtb` |
 | `firmware` | the path exists under `/lib/firmware` (compressed spellings included) | `firmware arm/mali/arch10.8/mali_csffw.bin` |
 | `initramfs-module` | the module is built into the installed kernel **or** present in its initramfs (generated only, one per `[initramfs] modules` name) | `initramfs-module dw_mmc-rockchip` |
@@ -98,6 +101,7 @@ any.
 | `kernel-release` | `uname -r` starts with the release the pinned ref names, normalized as the kernel spells it (`v7.3` names `7.3.0`) (generated only) | `kernel-release 7.3.0` |
 | `kernel-flavor` | `uname -r` ends in the flavor and is not its `-rt-` variant (generated only) | `kernel-flavor arm64` |
 | `single-kernel` | `/boot` holds exactly one kernel and its module tree is that kernel's (generated only, and takes no argument) | `single-kernel` |
+| `unique-partuuid` | every PARTUUID the running system mounts by names one attached partition (generated only, and takes no argument) | `unique-partuuid` |
 
 A check kind the runner does not know is reported `skipped`, never failed. An
 image built by an older boot2deb than the config tree that later grew a new
@@ -110,7 +114,7 @@ exactly like a check that passes.
 that catches an accidentally-RT kernel, which boots fine and quietly changes
 scheduling behavior.
 
-`single-kernel` is the one check with no argument, because there is nothing to
+`single-kernel` takes no argument, because there is nothing to
 parameterize. An image installs one solved package plan with one `linux-image`
 in it and never dist-upgrades mid-build. A second version on `/boot` therefore
 means a feature or a `--deb` addition pulled one in.
@@ -124,8 +128,30 @@ It is an **as-built** invariant, and that is worth knowing before you meet it on
 a long-lived board. A system that has since installed a second kernel genuinely
 differs from the image it was flashed from, and the check says so. That happens
 on a `distro-package` build that took an `apt` kernel upgrade, which keeps the
-old one on purpose. That is the report doing its job rather than a false alarm.
-Where you want two kernels on purpose, delete the line from `identity.checks`.
+old one on purpose. It also happens on a board given a compiled kernel at a new
+[revision](reproducibility.md#the-kernels-revision-and-configuration), which is a new
+release and installs beside the old one. That is the report doing its job rather
+than a false alarm. Where you want two kernels on purpose, delete the line from
+`identity.checks`.
+
+`unique-partuuid` takes no argument either. Every disk written from one image has
+the same root PARTUUID, and the same EFI system partition PARTUUID where there is
+one. With two such disks attached, a boot mounts whichever it finds first, which
+can be the other disk's system. The check reads the PARTUUIDs the kernel command
+line and `/etc/fstab` mount by. It fails for each one that more than one attached
+partition has, and names the partitions and the one mounted from:
+
+```
+  FAILED  unique-partuuid   PARTUUID 2222bbbb-02 is on 2 partitions: /dev/mmcblk0p2 /dev/sda2, mounted from /dev/mmcblk0p2  (detach one, or press it with --fresh-identity)
+```
+
+Every image also runs the same test on every boot, as
+`boot2deb-partuuid-check.service`. It writes the same line to the kernel log as a
+warning and fails, which leaves the system degraded. It never stops the boot, since
+the system that got that far works. A disk attached after boot is the selftest's to
+find. [Press](../press.md) a second medium with `--fresh-identity` to give it
+identifiers of its own. Against a root read from outside (`--root`) the check is
+not applicable, because the disks it would read are the host's.
 
 ## Authoring an expectation
 
@@ -157,9 +183,11 @@ Two placements deserve calling out:
 - **Firmware for a blob-loading driver goes on the kernel definitions that can
   load it**, not the SoC. A `libre` kernel drops non-free firmware by design,
   so a SoC-wide blob check would fail a correctly built libre image.
-- **Boot artifacts go on the boot method.** `/boot/extlinux/extlinux.conf`
-  exists on a `rockchip-rkbin` board and never on a depthcharge one, whose
-  kernel lives in a signed GPT partition no file check can see.
+- **Boot artifacts go on the boot method and the loader.** The kernel and initrd
+  on `/boot` are the boot method's. `/boot/extlinux/extlinux.conf` is the
+  `extlinux` loader's, and `/boot/grub/grub.cfg` the `efi` loader's. Neither
+  exists on a depthcharge board, whose kernel lives in a signed GPT partition no
+  file check can see.
 
 An unknown kind, a missing argument, or an argument that belongs to a different
 kind fails at config load, naming the field. A typo is caught by `resolve` (or
@@ -228,6 +256,8 @@ boot2deb-selftest --root /mnt/image --mode userland
 
 In userland mode the kernel checks read `/boot` instead of `uname -r`. The
 running kernel is whatever machine or emulator this is. The question becomes
-"does the image contain the kernel it pins", which is still answerable.
+"does the image contain the kernel it pins", which is still answerable. The
+`esp-file` checks report `n/a` too: the EFI system partition is a partition of its
+own, which a mounted rootfs does not contain.
 This is exactly how `boot2deb try` runs the selftest inside a QEMU-booted
 guest, where the running kernel is a fixture and the board hardware is absent.

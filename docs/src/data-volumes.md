@@ -92,6 +92,9 @@ own.
 
 The disk holding root is never a candidate whatever `match` says. If a board's
 transport is genuinely ambiguous, name the disk: `match = { device = "/dev/sda" }`.
+A named device must be a writable whole disk. A partition, a device-mapper node or a
+read-only disk is refused, and a `/dev/disk/by-id/` link counts as the disk it points
+at.
 
 `boot2deb resolve` prints what it resolved, so you can see what first boot will
 look at before you flash:
@@ -106,13 +109,25 @@ Per volume, it stops at the first step that applies:
 
 1. **Adopt** — a filesystem already has the label. Mount it. **Never format.**
    This is the path every boot of a reflashed board takes.
-2. **Create** — the matched disk is genuinely blank *and* `create = "if-blank"`.
+2. **Create** — the matched disk is proven blank *and* `create = "if-blank"`.
    Write a GPT with one partition, `mkfs` with the label, mount.
 3. **Refuse** — anything else. Log what was found and leave the disk alone.
 
-"Genuinely blank" is three independent checks: no partition table, no filesystem
-signature, and no partitions the kernel already sees. The disk holding root is
-never a candidate whatever `match` says.
+"Proven blank" means every one of these was established before the first write:
+
+- The match is one writable whole disk, identified by its device number.
+- The disk is not under root. The hook follows root's chain of devices down
+  through any LUKS, LVM or md layer to the disks, and excludes all of them.
+- The kernel sees no partition, holder or mount on it.
+- Its first and last MiB read back.
+- `wipefs` finds no signature on it: no partition table, no filesystem, no RAID or
+  LUKS header.
+
+A check that cannot run is a refusal, not a pass. A failed probe, a query that
+prints nothing, and a missing tool each leave the disk alone. The absence of an
+answer is not the absence of data. A root whose disk cannot be established stops
+creation too. No volume is created on that boot, but one that already has the
+label is still adopted.
 
 Step 3 is the point of the feature, not a safety net bolted onto it. A volume this
 image did not create is evidence of data someone wants, so it is left alone and the

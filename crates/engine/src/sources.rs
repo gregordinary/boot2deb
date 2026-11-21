@@ -249,8 +249,8 @@ pub fn advertised_refs(url: &str) -> Result<Vec<LsRef>, String> {
     run_ls_remote(url)
 }
 
-/// The files directly under `dir` in the default branch of `url`, and the commit that
-/// branch was listed at.
+/// The files directly under `dir` at the head of `reference` in `url`, and the commit
+/// that head was listed at.
 ///
 /// One bounded, depth-1 fetch that asks for no file contents (`--filter=blob:none`),
 /// then a local `ls-tree`. So the cost is a commit and its trees, whatever the files
@@ -260,11 +260,17 @@ pub fn advertised_refs(url: &str) -> Result<Vec<LsRef>, String> {
 ///
 /// # Errors
 ///
-/// A human skip reason: a network error, or the fetch's 60-second timeout. A URL that
-/// reads as a git option is refused too, and so is a directory the branch does not
-/// have. Never a typed error: a survey reports the reason in the row and continues.
-pub fn tree_listing(url: &str, dir: &str) -> Result<(String, Vec<String>), String> {
+/// A human skip reason: a network error, or the fetch's 60-second timeout. A URL or ref
+/// that reads as a git option is refused too, and so is a directory the branch does
+/// not have. Never a typed error: a survey reports the reason in the row and
+/// continues.
+pub fn tree_listing(
+    url: &str,
+    reference: &str,
+    dir: &str,
+) -> Result<(String, Vec<String>), String> {
     crate::build::reject_optionlike("source", url).map_err(|e| e.to_string())?;
+    crate::build::reject_optionlike("ref", reference).map_err(|e| e.to_string())?;
     let tmp = tempfile::tempdir().map_err(|e| format!("could not create a scratch dir: {e}"))?;
     let repo = tmp.path();
     let first_line = |o: &Output| {
@@ -293,7 +299,7 @@ pub fn tree_listing(url: &str, dir: &str) -> Result<(String, Vec<String>), Strin
             "--end-of-options",
         ])
         .arg(url)
-        .arg("HEAD");
+        .arg(reference);
     match run_bounded(fetch, HISTORY_TIMEOUT) {
         Bounded::Ok(o) if o.status.success() => {}
         Bounded::Ok(o) => return Err(format!("fetch failed: {}", first_line(&o))),
@@ -318,7 +324,7 @@ pub fn tree_listing(url: &str, dir: &str) -> Result<(String, Vec<String>), Strin
         .filter_map(|path| path.strip_prefix(&prefix).map(str::to_owned))
         .collect();
     if names.is_empty() {
-        return Err(format!("the default branch has no files under {dir}/"));
+        return Err(format!("{reference} has no files under {dir}/"));
     }
     Ok((commit, names))
 }
@@ -776,13 +782,14 @@ abc1230000000000000000000000000000000000\trefs/heads/master\n";
         let head = crate::git::rev_parse_head(&repo).unwrap();
 
         let url = format!("file://{}", repo.display());
-        let (commit, names) = tree_listing(&url, "bin/rk35").unwrap();
+        let (commit, names) = tree_listing(&url, "HEAD", "bin/rk35").unwrap();
         assert_eq!(commit, head);
         // Entries of that directory only: a subdirectory is a name, its files are not.
         assert_eq!(names, ["nested", "rk3588_bl31_v1.56.elf"]);
-        assert!(tree_listing(&url, "bin/rk99")
+        assert!(tree_listing(&url, "HEAD", "bin/rk99")
             .unwrap_err()
             .contains("no files under"));
-        assert!(tree_listing("--upload-pack=touch /tmp/x", "bin").is_err());
+        assert!(tree_listing("--upload-pack=touch /tmp/x", "HEAD", "bin").is_err());
+        assert!(tree_listing(&url, "--upload-pack=touch /tmp/x", "bin").is_err());
     }
 }

@@ -17,4 +17,4 @@ image_size = "2G"
 # suite-coupled.
 [support]
 status = "expected"
-date   = "2026-10-19"
+date   = "2026-11-21"

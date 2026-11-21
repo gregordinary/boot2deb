@@ -93,6 +93,54 @@ impl Arch {
             Arch::Riscv64 => "riscv64",
         }
     }
+
+    /// What this ISA fixes about booting it through UEFI with GRUB, for the
+    /// [`Efi`](Loader::Efi) loader.
+    ///
+    /// A specification or GRUB's own platform naming sets every value, and no board
+    /// does. It therefore lives here rather than in a layer.
+    pub fn efi(&self) -> EfiArch {
+        match self {
+            Arch::Arm64 => EfiArch {
+                removable_file: "BOOTAA64.EFI",
+                grub_platform: "arm64-efi",
+                grub_file: "grubaa64.efi",
+                grub_package: "grub-efi-arm64",
+            },
+            Arch::Armv7 => EfiArch {
+                removable_file: "BOOTARM.EFI",
+                grub_platform: "arm-efi",
+                grub_file: "grubarm.efi",
+                grub_package: "grub-efi-arm",
+            },
+            Arch::Riscv64 => EfiArch {
+                removable_file: "BOOTRISCV64.EFI",
+                grub_platform: "riscv64-efi",
+                grub_file: "grubriscv64.efi",
+                grub_package: "grub-efi-riscv64",
+            },
+        }
+    }
+}
+
+/// What an ISA fixes about booting it through UEFI with GRUB ([`Arch::efi`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct EfiArch {
+    /// The file the UEFI specification names for this ISA under `\EFI\BOOT\` on
+    /// removable media (`BOOTAA64.EFI`). Firmware with no boot entry of its own loads
+    /// it. Every firmware these images boot under is one, since none keeps a variable a
+    /// running Linux wrote.
+    pub removable_file: &'static str,
+    /// GRUB's platform name (`arm64-efi`): its module directory under
+    /// `/usr/lib/grub/`, the directory `grub-install` copies those modules to under
+    /// `/boot/grub/`, and the format `grub-mkimage` writes.
+    pub grub_platform: &'static str,
+    /// The name `grub-install` gives the loader under `\EFI\<distributor>\`
+    /// (`grubaa64.efi`).
+    pub grub_file: &'static str,
+    /// The package that installs GRUB for this platform, with the maintainer scripts
+    /// that reinstall the loader when GRUB is upgraded on the board (`grub-efi-arm64`).
+    pub grub_package: &'static str,
 }
 
 /// System-on-chip. Selects the shared SoC layer (`socs/<soc>.toml`) that in turn
@@ -121,7 +169,8 @@ pub enum Soc {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum BootMethod {
-    /// Rockchip idbloader + `u-boot.itb` in the raw gap, with rkbin ATF/TPL.
+    /// Rockchip idbloader + `u-boot.itb` in the raw gap, with an rkbin DDR TPL and
+    /// the selected [`Bl31Provider`]'s BL31.
     RockchipRkbin,
     /// ChromeOS depthcharge: a vboot-signed kernel FIT in a ChromeOS kernel
     /// partition, selected by GPT attribute bits. The firmware is the board's own
@@ -138,6 +187,28 @@ pub enum Layout {
     /// Two artifacts: a bootloader-only image plus a bootloader-agnostic rootfs
     /// image for a separate disk.
     Split,
+}
+
+/// What finds the kernel on the image and starts it, on a boot method whose firmware
+/// leaves that to the image.
+///
+/// A boot method lists the loaders it supports
+/// ([`RockchipRkbinLayer::loaders`]), and a recipe or `--loader` selects one. Each
+/// loader is a config layer of its own (`loaders/<loader>.toml`, [`LoaderLayer`]). Its
+/// overlay installs the kernel hooks that keep the loader's configuration current
+/// when a kernel is installed on the running board.
+///
+/// `depthcharge` has no loader: its firmware loads the signed kernel itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Loader {
+    /// u-boot's distro boot reads `/boot/extlinux/extlinux.conf` off the rootfs and
+    /// starts the kernel it names, with the board DTB beside it on `/boot`.
+    Extlinux,
+    /// UEFI. The firmware starts GRUB from an EFI system partition, at the
+    /// removable-media path, and GRUB reads `/boot/grub/grub.cfg` off the rootfs. The
+    /// firmware supplies the device tree, read from the same partition.
+    Efi,
 }
 
 /// What `sudo` asks of the image's default account.
@@ -221,6 +292,26 @@ pub enum KernelFlavor {
     DistroPackage,
 }
 
+/// Where the BL31 a `rockchip-rkbin` u-boot packs into `u-boot.itb` comes from.
+///
+/// BL31 is the EL3 runtime firmware: it brings up the secondary cores, implements PSCI, and
+/// serves the SCMI clocks Linux asks for. The DDR init TPL is a separate binary and
+/// stays an rkbin blob under either provider, since neither SoC has an open DRAM init.
+///
+/// The provider is a build-point axis. The SoC layer states which providers exist for
+/// the part, a device states which ones it supports
+/// ([`supported_bl31`](DeviceLayer::supported_bl31)), and a recipe or `--bl31` selects
+/// one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Bl31Provider {
+    /// Rockchip's prebuilt BL31, fetched from the rkbin repository at a pinned commit
+    /// and verified by sha256 ([`RkbinLayer::atf`]).
+    Rkbin,
+    /// Trusted Firmware-A built from source at a pinned commit ([`TfaSource`]).
+    Tfa,
+}
+
 /// Implements `as_str` / [`Display`](fmt::Display) / [`FromStr`] for a config
 /// enum, keeping the wire string, the file stem, and error/parsing text in a
 /// single source of truth alongside the serde `rename_all`.
@@ -258,9 +349,11 @@ kebab_enum!(Arch { Arm64 => "arm64", Armv7 => "armv7", Riscv64 => "riscv64" });
 kebab_enum!(Soc { Rk3588 => "rk3588", Rk3576 => "rk3576", Rk3566 => "rk3566", Rk3288 => "rk3288" });
 kebab_enum!(BootMethod { RockchipRkbin => "rockchip-rkbin", Depthcharge => "depthcharge" });
 kebab_enum!(Layout { Combined => "combined", Split => "split" });
+kebab_enum!(Loader { Extlinux => "extlinux", Efi => "efi" });
 kebab_enum!(SudoPolicy { Nopasswd => "nopasswd", Password => "password" });
 kebab_enum!(KernelFlavor {
     Mainline => "mainline", Vendor => "vendor", DistroPackage => "distro-package" });
+kebab_enum!(Bl31Provider { Rkbin => "rkbin", Tfa => "tfa" });
 
 // ---------------------------------------------------------------------------
 // Hardware layers
@@ -598,16 +691,20 @@ pub struct SocLayer {
     pub arch: Arch,
     /// Device-tree subdirectory under `arch/<arch>/boot/dts/` (e.g. `rockchip`).
     pub dt_dir: String,
-    /// rkbin blob defaults shared by boards on this SoC: the SoC-generic ATF and a
+    /// rkbin blob defaults shared by boards on this SoC: the SoC-generic BL31 and a
     /// common-memory DDR TPL, plus BL32 where the boot chain needs OP-TEE. A device
     /// inherits these and overrides per field (typically just the TPL for different
-    /// DRAM). Resolution requires the merged `atf` and `tpl` to be present.
+    /// DRAM). Resolution requires the merged `tpl`, and the merged `atf` when the
+    /// selected [`Bl31Provider`] is `rkbin`.
     #[serde(default)]
     pub rkbin: RkbinLayer,
-    /// Accel/media modules force-loaded at boot via `/etc/modules-load.d/`, so
-    /// they are present on first boot even where device-tree auto-probe would
-    /// otherwise be enough.
-    pub modules: Vec<String>,
+    /// The Trusted Firmware-A source for this SoC (`[tfa]`), which makes the `tfa`
+    /// [`Bl31Provider`] available to boards on it. Absent on a SoC upstream TF-A has
+    /// no platform for. It is a SoC fact because TF-A's platform port is per SoC. A
+    /// board states whether it supports it through
+    /// [`supported_bl31`](DeviceLayer::supported_bl31).
+    #[serde(default)]
+    pub tfa: Option<TfaSource>,
     /// The modules every board on this SoC needs in its initramfs. Reaching a root
     /// filesystem is usually the same problem on every board in a family. The boards
     /// share the PMIC, the MMC controller and the USB controllers. A board adds its own
@@ -713,8 +810,8 @@ pub struct SocLayer {
 /// [`ConfigRoot::boot_method`]: crate::loader::ConfigRoot::boot_method
 #[derive(Debug, Clone)]
 pub enum BootMethodLayer {
-    /// Rockchip idbloader + `u-boot.itb` written into the raw gap, with rkbin
-    /// ATF/TPL.
+    /// Rockchip idbloader + `u-boot.itb` written into the raw gap, with an rkbin
+    /// DDR TPL and the selected [`Bl31Provider`]'s BL31.
     RockchipRkbin(RockchipRkbinLayer),
     /// ChromeOS depthcharge: a vboot-signed FIT in a ChromeOS kernel partition.
     Depthcharge(DepthchargeLayer),
@@ -819,10 +916,21 @@ pub struct RockchipRkbinLayer {
     pub idbloader_offset: String,
     /// Byte offset of `u-boot.itb` in the raw gap (e.g. `8MiB`).
     pub uboot_itb_offset: String,
-    /// Start offset of the rootfs partition (e.g. `16MiB`).
-    pub rootfs_offset: String,
+    /// Where the image's partitions begin, at the end of the raw gap (e.g. `16MiB`).
+    /// The EFI system partition starts here under the [`Efi`](Loader::Efi) loader and
+    /// the rootfs follows it. Under [`Extlinux`](Loader::Extlinux) the rootfs starts
+    /// here. The 1 MiB seed partition sits directly below this offset, at the tail of
+    /// the `u-boot.itb` slot, under either loader.
+    pub partition_offset: String,
+    /// The loaders this method's u-boot can start a kernel through. u-boot is both an
+    /// extlinux reader and a UEFI implementation, so a board on this method can boot
+    /// either way.
+    pub loaders: Vec<Loader>,
+    /// The loader a build gets when its recipe names none. Must be one of
+    /// [`loaders`](Self::loaders).
+    pub default_loader: Loader,
     /// Boot-method-specific rootfs packages added to the base set. Empty here,
-    /// since the boot wiring is overlay files, not packages.
+    /// since the boot wiring is the loader's.
     #[serde(default)]
     pub packages: Vec<PackageEntry>,
     /// Supplementary groups this boot method adds to the default account. Empty on
@@ -836,8 +944,116 @@ pub struct RockchipRkbinLayer {
     /// Pre-built `.deb`s this boot method pulls from outside the Debian mirror.
     #[serde(default)]
     pub extra_debs: Vec<ExtraDeb>,
-    /// Runtime checks this method's boot install must pass (`[[expect]]`) — the
-    /// extlinux config, the on-`/boot` kernel/initrd this method's hooks write.
+    /// Runtime checks this method's boot install must pass (`[[expect]]`): the
+    /// on-`/boot` kernel and initrd that either loader starts. What each loader adds
+    /// is checked by its own layer.
+    #[serde(default)]
+    pub expect: Vec<crate::expect::Expectation>,
+}
+
+/// A loader layer (`loaders/<loader>.toml`): the packages and checks one [`Loader`]
+/// brings to an image, beside the overlay tree that installs its kernel hooks.
+///
+/// Like [`BootMethodLayer`], the variant is chosen by the *filename*.
+/// [`ConfigRoot::loader`](crate::loader::ConfigRoot::loader) is handed the [`Loader`]
+/// and deserializes the file into that loader's struct, so each keeps
+/// `deny_unknown_fields`.
+#[derive(Debug, Clone)]
+pub enum LoaderLayer {
+    /// u-boot's extlinux reader.
+    Extlinux(ExtlinuxLayer),
+    /// UEFI, with GRUB on an EFI system partition.
+    Efi(EfiLayer),
+}
+
+impl LoaderLayer {
+    /// Which loader this layer describes.
+    pub fn loader(&self) -> Loader {
+        match self {
+            LoaderLayer::Extlinux(_) => Loader::Extlinux,
+            LoaderLayer::Efi(_) => Loader::Efi,
+        }
+    }
+
+    /// Human-readable description.
+    pub fn description(&self) -> &str {
+        match self {
+            LoaderLayer::Extlinux(l) => &l.description,
+            LoaderLayer::Efi(l) => &l.description,
+        }
+    }
+
+    /// Rootfs packages this loader needs beyond the one the architecture names
+    /// ([`EfiArch::grub_package`], which resolution adds itself).
+    pub fn packages(&self) -> &[PackageEntry] {
+        match self {
+            LoaderLayer::Extlinux(l) => &l.packages,
+            LoaderLayer::Efi(l) => &l.packages,
+        }
+    }
+
+    /// Packages this loader drops from the merged rootfs set, unioned with every other
+    /// layer's `exclude` (exclude wins).
+    pub fn exclude(&self) -> &[String] {
+        match self {
+            LoaderLayer::Extlinux(l) => &l.exclude,
+            LoaderLayer::Efi(l) => &l.exclude,
+        }
+    }
+
+    /// Runtime checks this loader's install must pass on the booted image
+    /// (`[[expect]]`).
+    pub fn expect(&self) -> &[crate::expect::Expectation] {
+        match self {
+            LoaderLayer::Extlinux(l) => &l.expect,
+            LoaderLayer::Efi(l) => &l.expect,
+        }
+    }
+}
+
+/// The `extlinux` loader (`loaders/extlinux.toml`). Its wiring is overlay files: the
+/// kernel hooks that copy the board DTB to `/boot` and regenerate `extlinux.conf`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExtlinuxLayer {
+    /// Human-readable description.
+    pub description: String,
+    /// Rootfs packages this loader adds to the base set.
+    #[serde(default)]
+    pub packages: Vec<PackageEntry>,
+    /// Packages this loader drops from the merged rootfs set.
+    #[serde(default)]
+    pub exclude: Vec<String>,
+    /// Runtime checks the loader's install must pass (`[[expect]]`): the menu u-boot
+    /// reads.
+    #[serde(default)]
+    pub expect: Vec<crate::expect::Expectation>,
+}
+
+/// The `efi` loader (`loaders/efi.toml`): GRUB on an EFI system partition, started by
+/// the firmware from the removable-media path.
+///
+/// The partition is FAT32 and holds three things. The first is GRUB's EFI binary at
+/// the removable path. The second is the same binary under the distribution's own
+/// directory, where `grub-install` keeps it. The third is the board DTB under `\dtb\`,
+/// where u-boot's UEFI boot reads it ([`ResolvedEfi::dtb`]).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EfiLayer {
+    /// Human-readable description.
+    pub description: String,
+    /// Size of the EFI system partition (authored string, e.g. `256MiB`). Resolution
+    /// requires a whole number of MiB, so the rootfs behind it stays aligned. The image
+    /// node requires it to hold a conformant FAT32 volume.
+    pub esp_size: String,
+    /// Rootfs packages this loader adds to the base set, beyond the architecture's
+    /// GRUB package ([`EfiArch::grub_package`]).
+    #[serde(default)]
+    pub packages: Vec<PackageEntry>,
+    /// Packages this loader drops from the merged rootfs set.
+    #[serde(default)]
+    pub exclude: Vec<String>,
+    /// Runtime checks the loader's install must pass (`[[expect]]`).
     #[serde(default)]
     pub expect: Vec<crate::expect::Expectation>,
 }
@@ -1458,13 +1674,14 @@ fn reject_unsafe_path(rel: &str) -> Result<(), ConfigError> {
 /// rkbin blob references as authored at a config layer (SoC or device). Every
 /// field is optional so a layer states only its deltas: the SoC supplies the
 /// defaults and a device overrides per field. Resolution merges SoC `(+)` device
-/// (device wins per field) into a resolved [`Rkbin`], where `atf` and `tpl` are
-/// required and `bl32` stays optional.
+/// (device wins per field) into a resolved [`Rkbin`] and, for the `rkbin` BL31
+/// provider, a [`Bl31::Rkbin`]. `tpl` is always required, `atf` is required when the
+/// `rkbin` provider is selected, and `bl32` stays optional.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RkbinLayer {
-    /// ARM Trusted Firmware (BL31) ELF filename. SoC-generic, so it is normally
-    /// set once at the SoC layer.
+    /// The `rkbin` [`Bl31Provider`]'s BL31 ELF filename. SoC-generic, so it is
+    /// normally set once at the SoC layer. Read only when that provider is selected.
     #[serde(default)]
     pub atf: Option<String>,
     /// DDR init TPL filename. Board-memory-specific: the SoC layer supplies a
@@ -1476,37 +1693,54 @@ pub struct RkbinLayer {
     /// Omitted on BL31-only boots (RK3588/RK1).
     #[serde(default)]
     pub bl32: Option<String>,
-    /// Where these blobs are published upstream (`[rkbin.upstream]`). It is normally
+    /// The repository the blobs are fetched from (`[rkbin.upstream]`). It is normally
     /// set once at the SoC layer, since a SoC family's blobs share one directory. A
-    /// device that takes its blobs from elsewhere replaces it whole.
+    /// device that takes its blobs from elsewhere replaces it whole. Resolution
+    /// requires one layer to declare it.
     #[serde(default)]
     pub upstream: Option<RkbinUpstream>,
 }
 
-/// The upstream a set of vendored rkbin blobs comes from: a git repository and the
-/// directory in it that holds the files.
+/// The git repository rkbin blobs are fetched from: its URL, the ref `update` pins a
+/// commit from, and the directory of the files.
 ///
-/// The build never reads it, since the blobs are vendored and pinned by sha256.
-/// `outdated` lists it to find a newer file spelled like each pinned one. A firmware
-/// release upstream is then as visible as a kernel tag.
+/// ```toml
+/// [rkbin.upstream]
+/// git = "https://github.com/rockchip-linux/rkbin.git"
+/// ref = "master"
+/// dir = "bin/rk35"
+/// ```
+///
+/// The build fetches every blob from here. The lock's
+/// [`BlobsPin`](crate::lock::BlobsPin) pins a commit of this repository and each
+/// named file's sha256, and the u-boot stage fetches exactly those files at that
+/// commit. `outdated` lists the directory at `ref` for a newer file spelled like each
+/// pinned one. A firmware release upstream is then as visible as a kernel tag.
+///
+/// Resolution guarantees a non-empty `git` and `ref`, neither option-like. It also
+/// guarantees a `dir` relative to the repository root that never steps through `.` or
+/// `..`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RkbinUpstream {
     /// The repository's clone URL.
     pub git: String,
-    /// The directory in the repository's default branch that holds the blobs, relative
-    /// to its root (`bin/rk35`). Resolution guarantees it is relative and never steps
-    /// through `..`.
+    /// The branch `update` resolves to a commit when the locked one lacks a named file
+    /// (TOML key `ref`). rkbin publishes on `master` and has no tags.
+    #[serde(rename = "ref")]
+    pub git_ref: String,
+    /// The directory that holds the blobs, relative to the repository root
+    /// (`bin/rk35`).
     pub dir: String,
 }
 
-/// The resolved rkbin blob set a Rockchip u-boot build consumes: ATF/BL31 and the
-/// DDR TPL (both required — resolution guarantees them present) plus an optional
-/// OP-TEE BL32. Referenced by filename here and verified by sha256 against the lock.
+/// The resolved rkbin blob set a Rockchip u-boot build consumes under either BL31.
+/// That is the DDR TPL, which resolution guarantees present, an optional OP-TEE BL32,
+/// and the repository both are fetched from. Each file is referenced by name here and
+/// verified by sha256 against the lock. The rkbin BL31, when selected, is
+/// [`Bl31::Rkbin`] beside it, fetched from the same repository.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Rkbin {
-    /// ARM Trusted Firmware (BL31) ELF filename.
-    pub atf: String,
     /// DDR init TPL filename (board-memory-specific — a SoC default the device
     /// layer can override).
     pub tpl: String,
@@ -1515,10 +1749,92 @@ pub struct Rkbin {
     /// form.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bl32: Option<String>,
-    /// Where the blobs are published upstream, when a layer declares it. Only the
-    /// upgrade survey reads it.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub upstream: Option<RkbinUpstream>,
+    /// The repository the blobs are fetched from. `update` pins a commit of it, the
+    /// u-boot stage fetches the named files at that commit, and `outdated` lists it
+    /// for newer files.
+    pub upstream: RkbinUpstream,
+}
+
+/// A Trusted Firmware-A source (`[tfa]` at the SoC layer): the repository, the ref
+/// constraint, and TF-A's platform name for the SoC.
+///
+/// ```toml
+/// [tfa]
+/// git        = "https://git.trustedfirmware.org/TF-A/trusted-firmware-a.git"
+/// ref        = "v2.16.0"
+/// plat       = "rk3588"
+/// submodules = ["contrib/dtc"]
+/// ```
+///
+/// The ref is a constraint, and the exact commit is pinned in the lock's `[tfa]`
+/// table. Where the `tfa` provider is selected, resolution guarantees a non-empty
+/// `git` and a non-empty `ref` that is not option-like. It also guarantees `plat` is
+/// a bare `[a-z0-9_]` platform name, since it reaches `make PLAT=`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TfaSource {
+    /// The TF-A repository's clone URL.
+    pub git: String,
+    /// The tag or branch to pin (`ref` in TOML). A feature-release tag (`v2.16.0`)
+    /// does not move, so a lock re-pins only when this constraint changes.
+    #[serde(rename = "ref")]
+    pub git_ref: String,
+    /// TF-A's `PLAT=` name for the SoC (`rk3588`, `rk3576`), the directory under
+    /// `plat/rockchip/` that holds its port.
+    pub plat: String,
+    /// The git submodules the build reads, by path in the TF-A tree
+    /// (`contrib/dtc`, which holds libfdt). TF-A declares more than a BL31 build
+    /// uses, so the build fetches only these, each at the commit the pinned TF-A tree
+    /// records for it. Empty, the default, fetches none. Resolution holds each to a
+    /// relative path that does not step through `.` or `..`.
+    #[serde(default)]
+    pub submodules: Vec<String>,
+}
+
+/// The resolved BL31 of a `rockchip-rkbin` build: the selected [`Bl31Provider`] and
+/// what that provider needs.
+///
+/// Exactly one shape exists per build, so the u-boot node never consults a BL31 the
+/// build did not select. The lock pins exactly one: `[blobs].atf` for
+/// [`Rkbin`](Self::Rkbin), the `[tfa]` table for [`Tfa`](Self::Tfa).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "provider", rename_all = "kebab-case")]
+pub enum Bl31 {
+    /// Rockchip's prebuilt BL31.
+    Rkbin {
+        /// The ELF's filename in the rkbin repository, from the merged
+        /// [`RkbinLayer::atf`].
+        file: String,
+    },
+    /// Trusted Firmware-A built from source by the `tfa` node. Boxed, so the common
+    /// rkbin case does not pay for the source's size.
+    Tfa(Box<TfaSource>),
+}
+
+impl Bl31 {
+    /// The provider this BL31 comes from.
+    pub fn provider(&self) -> Bl31Provider {
+        match self {
+            Bl31::Rkbin { .. } => Bl31Provider::Rkbin,
+            Bl31::Tfa(_) => Bl31Provider::Tfa,
+        }
+    }
+
+    /// The rkbin BL31 filename, or `None` under the `tfa` provider.
+    pub fn rkbin_file(&self) -> Option<&str> {
+        match self {
+            Bl31::Rkbin { file } => Some(file),
+            Bl31::Tfa(_) => None,
+        }
+    }
+
+    /// The TF-A source, or `None` under the `rkbin` provider.
+    pub fn tfa(&self) -> Option<&TfaSource> {
+        match self {
+            Bl31::Rkbin { .. } => None,
+            Bl31::Tfa(src) => Some(src),
+        }
+    }
 }
 
 /// A device's depthcharge board-profile selection (`[depthcharge]` on the device
@@ -1627,6 +1943,17 @@ pub struct DeviceLayer {
     /// only where it matters.
     #[serde(default)]
     pub uboot_defconfig: Option<String>,
+    /// The device-tree name this board's u-boot loads by (its `fdtfile`), where that is
+    /// not [`kernel_dtb`](Self::kernel_dtb). The RK3576 boards' u-boot boots a generic
+    /// tree for the SoC, for one. Absent means `kernel_dtb`.
+    ///
+    /// Read under the [`Efi`](Loader::Efi) loader alone. u-boot's UEFI boot reads
+    /// `dtb/<fdtfile>` from the EFI system partition and hands it to the kernel. The
+    /// image therefore places the kernel's own DTB under this name there. A board booted
+    /// any other way names its DTB to the loader directly. DT-output-dir-relative,
+    /// ending in `.dtb`.
+    #[serde(default)]
+    pub uboot_fdtfile: Option<String>,
     /// Depthcharge board-profile selection. Required by the `depthcharge` boot
     /// method and absent otherwise.
     #[serde(default)]
@@ -1645,8 +1972,8 @@ pub struct DeviceLayer {
     pub device_dts: Vec<String>,
     /// Extra kernel command-line arguments for this board, space-separated
     /// (e.g. a workaround that disables a broken output). They are appended to the boot
-    /// path's generated command line. The extlinux path ships them in
-    /// `/etc/boot2deb/board.conf` (`EXTL_CMD_LINE`), and the depthcharge path appends
+    /// path's generated command line. A loader's hooks read them from
+    /// `/etc/boot2deb/board.conf` (`KERNEL_CMDLINE`), and the depthcharge path appends
     /// them to the boot method's signing cmdline. Base arguments stay generated —
     /// `root=` in particular is derived from `/etc/fstab` on device and is rejected
     /// here. Empty/absent means the generated command line stands alone.
@@ -1700,6 +2027,17 @@ pub struct DeviceLayer {
     /// must name one of them.
     #[serde(default)]
     pub default_uboot_series: Option<String>,
+    /// The [`Bl31Provider`]s this board supports. A BL31 runs the board's power, clock
+    /// and reset paths, so support is earned per board. That is why it lives here. The
+    /// SoC only states which providers exist ([`SocLayer::tfa`]). Empty means `rkbin`
+    /// alone. Only meaningful under `rockchip-rkbin`.
+    #[serde(default)]
+    pub supported_bl31: Vec<Bl31Provider>,
+    /// BL31 provider used when none is specified. Required when
+    /// [`supported_bl31`](Self::supported_bl31) is non-empty, and must name one of
+    /// them. Absent with an empty list, the board uses `rkbin`.
+    #[serde(default)]
+    pub default_bl31: Option<Bl31Provider>,
     /// Debian suites valid for this board — the suite analogue of
     /// [`supported_kernels`](Self::supported_kernels), and the axis a `--suite`
     /// override or a recipe's `suite` is checked against.
@@ -1839,21 +2177,21 @@ pub struct BaseLayer {
     /// still read — forky's `tzdata` deletes `/etc/timezone` outright.
     #[serde(default = "default_timezone")]
     pub timezone: String,
-    /// NTP servers `systemd-timesyncd` reaches for first, as hostnames or IP
+    /// NTP servers the image's time client reaches for first, as hostnames or IP
     /// addresses. Deployment policy rather than a hardware property, so it lives here.
     /// A recipe or `--ntp-server` overrides it.
     ///
-    /// Empty — the default — writes no configuration at all, leaving Debian's
-    /// compiled-in `FallbackNTP` pool. Naming servers here sets `NTP=` and *keeps* that
-    /// pool as the fallback. A LAN time source is tried first, and the public pool still
-    /// covers the image when it is unreachable.
+    /// Empty — the default — writes no configuration at all, leaving the distribution's
+    /// own servers: Debian's compiled-in `FallbackNTP` pool, or Ubuntu's NTS pools.
+    /// Naming servers here *keeps* those as well. A LAN time source is tried first, and
+    /// the distribution's servers still cover the image when it is unreachable.
     ///
-    /// That is why this never replaces the fallback list. An image configured for a
-    /// network it is not currently on must still be able to find the time.
+    /// That is why this never replaces the distribution's list. An image configured for
+    /// a network it is not currently on must still be able to find the time.
     ///
     /// Worth setting for a board that boots on an isolated network, which cannot reach the
-    /// public pool at all. See [`ResolvedImage::ntp_servers`] for what a board with no
-    /// reachable time source does instead.
+    /// public servers at all. See [`ResolvedImage::ntp_servers`] for how each client is
+    /// configured, and for what a board with no reachable time source does instead.
     #[serde(default)]
     pub ntp_servers: Vec<String>,
     /// Packages installed into every rootfs whatever its distribution, by the same
@@ -2559,6 +2897,11 @@ pub struct Recipe {
     /// name one of the device's [`supported_uboot_series`](DeviceLayer::supported_uboot_series).
     #[serde(default)]
     pub uboot_series: Option<String>,
+    /// BL31 provider override. `None` → device `default_bl31`. Must name one of the
+    /// device's [`supported_bl31`](DeviceLayer::supported_bl31). Rejected on a board
+    /// whose boot method builds no u-boot.
+    #[serde(default)]
+    pub bl31: Option<Bl31Provider>,
     /// Depthcharge board profile override. `None` → the device's
     /// [`[depthcharge] board`](DeviceDepthcharge::board). Must name one of the
     /// device's [`supported_boards`](DeviceDepthcharge::supported_boards). Ignored by
@@ -2590,6 +2933,13 @@ pub struct Recipe {
     /// Layout override. `None` → device `default_layout`.
     #[serde(default)]
     pub layout: Option<Layout>,
+    /// Loader override. `None` → the boot method's
+    /// [`default_loader`](RockchipRkbinLayer::default_loader). Must be one of the boot
+    /// method's [`loaders`](RockchipRkbinLayer::loaders). Refused under a boot method
+    /// whose firmware loads the kernel itself, and on a [`Deliverable::Uboot`] recipe,
+    /// which has no image to put a loader in.
+    #[serde(default)]
+    pub loader: Option<Loader>,
     /// Image-size override. `None` → device `image_size`.
     #[serde(default)]
     pub image_size: Option<String>,
@@ -2606,7 +2956,7 @@ pub struct Recipe {
     pub timezone: Option<String>,
     /// NTP-server override. `None` → base `ntp_servers`. `Some` **replaces** the base
     /// list rather than adding to it. `Some([])` is how a recipe drops servers the base
-    /// names and returns to Debian's fallback pool.
+    /// names and returns to the distribution's own servers.
     #[serde(default)]
     pub ntp_servers: Option<Vec<String>>,
     /// Keymap override. `None` → device `keymap`.
@@ -2681,6 +3031,9 @@ pub struct Overrides {
     /// Override the u-boot patch series (must be in the device's
     /// `supported_uboot_series`).
     pub uboot_series: Option<String>,
+    /// Override the BL31 provider (must be in the device's `supported_bl31`).
+    /// Rejected under a boot method that builds no u-boot.
+    pub bl31: Option<Bl31Provider>,
     /// Override the suite. The distribution follows it, from the distro layer that
     /// lists it.
     pub suite: Option<String>,
@@ -2689,6 +3042,9 @@ pub struct Overrides {
     pub initramfs_generator: Option<crate::distro::InitramfsGenerator>,
     /// Override the image layout.
     pub layout: Option<Layout>,
+    /// Override the loader (must be one of the boot method's
+    /// [`loaders`](RockchipRkbinLayer::loaders)).
+    pub loader: Option<Loader>,
     /// Override the boot method (must be in the device's supported set).
     pub boot_method: Option<BootMethod>,
     /// Override the depthcharge board profile (must be in the device's
@@ -2706,8 +3062,8 @@ pub struct Overrides {
     pub locales_generate: Option<Vec<String>>,
     /// Override the system timezone.
     pub timezone: Option<String>,
-    /// Override the NTP servers `systemd-timesyncd` prefers (`Some` replaces the base
-    /// list). `Some([])` returns the image to Debian's fallback pool.
+    /// Override the NTP servers the image's time client prefers (`Some` replaces the
+    /// base list). `Some([])` returns the image to the distribution's own servers.
     pub ntp_servers: Option<Vec<String>>,
     /// Override the console keymap. Accepted even for a device that declares none, since
     /// `console-setup` ships on every image and a keymap is always actionable. A headless
@@ -2843,8 +3199,9 @@ pub struct Offsets {
     pub idbloader: String,
     /// `u-boot.itb` offset.
     pub uboot_itb: String,
-    /// Rootfs partition start.
-    pub rootfs: String,
+    /// Where the image's partitions begin
+    /// ([`partition_offset`](RockchipRkbinLayer::partition_offset)).
+    pub partitions: String,
 }
 
 /// The resolved ChromeOS kernel slots: where they sit and the attribute bits that
@@ -2889,19 +3246,21 @@ pub struct Kpart {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "method", rename_all = "kebab-case")]
 pub enum ResolvedBoot {
-    /// Compile u-boot, write idbloader + `u-boot.itb` into the raw gap.
-    RockchipRkbin(ResolvedRkbinBoot),
+    /// Compile u-boot, write idbloader + `u-boot.itb` into the raw gap. Boxed, so the
+    /// depthcharge case does not pay for the bootloader sources' size.
+    RockchipRkbin(Box<ResolvedRkbinBoot>),
     /// Place a `depthchargectl`-signed kernel FIT in a ChromeOS kernel partition.
     Depthcharge(ResolvedDepthchargeBoot),
 }
 
 impl ResolvedBoot {
-    /// Start offset of the rootfs partition. Both methods place the rootfs after whatever
-    /// they own at the head of the medium. The image node therefore reads this without
-    /// caring which method resolved it.
-    pub fn rootfs_offset(&self) -> &str {
+    /// Where the image's partitions begin, after whatever the boot method places at the
+    /// head of the medium. The image node reads this without caring which method
+    /// resolved it, and lays the EFI system partition (where the loader has one) and
+    /// then the rootfs from here.
+    pub fn partition_offset(&self) -> &str {
         match self {
-            ResolvedBoot::RockchipRkbin(b) => &b.offsets.rootfs,
+            ResolvedBoot::RockchipRkbin(b) => &b.offsets.partitions,
             ResolvedBoot::Depthcharge(b) => &b.rootfs_offset,
         }
     }
@@ -2929,8 +3288,11 @@ pub struct ResolvedRkbinBoot {
     /// `patches_ref`, or [`DEFAULT_PATCHES_REF`].
     /// `Some` under the same condition as [`uboot_patches_url`](Self::uboot_patches_url).
     pub uboot_patches_ref: Option<String>,
+    /// The selected BL31 and what its provider needs. Resolution guarantees the
+    /// provider is in the device's `supported_bl31`.
+    pub bl31: Bl31,
     /// rkbin blob set — the SoC's defaults merged with the device's overrides.
-    /// Resolution guarantees `atf` and `tpl` are present.
+    /// Resolution guarantees `tpl` is present.
     pub rkbin: Rkbin,
     /// Raw-gap offsets (from the boot method).
     pub offsets: Offsets,
@@ -3098,13 +3460,11 @@ pub struct ResolvedBuild {
     /// trimmed. Empty when the board declares none. Resolution guarantees the value
     /// is a single line of plain arguments, safe to embed in the sourced
     /// `/etc/boot2deb/board.conf` (no quote/escape/expansion characters), and free
-    /// of `root=`. The extlinux path emits it as `EXTL_CMD_LINE`. The depthcharge
-    /// path has already folded it into [`ResolvedDepthchargeBoot::cmdline`].
+    /// of `root=`. A loader's hooks read it from `board.conf` as `KERNEL_CMDLINE`. The
+    /// depthcharge path has already folded it into [`ResolvedDepthchargeBoot::cmdline`].
     pub kernel_cmdline: String,
     /// Device-tree subdirectory (from the SoC).
     pub dt_dir: String,
-    /// Force-loaded accel modules (from the SoC).
-    pub modules: Vec<String>,
     /// `ARCH=` for kbuild (from the arch).
     pub kernel_arch: String,
     /// `CROSS_COMPILE` prefix, from the arch. Used only when cross-building.
@@ -3203,6 +3563,20 @@ pub struct ResolvedImage {
     /// [`rootfs_packages`](Self::rootfs_packages), placed there by resolution and named
     /// by no layer.
     pub initramfs_generator: crate::distro::InitramfsGenerator,
+    /// The NTP client this image runs, from the distro layer's
+    /// [`time_client`](crate::distro::DistroLayer::time_client). It decides where
+    /// [`ntp_servers`](Self::ntp_servers) is written and which unit bounds the wait for
+    /// the first synchronization. Its package is in
+    /// [`rootfs_packages`](Self::rootfs_packages), placed there by resolution and named
+    /// by no layer.
+    pub time_client: crate::distro::TimeClient,
+    /// What finds the kernel on this image and starts it, or `None` under a boot
+    /// method whose firmware loads the kernel itself (`depthcharge`). Resolution
+    /// guarantees the loader is one the boot method lists. Under
+    /// [`Efi`](ResolvedLoader::Efi) the architecture's GRUB package is in
+    /// [`rootfs_packages`](Self::rootfs_packages), placed there by resolution and named
+    /// by no layer.
+    pub loader: Option<ResolvedLoader>,
     /// Image size.
     pub image_size: String,
     /// Image hostname.
@@ -3241,17 +3615,22 @@ pub struct ResolvedImage {
     /// System timezone (a `tzdata` zone name), materialized as the `/etc/localtime`
     /// symlink.
     pub timezone: String,
-    /// NTP servers the image prefers, in config order, materialized as the `NTP=` line
-    /// of a `/etc/systemd/timesyncd.conf.d` drop-in. Empty — the common case — writes
-    /// no drop-in and leaves Debian's compiled-in fallback pool as the only source.
+    /// NTP servers the image prefers, in config order. Empty — the common case — writes
+    /// no configuration and leaves the distribution's own servers as the only source.
+    /// The [`time_client`](Self::time_client) decides the file:
+    ///
+    ///  - `systemd-timesyncd`: the `NTP=` line of a `/etc/systemd/timesyncd.conf.d`
+    ///    drop-in, which leaves Debian's compiled-in `FallbackNTP` pool in place.
+    ///  - `chrony`: one `server` line each in `/etc/chrony/sources.d`, beside Ubuntu's
+    ///    NTS pools.
     ///
     /// Resolution guarantees each entry is a bare host, meaning a hostname or IP address
-    /// with no scheme, port, or whitespace. `timesyncd` parses the line by splitting on
-    /// spaces.
+    /// with no scheme, port, or whitespace. Both clients split their configuration on
+    /// whitespace.
     ///
-    /// This never replaces `FallbackNTP`, so a configured server is a *preference* and
-    /// not a commitment. What it does not do is make the clock correct before userspace
-    /// needs it.
+    /// This never replaces the distribution's servers, so a configured server is a
+    /// *preference* and not a commitment. What it does not do is make the clock correct
+    /// before userspace needs it.
     ///
     /// Every image bounds that wait instead, holding `time-sync.target` until the clock is
     /// trustworthy but releasing it after 45 seconds. A board with no reachable time
@@ -3373,6 +3752,58 @@ pub struct ResolvedImage {
     pub selftest_on_boot: bool,
 }
 
+/// The resolved loader of an image ([`ResolvedImage::loader`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "loader", rename_all = "kebab-case")]
+pub enum ResolvedLoader {
+    /// u-boot reads `/boot/extlinux/extlinux.conf` off the rootfs.
+    Extlinux,
+    /// GRUB on an EFI system partition, started by the firmware from the
+    /// removable-media path.
+    Efi(ResolvedEfi),
+}
+
+impl ResolvedLoader {
+    /// Which loader this is.
+    pub fn loader(&self) -> Loader {
+        match self {
+            ResolvedLoader::Extlinux => Loader::Extlinux,
+            ResolvedLoader::Efi(_) => Loader::Efi,
+        }
+    }
+
+    /// The EFI half, under the [`Efi`](Self::Efi) loader.
+    pub fn efi(&self) -> Option<&ResolvedEfi> {
+        match self {
+            ResolvedLoader::Extlinux => None,
+            ResolvedLoader::Efi(efi) => Some(efi),
+        }
+    }
+}
+
+/// The resolved [`Efi`](Loader::Efi) loader: the partition the image lays down and
+/// what the architecture names in it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ResolvedEfi {
+    /// Size of the EFI system partition, from the loader layer's
+    /// [`esp_size`](EfiLayer::esp_size). Resolution guarantees it parses and is a whole
+    /// number of MiB.
+    pub esp_size: String,
+    /// The architecture's UEFI and GRUB names.
+    pub arch: EfiArch,
+    /// The DTB's path under the partition's `dtb/` directory: the name the board's
+    /// u-boot loads by. That is the device's
+    /// [`uboot_fdtfile`](DeviceLayer::uboot_fdtfile) where it sets one, and its
+    /// [`kernel_dtb`](DeviceLayer::kernel_dtb) otherwise. Resolution guarantees a
+    /// relative path of plain path characters ending in `.dtb`.
+    pub dtb: String,
+}
+
+/// Where the EFI system partition is mounted on the running board, and so where
+/// `grub-install` and the kernel hook that copies the DTB find it. Debian's own
+/// installer and `grub-install` use the same path.
+pub const ESP_MOUNT_POINT: &str = "/boot/efi";
+
 /// A build point and its image half, borrowed together — the argument every stage on
 /// the image path takes.
 ///
@@ -3461,7 +3892,7 @@ impl ResolvedBuild {
     /// the raw-gap image path all key on it.
     pub fn rkbin_boot(&self) -> Option<&ResolvedRkbinBoot> {
         match &self.boot {
-            ResolvedBoot::RockchipRkbin(b) => Some(b),
+            ResolvedBoot::RockchipRkbin(b) => Some(b.as_ref()),
             _ => None,
         }
     }

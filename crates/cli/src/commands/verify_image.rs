@@ -9,57 +9,74 @@
 //! the record says whether the newest build of the point was a whole one that
 //! succeeded. When it was not (a failed or unfinished run, or a later `--stage kernel`)
 //! that is the point's whole report, since every other check would be judging files the
-//! newest build did not write. Then it asks:
+//! newest build did not write.
 //!
-//!  1. The artifact set is there — the image, its provenance manifest, and the plan
-//!     document the rootfs published.
-//!  2. The plan parses, and its digest is the one the provenance records. A mismatch
-//!     means the manifest describes a document other than the one that shipped.
-//!  3. `[[archives]]` is well formed. It contains at least the mirror and the build's
+//! The image is the one the point's artifact inventory ([`boot2deb_core::inventory`])
+//! names. That is the image stage's entry for the current lock, in the layout that stage
+//! laid out. The artifact is the one for the role that holds the rootfs: the whole disk,
+//! or a split build's rootfs image. Then it asks:
+//!
+//!  1. **The artifact is the bytes the build recorded.** A file changed since ends the
+//!     report there, since everything below reads it. An image formatted from
+//!     an external `--rootfs-tar` fails here too: it is not the lock's.
+//!  2. The provenance manifest records this artifact among its outputs, with the same
+//!     digest, so the manifest describes this image and not an earlier one.
+//!  3. The plan parses, and its digest is the one the provenance records.
+//!  4. `[[archives]]` is well formed. It contains at least the mirror and the build's
 //!     own pool. The pool is marked `local` with no mirror URL, since a per-run path
 //!     is not portable provenance. `signed_by` is written on every row, because an
 //!     empty `signed_by` is a *fact* (trusted unsigned) and must be present rather
 //!     than absent.
-//!  4. **The ext4 filesystem is exactly its GPT partition.** Larger and it will not
-//!     mount at all. Smaller and the difference is wasted. This is the invariant the
-//!     fit ordering exists to preserve, so it is checked on every image and not only on
-//!     the fitted one.
-//!  5. **The rootfs GPT entry is marked bootable.** U-Boot's `bootflow scan` narrows
-//!     to the partitions with the legacy-BIOS-bootable attribute, as soon as any
-//!     partition on the medium has it. It scans partition 1 alone when none
-//!     does, and partition 1 is the seed. Nothing about the filesystem's contents
-//!     says whether the bootloader will ever open it.
-//!  6. A fitted `image_size` left the slack it asked for.
-//!  7. **The rootfs holds exactly the files its manifest lists.** The rootfs partition is
-//!     walked where it sits and compared with the `<stem>.rootfs.uapi16` the build
-//!     wrote from the same filesystem, every field of every path. A compressed image
-//!     is decompressed into a sparse temporary file for this, since the walk seeks.
-//!  8. Where the recipe has a committed outputs record (`recipes/<recipe>.outputs`),
+//!  5. The disk is the length the build's digest record and the provenance both state.
+//!  6. **Both copies of the partition table validate.** The primary is read strictly
+//!     (header and entry-array CRCs, every extent inside the disk), and the backup sits
+//!     on the disk's last LBA and agrees with it.
+//!  7. The rootfs partition is the one with the PARTUUID the image's identity gives it,
+//!     whatever `--rootfs-label` named it, and its type is a Linux filesystem's.
+//!  8. **The ext4 filesystem is exactly its GPT partition**, as the superblock on the
+//!     disk states it and as the provenance recorded it. Larger and it will not mount
+//!     at all. Smaller and the difference is wasted.
+//!  9. **The partition a scanning bootloader must open is marked bootable.** U-Boot's
+//!     `bootflow scan` narrows to the partitions with the legacy-BIOS-bootable
+//!     attribute, as soon as any partition on the medium has it. It scans partition 1
+//!     alone when none does, and partition 1 is the seed. The partition is the rootfs,
+//!     or under the `efi` loader the EFI system partition. That one also has to have the
+//!     EFI system type, be FAT32, and scan clean. It has to hold the loader at the
+//!     removable-media path, and the DTB under the name u-boot loads it by.
+//! 10. A fitted `image_size` left the slack it asked for, by the superblock's count.
+//! 11. Under `rockchip-rkbin`, **the boot region holds the payloads the image stage
+//!     placed**. Each is read at its offset and held to the digest the stage recorded for
+//!     the file it consumed. A split build's boot image is held to the same record.
+//! 12. **The rootfs holds exactly the files its manifest lists.** The rootfs partition
+//!     is walked where it sits and compared with the `<stem>.rootfs.uapi16` the build
+//!     wrote from the same filesystem, every field of every path.
+//! 13. Where the recipe has a committed outputs record (`recipes/<recipe>.outputs`),
 //!     **the artifact directory holds every file it names for this build host, byte for
 //!     byte.** The files are hashed where they sit, so the check holds what would
 //!     ship, whichever run wrote it. A record with no entry for this host passes, saying
 //!     so, since another host's compilers make other bytes.
-//!  9. Where the build compiles anything, **every `.deb` it recorded as
+//! 14. Where the build compiles anything, **every `.deb` it recorded as
 //!     local-repository input holds to the package rules**
 //!     ([`boot2deb_core::debcheck`]). That is the check that admitted each package,
 //!     run again on the bytes in the artifact directory.
 //!
-//! Every structure is read by the code that writes it.
-//! [`image::inspect`](boot2deb_engine::image::inspect) reads the GPT and the
-//! superblock, and [`ProvenanceManifest`] reads the record. The gate therefore
-//! cannot drift from the build by parsing the same bytes differently. The
-//! alternative is a second implementation of both parsers that nothing tests.
+//! Every structure is read by the code that writes it, or by the strict reader that
+//! checks it. [`image::inspect`](boot2deb_engine::image::inspect) reads the tables, the
+//! superblock and the ESP, and [`ProvenanceManifest`] reads the record. The gate
+//! therefore cannot drift from the build by parsing the same bytes differently.
 //!
-//! It needs no root, and changes nothing it verifies. Checks 1 to 6 decompress only the
-//! head of the artifact. The seventh walks the whole rootfs, and a walk seeks. A
-//! compressed image is therefore decompressed first, into a sparse temporary file in the
-//! artifact directory that is removed when the check ends. The eighth hashes the recorded
-//! files, and the ninth reads each recorded package's members.
+//! It needs no root, and changes nothing it verifies. The disk checks read the image by
+//! offset, every read bounded by the disk. A compressed image is therefore decompressed
+//! once, into a sparse temporary file in the artifact directory that is removed when the
+//! point's checks end. The committed-outputs check hashes the recorded files, and the
+//! package check reads each recorded package's members.
 
 use boot2deb_core::buildrecord::BuildRecord;
 use boot2deb_core::model::Overrides;
+use boot2deb_core::press::ArtifactRole;
 use boot2deb_core::provenance::ProvenanceManifest;
 use boot2deb_core::{resolve_recipe, ConfigRoot};
+use boot2deb_engine::image::inspect::{self, EspReport, RawImage};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
@@ -181,7 +198,9 @@ pub(crate) fn run(
 ///
 /// The build record is read first. When the newest build of the point does not vouch
 /// for the directory, that is the whole report: the other checks would be judging
-/// files the newest build did not write.
+/// files the newest build did not write. The image itself is the one the point's
+/// artifact inventory names for the current lock, in the layout the build laid it out
+/// in, and it is checked against its recorded digest before anything reads it.
 fn verify_point(
     root: &ConfigRoot,
     recipe: &str,
@@ -190,13 +209,6 @@ fn verify_point(
     let point = crate::config::build_point(recipe, Vec::new())?;
     let reference = point.reference();
     let stem = point.artifact_stem();
-    let build = resolve_recipe(root, reference.as_str(), &Overrides::default())?;
-    if !build.produces_image() {
-        return Err(format!(
-            "recipe '{recipe}' builds only a bootloader, so there is no image to verify"
-        )
-        .into());
-    }
     let dir = match out_dir {
         Some(d) => d,
         None => crate::workdir::work_dir_for(root, reference.as_str(), None).join("artifacts"),
@@ -211,9 +223,83 @@ fn verify_point(
             checks: vec![record_check],
         });
     }
-
     let mut checks = vec![record_check];
-    let image = find_image(&dir, &stem)?;
+
+    // The image, as the inventory records it: the image stage's entry for this lock, in
+    // the layout that stage laid out, and the artifact for the role that holds the rootfs.
+    let inventory = crate::inventory::load(&dir, &stem)?;
+    let entry = crate::inventory::current(
+        &inventory,
+        boot2deb_core::inventory::Stage::Image,
+        &crate::inventory::lock_digest(root, reference.as_str())?,
+        &dir,
+        reference.as_str(),
+    )?;
+    let layout = entry
+        .layout
+        .ok_or("the image stage's inventory entry records no layout — rebuild")?;
+    let build = resolve_recipe(
+        root,
+        reference.as_str(),
+        &Overrides {
+            layout: Some(layout),
+            ..Overrides::default()
+        },
+    )?;
+    if !build.produces_image() {
+        return Err(format!(
+            "recipe '{recipe}' builds only a bootloader, so there is no image to verify"
+        )
+        .into());
+    }
+    let os_role = boot2deb_core::press::roles(&build)
+        .into_iter()
+        .find(|r| r.contains_rootfs())
+        .expect("an image build has a rootfs-containing artifact");
+    let row = entry.disk_image(os_role).ok_or_else(|| {
+        format!(
+            "the build published no {} — run `boot2deb build {recipe}`",
+            os_role.describe()
+        )
+    })?;
+    let image = dir.join(&row.file);
+    let disk = row
+        .disk
+        .clone()
+        .expect("a disk image's inventory row records its disk");
+
+    // 1. The artifact is the bytes the build recorded. Everything below reads it, so a
+    //    file changed since is the whole report.
+    let artifact_check = match crate::inventory::verified(&dir, row) {
+        Ok(_) => Check {
+            what: "artifact",
+            detail: format!(
+                "the {} the build recorded ({layout} layout{})",
+                os_role.describe(),
+                if entry.external_rootfs {
+                    ", from an external --rootfs-tar"
+                } else {
+                    ""
+                }
+            ),
+            ok: !entry.external_rootfs,
+        },
+        Err(e) => Check {
+            what: "artifact",
+            detail: e.to_string(),
+            ok: false,
+        },
+    };
+    let artifact_ok = artifact_check.ok;
+    checks.push(artifact_check);
+    if !artifact_ok {
+        return Ok(PointReport {
+            point: reference.as_str().to_string(),
+            artifact: Some(image),
+            checks,
+        });
+    }
+
     let prov_path = dir.join(format!("{stem}.provenance.toml"));
     let plan_path = dir.join(format!("{stem}.plan"));
     for p in [&prov_path, &plan_path] {
@@ -226,7 +312,25 @@ fn verify_point(
         &prov_path.display().to_string(),
     )?;
 
-    // 1. The plan parses, and it is the document the provenance describes.
+    // 2. The provenance describes this image: its record of the build's outputs names
+    //    the artifact with the digest the inventory has.
+    let recorded = prov.outputs.iter().find(|o| o.file == row.file);
+    checks.push(Check {
+        what: "provenance",
+        detail: match recorded {
+            Some(o) if o.sha256 == row.sha256 => {
+                "records this artifact with the same digest".into()
+            }
+            Some(o) => format!(
+                "records {} with sha256 {}, and the artifact is {}",
+                row.file, o.sha256, row.sha256
+            ),
+            None => format!("does not record {} among its outputs", row.file),
+        },
+        ok: recorded.is_some_and(|o| o.sha256 == row.sha256),
+    });
+
+    // 3. The plan parses, and it is the document the provenance describes.
     let record = boot2deb_engine::rootfs::read_plan_record(&plan_path)?;
     let weights = boot2deb_engine::rootfs::read_plan_weights(&plan_path)?;
     checks.push(Check {
@@ -248,7 +352,7 @@ fn verify_point(
         ok: record.sha256 == prov.rootfs.plan_sha256,
     });
 
-    // 2. The archive rows.
+    // 4. The archive rows.
     let pool = prov.archives.iter().find(|a| a.local);
     checks.push(Check {
         what: "[[archives]]",
@@ -269,128 +373,313 @@ fn verify_point(
         ok: pool.is_some_and(|p| p.mirror.is_none()),
     });
 
-    // 3. The filesystem is exactly its GPT partition.
-    let geom = &prov.filesystem.geometry;
-    let fs_bytes = geom.total_blocks * geom.block_size as u64;
-    let part = boot2deb_engine::image::inspect::rootfs_partition(&image);
-    checks.push(Check {
-        what: "ext4 fits",
-        detail: match &part {
-            Err(e) => format!("could not read the rootfs partition: {e}"),
-            Ok(p) if p.bytes == fs_bytes => format!(
-                "{} x {} = {fs_bytes} bytes — the filesystem fills the partition exactly",
-                geom.total_blocks, geom.block_size
-            ),
-            // Larger and the difference is wasted; smaller and the filesystem does not
-            // mount at all ("block count exceeds size of device").
-            Ok(p) => format!(
-                "the rootfs partition is {} bytes but the filesystem is {fs_bytes}",
-                p.bytes
-            ),
-        },
-        ok: part.as_ref().is_ok_and(|p| p.bytes == fs_bytes),
-    });
+    // From here every check reads the disk itself, opened once: a container is
+    // decompressed into a sparse temporary file in the artifact directory, which is
+    // removed when the point's checks end.
+    let raw = RawImage::open(&image, &dir)?;
+    let identity = boot2deb_engine::image::ImageIdentity::derive(reference.as_str(), &build.device);
 
-    // 3b. The rootfs is the partition a bootloader will look inside. U-Boot's
-    //     `bootflow scan` considers only partitions marked bootable once any is
-    //     marked, and only partition 1 when none is — and partition 1 is the seed.
-    //     Nothing about the filesystem's contents says whether the bootloader will
-    //     ever open it, so the attribute is its own check.
-    checks.push(Check {
-        what: "rootfs bootable",
-        detail: match &part {
-            Err(e) => format!("could not read the rootfs partition: {e}"),
-            Ok(p) if p.bootable => "the GPT entry has the bootable attribute".into(),
-            Ok(_) => "the rootfs GPT entry is not marked bootable — a scanning \
-                      bootloader will never open it"
-                .into(),
-        },
-        ok: part.as_ref().is_ok_and(|p| p.bootable),
-    });
-
-    // 4. The size, as authored and as realized. They differ in kind for a fitted image:
-    //    the recipe names a rule, and only the record says what it came to.
+    // 5. The disk is the length every record states: the build's digest record, the
+    //    provenance, and what the container decompressed to.
+    let lengths_agree = raw.len() == disk.bytes && disk.bytes == prov.image.image_bytes;
     checks.push(Check {
         what: "size",
-        detail: format!(
-            "{} -> {} bytes on disk",
-            prov.image.image_size, prov.image.image_bytes
-        ),
-        ok: prov.image.image_bytes > 0,
+        detail: if lengths_agree {
+            format!(
+                "{} -> {} bytes on disk, as recorded",
+                prov.image.image_size,
+                raw.len()
+            )
+        } else {
+            format!(
+                "the disk is {} bytes; the build recorded {} and the provenance {}",
+                raw.len(),
+                disk.bytes,
+                prov.image.image_bytes
+            )
+        },
+        ok: lengths_agree && !raw.is_empty(),
     });
 
-    // 5. A fitted size additionally has to have left the slack it asked for, measured
-    //    as the formatter measures it: free blocks once the source is written.
+    // 6. Both copies of the partition table, read strictly: the primary validates, and
+    //    the backup sits on the disk's last LBA and agrees with it.
+    let table = inspect::read_table(&raw);
+    checks.push(Check {
+        what: "gpt",
+        detail: match &table {
+            Err(e) => e.to_string(),
+            Ok(t) => match &t.backup {
+                Ok(()) => format!(
+                    "{} entries; the backup on the last LBA agrees with the primary",
+                    t.entries.len()
+                ),
+                Err(why) => why.clone(),
+            },
+        },
+        ok: table.as_ref().is_ok_and(|t| t.backup.is_ok()),
+    });
+
+    // 7. The rootfs partition, found by the PARTUUID the image's identity gives it, so a
+    //    `--rootfs-label` is no obstacle. Its type is a separate fact.
+    let part = table.as_ref().map_err(|e| e.to_string()).and_then(|t| {
+        t.by_guid(&raw, identity.rootfs_partuuid)
+            .map_err(|e| e.to_string())
+    });
+    checks.push(Check {
+        what: "rootfs partition",
+        detail: match &part {
+            Err(e) => e.clone(),
+            Ok(p) if p.type_guid == inspect::LINUX_FS_TYPE => format!(
+                "entry {} ({:?}), PARTUUID {}, Linux filesystem type",
+                p.index, p.name, identity.rootfs_partuuid
+            ),
+            Ok(p) => format!(
+                "entry {} has type {}, not a Linux filesystem's",
+                p.index, p.type_guid
+            ),
+        },
+        ok: part
+            .as_ref()
+            .is_ok_and(|p| p.type_guid == inspect::LINUX_FS_TYPE),
+    });
+
+    // 8. The ext4 filesystem is exactly its partition, as the superblock on the disk
+    //    states it, and as the provenance recorded it. Larger and it will not mount;
+    //    smaller and the difference is wasted.
+    let geom = &prov.filesystem.geometry;
+    let recorded_bytes = geom.total_blocks * geom.block_size as u64;
+    let sb = part
+        .as_ref()
+        .map_err(Clone::clone)
+        .and_then(|p| inspect::superblock(&raw, p).map_err(|e| e.to_string()));
+    checks.push(Check {
+        what: "ext4 fits",
+        detail: match (&part, &sb) {
+            (Err(e), _) | (_, Err(e)) => format!("could not read the rootfs: {e}"),
+            (Ok(p), Ok(sb)) if sb.bytes() == Some(p.bytes) && p.bytes == recorded_bytes => {
+                format!(
+                    "{} x {} = {} bytes — the filesystem fills the partition exactly, as \
+                     recorded",
+                    sb.blocks, sb.block_size, p.bytes
+                )
+            }
+            (Ok(p), Ok(sb)) => format!(
+                "the partition is {} bytes, the superblock states {} x {}, and the \
+                 provenance {} x {}",
+                p.bytes, sb.blocks, sb.block_size, geom.total_blocks, geom.block_size
+            ),
+        },
+        ok: matches!((&part, &sb), (Ok(p), Ok(sb))
+            if sb.bytes() == Some(p.bytes) && p.bytes == recorded_bytes),
+    });
+
+    // 9. The partition a bootloader will look inside is marked so. U-Boot's
+    //    `bootflow scan` considers only partitions marked bootable once any is
+    //    marked, and only partition 1 when none is — and partition 1 is the seed.
+    //    Nothing about a filesystem's contents says whether the bootloader will ever
+    //    open it, so the attribute is its own check. Under the efi loader the
+    //    partition is the ESP, found by its PARTUUID and held to the EFI type, and read
+    //    back with what the firmware loads from it.
+    let efi = build
+        .image
+        .as_ref()
+        .and_then(|i| i.loader.as_ref())
+        .and_then(|l| l.efi());
+    match efi {
+        None => checks.push(Check {
+            what: "rootfs bootable",
+            detail: match &part {
+                Err(e) => format!("could not read the rootfs partition: {e}"),
+                Ok(p) if p.bootable => "the GPT entry has the bootable attribute".into(),
+                Ok(_) => "the rootfs GPT entry is not marked bootable — a scanning \
+                          bootloader will never open it"
+                    .into(),
+            },
+            ok: part.as_ref().is_ok_and(|p| p.bootable),
+        }),
+        Some(efi) => {
+            let required = [
+                format!("/EFI/BOOT/{}", efi.arch.removable_file),
+                format!("/dtb/{}", efi.dtb),
+            ];
+            let esp = table
+                .as_ref()
+                .map_err(|e| e.to_string())
+                .and_then(|t| {
+                    t.by_guid(&raw, identity.esp_partuuid)
+                        .map_err(|e| e.to_string())
+                })
+                .and_then(|p| inspect::esp(&raw, &p, &required).map_err(|e| e.to_string()));
+            checks.push(Check {
+                what: "esp bootable",
+                detail: match &esp {
+                    Err(e) => format!("could not read the EFI system partition: {e}"),
+                    Ok(e) if !e.efi_type => {
+                        "the EFI system partition's entry does not have the EFI system type \
+                         — firmware will not select it"
+                            .into()
+                    }
+                    Ok(e) if e.bootable => "the EFI system partition has the EFI system type \
+                                            and the bootable attribute"
+                        .into(),
+                    Ok(_) => "the EFI system partition is not marked bootable — u-boot's \
+                              scan will never open it"
+                        .into(),
+                },
+                ok: esp.as_ref().is_ok_and(|e| e.efi_type && e.bootable),
+            });
+            checks.push(Check {
+                what: "esp contents",
+                detail: match &esp {
+                    Err(e) => format!("could not read the EFI system partition: {e}"),
+                    Ok(e) if !e.fat32 => "the volume is not FAT32".into(),
+                    Ok(EspReport {
+                        findings: Some(found),
+                        ..
+                    }) => format!("the volume does not scan clean:\n{found}"),
+                    Ok(e) if !e.missing.is_empty() => {
+                        format!("the volume holds no {}", e.missing.join(", "))
+                    }
+                    Ok(_) => format!("FAT32, scans clean, holds {}", required.join(" and ")),
+                },
+                ok: esp
+                    .as_ref()
+                    .is_ok_and(|e| e.fat32 && e.findings.is_none() && e.missing.is_empty()),
+            });
+        }
+    }
+
+    // 10. A fitted size additionally has to have left the slack it asked for, measured
+    //     as the formatter measures it: free blocks once the source is written, read
+    //     from the superblock on the disk.
     if let boot2deb_core::size::ImageSize::Fit(slack) =
         boot2deb_core::size::parse_image_size(&prov.image.image_size)?
     {
-        let free = boot2deb_engine::image::inspect::rootfs_free_blocks(&image);
         let required = required_free_blocks(slack, geom.total_blocks, geom.block_size as u64);
         checks.push(Check {
             what: "slack",
-            detail: match &free {
+            detail: match &sb {
                 Err(e) => format!("could not read the free-block count: {e}"),
-                Ok(f) if *f >= required => format!(
-                    "{f} free of {} blocks; the minimum is {required} — honored",
-                    geom.total_blocks
+                Ok(sb) if sb.free_blocks >= required => format!(
+                    "{} free of {} blocks; the minimum is {required} — honored",
+                    sb.free_blocks, sb.blocks
                 ),
-                Ok(f) => format!(
-                    "{f} free blocks, under the {required} that {} requires",
-                    prov.image.image_size
+                Ok(sb) => format!(
+                    "{} free blocks, under the {required} that {} requires",
+                    sb.free_blocks, prov.image.image_size
                 ),
             },
-            ok: free.is_ok_and(|f| f >= required),
+            ok: sb.as_ref().is_ok_and(|sb| sb.free_blocks >= required),
         });
     }
 
-    // 6. The files the rootfs holds are the files its manifest lists, down to every field.
-    //    The manifest was written from this filesystem before it was placed, so any
-    //    difference is a defect in the placement or the record, and nothing is set aside.
-    checks.push(match crate::artifacts::files_manifest(&prov, &dir) {
-        Err(e) => Check {
-            what: "rootfs files",
-            detail: format!("could not read the file manifest: {e}"),
-            ok: false,
-        },
-        Ok(None) => Check {
-            what: "rootfs files",
-            detail: "the provenance records no file manifest".into(),
-            ok: false,
-        },
-        Ok(Some(listed)) => match boot2deb_engine::image::files::manifest_of_image(&image, &dir) {
-            Err(e) => Check {
+    // 11. The boot region holds the bootloader the image stage placed, byte for byte:
+    //     each payload, at its offset, against the digest the stage recorded for the
+    //     file it consumed. A split build's boot image is held to the same record.
+    if let Some(boot) = build.rkbin_boot() {
+        let mut media = vec![(None, &raw)];
+        let boot_raw;
+        if layout == boot2deb_core::model::Layout::Split {
+            boot_raw = match entry
+                .disk_image(ArtifactRole::Boot)
+                .ok_or_else(|| "the build published no boot image".to_string())
+                .and_then(|r| crate::inventory::verified(&dir, r).map_err(|e| e.to_string()))
+                .and_then(|p| RawImage::open(&p, &dir).map_err(|e| e.to_string()))
+            {
+                Ok(r) => Some(r),
+                Err(e) => {
+                    checks.push(Check {
+                        what: "boot image",
+                        detail: e,
+                        ok: false,
+                    });
+                    None
+                }
+            };
+            media = boot_raw.iter().map(|r| (Some("boot image"), r)).collect();
+        }
+        for (medium, raw) in media {
+            checks.push(boot_region_check(
+                raw,
+                entry,
+                medium,
+                &[
+                    (
+                        boot2deb_core::inventory::role::IDBLOADER,
+                        &boot.offsets.idbloader,
+                    ),
+                    (
+                        boot2deb_core::inventory::role::UBOOT_ITB,
+                        &boot.offsets.uboot_itb,
+                    ),
+                ],
+            ));
+        }
+    }
+
+    // 12. The files the rootfs holds are the files its manifest lists, down to every
+    //     field. The manifest was written from this filesystem before it was placed, so
+    //     any difference is a defect in the placement or the record, and nothing is set
+    //     aside.
+    checks.push(
+        match (crate::artifacts::files_manifest(&prov, &dir), &part) {
+            (Err(e), _) => Check {
                 what: "rootfs files",
-                detail: format!("could not walk the rootfs partition: {e}"),
+                detail: format!("could not read the file manifest: {e}"),
                 ok: false,
             },
-            Ok(found) => {
-                let diff = boot2deb_core::files::compare(&listed, &found);
-                Check {
-                    what: "rootfs files",
-                    detail: if diff.is_empty() {
-                        format!(
-                            "{} paths, each as the manifest lists it",
-                            found.entries.len() + 1
-                        )
-                    } else {
-                        format!(
-                            "{} changed, {} added, {} removed against the manifest{}",
-                            diff.changed.len(),
-                            diff.added.len(),
-                            diff.removed.len(),
-                            diff.changed
-                                .first()
-                                .map(|c| format!(", first {} ({})", c.path, c.fields.join(", ")))
-                                .unwrap_or_default()
-                        )
+            (Ok(None), _) => Check {
+                what: "rootfs files",
+                detail: "the provenance records no file manifest".into(),
+                ok: false,
+            },
+            (Ok(Some(_)), Err(e)) => Check {
+                what: "rootfs files",
+                detail: format!("could not find the rootfs partition: {e}"),
+                ok: false,
+            },
+            (Ok(Some(listed)), Ok(part)) => {
+                match boot2deb_engine::image::files::manifest_of_image(&raw, part) {
+                    Err(e) => Check {
+                        what: "rootfs files",
+                        detail: format!("could not walk the rootfs partition: {e}"),
+                        ok: false,
                     },
-                    ok: diff.is_empty(),
+                    Ok(found) => {
+                        let diff = boot2deb_core::files::compare(&listed, &found);
+                        Check {
+                            what: "rootfs files",
+                            detail: if diff.is_empty() {
+                                format!(
+                                    "{} paths, each as the manifest lists it",
+                                    found.entries.len() + 1
+                                )
+                            } else {
+                                format!(
+                                    "{} changed, {} added, {} removed against the manifest{}",
+                                    diff.changed.len(),
+                                    diff.added.len(),
+                                    diff.removed.len(),
+                                    diff.changed
+                                        .first()
+                                        .map(|c| format!(
+                                            ", first {} ({})",
+                                            c.path,
+                                            c.fields.join(", ")
+                                        ))
+                                        .unwrap_or_default()
+                                )
+                            },
+                            ok: diff.is_empty(),
+                        }
+                    }
                 }
             }
         },
-    });
+    );
+    drop(raw);
 
-    // 7. The bytes a build of this lock wrote before, where the recipe records them.
+    // 13. The bytes a build of this lock wrote before, where the recipe records them.
     let committed_path = root.outputs_path(reference.as_str())?;
     if committed_path.is_file() {
         let committed = boot2deb_core::outputs::CommittedOutputs::from_toml_str(
@@ -402,10 +691,10 @@ fn verify_point(
         checks.push(committed_check(&committed, host, &found));
     }
 
-    // 8. Every package the build recorded as local-repository input holds to the
-    //    package rules — the same check that admitted it, run again on the bytes that
-    //    are there now. A build that compiles nothing records no package, and its
-    //    every package came from the mirror.
+    // 14. Every package the build recorded as local-repository input holds to the
+    //     package rules — the same check that admitted it, run again on the bytes that
+    //     are there now. A build that compiles nothing records no package, and its
+    //     every package came from the mirror.
     if build.compiles_from_source() {
         checks.push(match crate::artifacts::ledger_debs(&dir) {
             Err(e) => Check {
@@ -436,6 +725,72 @@ fn verify_point(
         artifact: Some(image),
         checks,
     })
+}
+
+/// The boot-region check of one medium: each payload the image stage consumed, read at
+/// its offset for its recorded length, holds the recorded digest. `medium` names a split
+/// build's boot image; `None` is the image itself.
+fn boot_region_check(
+    raw: &RawImage,
+    entry: &boot2deb_core::inventory::StageEntry,
+    medium: Option<&str>,
+    payloads: &[(&str, &String)],
+) -> Check {
+    let what = if medium.is_some() {
+        "boot image region"
+    } else {
+        "boot region"
+    };
+    let mut held = Vec::new();
+    for (name, offset) in payloads {
+        let Some(input) = entry.input(name) else {
+            return Check {
+                what,
+                detail: format!("the image stage recorded no {name} it placed"),
+                ok: false,
+            };
+        };
+        let offset = match boot2deb_core::size::parse_size(offset) {
+            Ok(o) => o,
+            Err(e) => {
+                return Check {
+                    what,
+                    detail: format!("the {name} offset {offset:?} does not parse: {e}"),
+                    ok: false,
+                }
+            }
+        };
+        match raw.sha256_at(offset, input.size) {
+            Ok(sha) if sha == input.sha256 => {
+                held.push(format!("{} at {offset}", input.file));
+            }
+            Ok(sha) => {
+                return Check {
+                    what,
+                    detail: format!(
+                        "the {input_size} bytes at {offset} hash to {sha}, not to the {} \
+                         ({}) the image stage placed",
+                        input.file,
+                        input.sha256,
+                        input_size = input.size
+                    ),
+                    ok: false,
+                }
+            }
+            Err(e) => {
+                return Check {
+                    what,
+                    detail: e.to_string(),
+                    ok: false,
+                }
+            }
+        }
+    }
+    Check {
+        what,
+        detail: format!("holds {}", held.join(" and ")),
+        ok: true,
+    }
 }
 
 /// The fewest free blocks a fitted filesystem of `total_blocks` must keep to honor
@@ -496,29 +851,6 @@ fn build_record_check(dir: &Path, stem: &str) -> Check {
             ok: false,
         },
     }
-}
-
-/// The image artifact to read: the raw `.img` if the build kept it, else the compressed
-/// form. The raw image is read in place, so keeping it saves the file check a
-/// decompression.
-fn find_image(dir: &Path, stem: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let candidates = [
-        format!("{stem}.img"),
-        format!("{stem}.img.xz"),
-        format!("{stem}.img.gz"),
-    ];
-    for name in &candidates {
-        let path = dir.join(name);
-        if path.is_file() {
-            return Ok(path);
-        }
-    }
-    Err(format!(
-        "no image in {} (looked for {}) — run `boot2deb build` first",
-        dir.display(),
-        candidates.join(", ")
-    )
-    .into())
 }
 
 /// The files `committed` names for `host_arch`, as they are in `dir`: each one present,

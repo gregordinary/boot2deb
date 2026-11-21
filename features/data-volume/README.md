@@ -56,14 +56,25 @@ On first boot, per volume, it stops at the first step that applies:
 
 1. **Adopt** — a filesystem already has the label. Mount it. **Never format.**
    This is the path every boot of a reflashed board takes.
-2. **Create** — the matched disk is genuinely blank *and* `create = "if-blank"`.
+2. **Create** — the matched disk is proven blank *and* `create = "if-blank"`.
    Write a GPT with one partition, `mkfs` with the label, mount.
 3. **Refuse** — anything else. Log what was found and leave the disk alone.
 
-"Genuinely blank" is three independent checks — no partition table, no filesystem
-signature, and no partitions the kernel already sees — because the cost of a false
-positive is somebody's data. The disk holding root is never a candidate whatever
-`match` says.
+"Proven blank" is a set of facts a tool reported before the first write, because
+the cost of a false positive is somebody's data. A query that fails, prints nothing,
+or needs a tool the image lacks is a refusal, never a blank:
+
+- `match` names exactly one writable whole disk: `lsblk` reports `TYPE=disk` and
+  `RO=0`, and sysfs has no `partition` attribute for its device number.
+- The disk is not under root. The hook walks root's chain of devices through every
+  device-mapper, md or LUKS layer down to the disks, and compares device numbers,
+  not names. When that chain cannot be walked, no volume is created on that boot.
+- Nothing is on or above it: `lsblk` lists the disk alone and unmounted, and nothing
+  holds it.
+- Its first and last MiB read back.
+- `wipefs` lists no signature: no partition table, no filesystem, no RAID or LUKS
+  header. `wipefs` reports every signature it finds, colliding ones included, and
+  fails outright on a device it cannot open.
 
 Step 3 is the point of the whole feature. A volume this image did not create is
 evidence of data someone wants. Set `create = "never"` to remove even the
@@ -72,8 +83,11 @@ blank-disk case and prepare the volume by hand.
 ## Re-verifying the refusal
 
 The claim worth testing is the negative one, so the test asserts on whether
-`sfdisk`/`mkfs.ext4` were reached at all rather than on log text. It stubs the
-block tools and touches no real device:
+`sfdisk`/`mkfs.ext4` were reached at all rather than on log text. Every refusing
+case changes one fact about a world in which the hook does create the volume, and
+covers a failed or empty probe, an absent tool, a partition or device-mapper node
+named as the disk, and a root disk under LUKS. It stubs the block tools and touches
+no real device, and `cargo test` runs it:
 
 ```sh
 sh features/data-volume/test-ladder.sh    # from the boot2deb root

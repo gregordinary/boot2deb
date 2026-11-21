@@ -16,7 +16,7 @@
 //! ([`Source`]):
 //!
 //! - A git source, against the refs its remote advertises.
-//! - A vendored rkbin blob, against its upstream tree directory.
+//! - An rkbin blob, against the files of its upstream directory at the head of its ref.
 //! - A pool `.deb`, against its pool directory's index.
 //! - A .NET SDK, against its channel's releases.
 //!
@@ -64,11 +64,14 @@ enum Source {
         /// The exact pinned commit.
         commit: String,
     },
-    /// A vendored firmware blob, compared against the files of its upstream tree
-    /// directory (`[rkbin.upstream]`).
+    /// A firmware blob fetched from a git repository, compared against the files of
+    /// the directory it lives in at the head of the upstream's ref
+    /// (`[rkbin.upstream]`).
     TreeFile {
         /// The upstream repository.
         url: String,
+        /// The branch whose head is listed.
+        reference: String,
         /// The directory in it that holds the blobs.
         dir: String,
         /// The pinned file name.
@@ -132,7 +135,12 @@ impl Source {
     fn listing(&self) -> Option<Listing> {
         match self {
             Source::Git { url, .. } => Some(Listing::Refs(url.clone())),
-            Source::TreeFile { url, dir, .. } => Some(Listing::Tree(url.clone(), dir.clone())),
+            Source::TreeFile {
+                url,
+                reference,
+                dir,
+                ..
+            } => Some(Listing::Tree(url.clone(), reference.clone(), dir.clone())),
             Source::PoolDeb { url } => Some(Listing::Index(dir_of(url).to_string())),
             Source::DotnetSdk { version } => dotnet_channel(version).map(Listing::Releases),
             Source::Unsurveyed { .. } => None,
@@ -145,8 +153,9 @@ impl Source {
 enum Listing {
     /// A git remote's ref advertisement.
     Refs(String),
-    /// The files of one directory of a git repository's default branch.
-    Tree(String, String),
+    /// The files of one directory at the head of a git repository's branch: the URL,
+    /// the branch, the directory.
+    Tree(String, String, String),
     /// An HTTP directory index, by the directory's URL.
     Index(String),
     /// A .NET channel's release metadata, by channel (`10.0`).
@@ -183,8 +192,8 @@ fn dir_of(url: &str) -> &str {
 fn fetch(listing: &Listing) -> std::result::Result<Fetched, String> {
     match listing {
         Listing::Refs(url) => advertised_refs(url).map(Fetched::Refs),
-        Listing::Tree(url, dir) => {
-            tree_listing(url, dir).map(|(commit, names)| Fetched::Tree(commit, names))
+        Listing::Tree(url, reference, dir) => {
+            tree_listing(url, reference, dir).map(|(commit, names)| Fetched::Tree(commit, names))
         }
         Listing::Index(dir) => {
             let body = boot2deb_engine::netfetch::fetch_bounded(
@@ -353,11 +362,11 @@ fn collect(root: &ConfigRoot, recipe: &str) -> Result<Vec<Pin>> {
             )
         })
         .collect();
-    // The vendored firmware the bootloader is built with, surveyed against the upstream
-    // directory the SoC layer names for it.
+    // The rkbin firmware the bootloader is built with, surveyed against the upstream
+    // directory the SoC layer fetches it from.
     if let (Some(boot), Some(blobs)) = (build.rkbin_boot(), &lock.blobs) {
         let named = [
-            ("atf", Some(&blobs.atf)),
+            ("atf", blobs.atf.as_ref()),
             ("tpl", Some(&blobs.tpl)),
             ("bl32", blobs.bl32.as_ref()),
         ];
@@ -365,16 +374,12 @@ fn collect(root: &ConfigRoot, recipe: &str) -> Result<Vec<Pin>> {
             let Some((file, _)) = blob.and_then(|b| boot2deb_engine::blobs::parse_pin(b)) else {
                 continue;
             };
-            let source = match &boot.rkbin.upstream {
-                Some(up) => Source::TreeFile {
-                    url: up.git.clone(),
-                    dir: up.dir.clone(),
-                    file: file.to_string(),
-                },
-                None => Source::Unsurveyed {
-                    pinned: file.to_string(),
-                    why: "no layer declares an [rkbin.upstream] to list newer blobs from".into(),
-                },
+            let up = &boot.rkbin.upstream;
+            let source = Source::TreeFile {
+                url: up.git.clone(),
+                reference: up.git_ref.clone(),
+                dir: up.dir.clone(),
+                file: file.to_string(),
             };
             out.push(pin(format!("rkbin:{role}"), source));
         }
@@ -539,8 +544,8 @@ fn print_summary(rows: &[Row], unreadable: &[(String, String)]) {
     }
     if behind_kind("tree-file") {
         println!(
-            "a newer rkbin blob is taken by vendoring it under blobs/<soc>/ and naming it in \
-             the layer's [rkbin]; `boot2deb update` then pins its sha256."
+            "a newer rkbin blob is taken by naming it in the layer's [rkbin]; `boot2deb \
+             update` then pins it at the head of rkbin with its sha256."
         );
     }
     if behind_kind("pool-deb") {
@@ -756,6 +761,7 @@ mod tests {
     fn pins_sharing_an_upstream_share_one_listing() {
         let tree = |file: &str| Source::TreeFile {
             url: "https://example.invalid/rkbin.git".into(),
+            reference: "master".into(),
             dir: "bin/rk35".into(),
             file: file.into(),
         };
@@ -788,6 +794,7 @@ mod tests {
     fn a_pin_is_judged_against_the_listing_of_its_own_kind() {
         let blob = Source::TreeFile {
             url: "u".into(),
+            reference: "master".into(),
             dir: "bin/rk35".into(),
             file: "rk3588_bl31_v1.51.elf".into(),
         };

@@ -1,4 +1,4 @@
-//! `update`: resolve upstream refs, hash the blobs, and write the recipe's `.lock`.
+//! `update`: resolve upstream refs, pin the rkbin blobs, and write the recipe's `.lock`.
 //!
 //! The sole path that consults upstream, since `build` reads only the lock. An
 //! omitted per-tree ref flag re-pins the config layer's declared ref, so an authored
@@ -9,7 +9,9 @@
 //! ephemeral/unadvertised pin is flagged (advisory — it never blocks the write).
 
 use crate::args::UpdateArgs;
-use crate::config::{default_patches_checkout, extra_debs_store, preflight_config, source_axes};
+use crate::config::{
+    default_patches_checkout, extra_debs_store, kernel_config_sha256, preflight_config, source_axes,
+};
 use crate::render::{print_event_at, short, Verbosity};
 use boot2deb_core::lock::NugetPin;
 use boot2deb_core::model::{App, AppBuild, Overrides, ResolvedBuild};
@@ -238,6 +240,20 @@ pub(crate) fn run(
             .map(|u| u.reference.as_str()),
         build.rkbin_boot().map(|b| b.uboot_ref.as_str()),
     );
+    // TF-A, likewise: only a build whose BL31 provider is `tfa` has a ref, and the SoC
+    // declares it, so a constraint bump reaches every board on the SoC that selects it.
+    let tfa_ref = take(
+        &mut bumps,
+        "tf-a",
+        args.tfa_ref,
+        prev.as_ref()
+            .and_then(|l| l.tfa.as_ref())
+            .map(|t| t.reference.as_str()),
+        build
+            .rkbin_boot()
+            .and_then(|b| b.bl31.tfa())
+            .map(|t| t.git_ref.as_str()),
+    );
     // Media-accel source refs are pinned only when the recipe builds the transcode
     // stack (its resolved build contains the sources). A base build leaves them empty —
     // `resolve_lock` never reads a ref without a matching source, and the lock omits
@@ -302,11 +318,6 @@ pub(crate) fn run(
             (k.name.clone(), reference)
         })
         .collect();
-    let blobs_dir = args.blobs_dir.clone().unwrap_or_else(|| {
-        let rel = format!("blobs/{}", build.soc.as_str());
-        root.find_asset(&rel)
-            .unwrap_or_else(|| root.path().join(rel))
-    });
     // The `patches` checkout whose HEAD pins the series: the explicit flag, else the
     // config root's sibling — anchored to `--root` so the same tree is read whichever
     // directory `update` runs from.
@@ -330,28 +341,36 @@ pub(crate) fn run(
         Some(resolver) => resolver,
         None => &NoDotnetApps,
     };
+    let kernel_config = kernel_config_sha256(root, &build)?;
     let opts = pins::UpdateOptions {
         kernel_ref: &kernel_ref,
         uboot_ref: &uboot_ref,
+        tfa_ref: &tfa_ref,
         userspace_refs: &userspace_refs,
         ffmpeg_base_ref: &ffmpeg_base_ref,
         ffmpeg_rockchip_ref: &ffmpeg_rockchip_ref,
         kmod_refs: &kmod_refs,
-        blobs_dir: &blobs_dir,
+        previous_blobs: prev.as_ref().and_then(|l| l.blobs.as_ref()),
         patches_path: &patches_path,
         rootfs_manifest: &manifest,
         source_date_epoch: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|e| format!("the system clock reads before 1970: {e}"))?
             .as_secs(),
+        kernel_config_sha256: kernel_config.as_deref(),
         nuget,
     };
     let mut lock = pins::resolve_lock(&build, &opts)?;
     // The rootfs epoch is this update's time only when a pin moved. An update that
     // re-resolves to the same pins keeps the epoch it had, so it neither changes the
     // times a rebuild stamps nor invalidates the rootfs cache.
+    // The kernel and u-boot package revisions follow the lock this replaces: kept while
+    // each is built from the same inputs, moved on when anything that reaches it moved
+    // under the same upstream version.
     if let Some(prev) = &prev {
         lock.keep_source_date_epoch(prev);
+        lock.carry_kernel_revision(prev);
+        lock.carry_uboot_revision(prev);
     }
     // Fetch + verify + store each pre-built extra_deb before committing the lock, so
     // a dead URL, a missing file, or a wrong hash fails now rather than at the next
@@ -377,7 +396,13 @@ pub(crate) fn run(
     // Only the pins this build actually has are printed. A row for an absent one
     // would claim a dependency the lock deliberately does not record.
     match (&lock.kernel, build.image.as_ref().map(|i| &i.kernel)) {
-        (Some(k), _) => println!("  kernel   {} {} {}", k.id, k.reference, short(&k.commit)),
+        (Some(k), _) => println!(
+            "  kernel   {} {} {} (revision {})",
+            k.id,
+            k.reference,
+            short(&k.commit),
+            k.revision
+        ),
         (None, Some(k)) => println!(
             "  kernel   {} (distro package — version pinned in the package manifest)",
             k.id()
@@ -385,7 +410,12 @@ pub(crate) fn run(
         (None, None) => println!("  kernel   (none — u-boot-only build)"),
     }
     match &lock.uboot {
-        Some(u) => println!("  u-boot   {} {}", u.reference, short(&u.commit)),
+        Some(u) => println!(
+            "  u-boot   {} {} (revision {})",
+            u.reference,
+            short(&u.commit),
+            u.revision
+        ),
         None => println!("  u-boot   (none — this board's firmware is its own)"),
     }
     if let Some(p) = &lock.uboot_patches {
@@ -394,6 +424,9 @@ pub(crate) fn run(
             p.series.join(", "),
             short(&p.commit)
         );
+    }
+    if let Some(t) = &lock.tfa {
+        println!("  tf-a     {} {}", t.reference, short(&t.commit));
     }
     // A no-patch kernel has no series to report; printing an empty row would imply
     // one exists.
@@ -444,7 +477,10 @@ pub(crate) fn run(
         None => println!("  rootfs   (none — u-boot-only build)"),
     }
     if let Some(blobs) = &lock.blobs {
-        println!("  blob atf {}", blobs.atf);
+        println!("  rkbin    {} {}", blobs.reference, short(&blobs.commit));
+        if let Some(atf) = &blobs.atf {
+            println!("  blob atf {atf}");
+        }
         println!("  blob tpl {}", blobs.tpl);
         if let Some(bl32) = &blobs.bl32 {
             println!("  blob bl32 {bl32}");

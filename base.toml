@@ -53,24 +53,27 @@ locales_generate = [
 # where it sits; `timedatectl set-timezone` changes it on a running image.
 timezone = "UTC"
 
-# The NTP servers systemd-timesyncd reaches for first, as hostnames or bare IPs.
+# The NTP servers the image's time client reaches for first, as hostnames or bare IPs.
+# The distro layer names the client: systemd-timesyncd on Debian, chrony on Ubuntu.
 #
-# Empty is the right default and writes no configuration at all: Debian compiles its
-# own pool into systemd as FallbackNTP, which is correct on any network with a route
-# out and assumes nothing about where a board is plugged in. Naming a server here does
-# not replace that pool -- it sets NTP=, which timesyncd prefers and falls back from --
-# so a value below is a preference, not a commitment, and an image configured for one
-# network still finds the time on another.
+# Empty is the right default and writes no configuration at all. Each distribution
+# ships servers of its own, which are correct on any network with a route out and
+# assume nothing about where a board is plugged in: Debian compiles its pool into
+# systemd as FallbackNTP, and Ubuntu's chrony asks its NTS pools. Naming a server here
+# does not replace those. On timesyncd it sets NTP=, which timesyncd prefers and falls
+# back from. On chrony it adds a `server` line that chrony prefers and trusts beside
+# Ubuntu's pools, so it sets the clock on a network where those pools cannot be
+# reached. Either way a value below is a preference, not a commitment, and an image
+# configured for one network still finds the time on another.
 #
-# Worth setting for a board deployed on a network that cannot reach the public pool at
-# all, and worth setting for one that can: a time server on the LAN answers in about a
+# Worth setting for a board deployed on a network that cannot reach the public servers
+# at all, and worth setting for one that can: a time server on the LAN answers in about a
 # millisecond, which shortens the window after boot in which the clock is still wrong.
 #
 # None of the boards here ships a battery-backed RTC, so every one of them boots with a
-# clock restored from the mtime of /var/lib/systemd/timesync/clock -- as stale as its
-# last power-off -- until NTP corrects it. Images hold the maintenance timers behind
-# time-sync.target until the clock is synchronized (see the systemd-time-wait-sync drop-in in
-# base/overlay), so this setting decides how long that wait is, not whether it happens.
+# stale clock until NTP corrects it. Images hold the maintenance timers behind
+# time-sync.target until the clock is synchronized, for 45 seconds at most, so this
+# setting decides how long that wait is, not whether it happens.
 ntp_servers = []
 
 # --- Account and access -------------------------------------------------------
@@ -173,11 +176,17 @@ groups = ["video", "render", "adm"]
 # *Recommended* by libcurl, so it reaches the image only by being named here — and
 # without it, curl and wget cannot fetch an https URL at all.
 packages = [
-    # System services. The initramfs generator, the DHCP client and the time daemon
-    # differ between distributions and come from the distro layer.
+    # System services. The initramfs generator, the network configuration and the time
+    # client differ between distributions and come from the distro layer.
     "dbus",
     "libpam-systemd",
     "sudo",
+
+    # The partitioner boot2deb's first boot grows the root partition with: sfdisk, from
+    # fdisk. Debian ranks fdisk `important` and Ubuntu `optional`, so only naming it
+    # puts it on every image. The rest of that step, resize2fs, partx, lsblk and
+    # findmnt, comes from e2fsprogs and util-linux, which are `required` on both.
+    "fdisk",
 
     # Remote access, both directions. The server's `Depends` already pull
     # openssh-sftp-server, so scp/sftp *to* a board works without the client; the

@@ -3,7 +3,7 @@
 A board that compiles its own kernel is pinned to an exact tag, and that tag goes stale.
 This tutorial moves the Turing RK1 forward, in the two shapes that job takes:
 
-- **Within the track** — `v7.3` to a later `7.3.y` point release. The patch series
+- **Within the track** — `v7.3.3` to a later `7.3.y` point release. The patch series
   already claims the version, so this is a re-pin and a rebuild.
 - **Across a version boundary** — 7.3 to 7.4. The series makes no claim about 7.4 yet, so
   the first move is *measuring* whether it would survive, without changing a pin.
@@ -32,12 +32,12 @@ new definition is also one line there.
 ## Shape 1: within the track
 
 `kernels/rk3588-mainline-7.3.toml` tracks `7.3.y`, and `series/rk3588-accel.toml` declares
-`applies_to_kernel = ">=7.3, <7.4"`. A later 7.3 point release is inside both, so if the
+`applies_to_kernel = ">=7.3.4, <7.4"`. A later 7.3 point release is inside both, so if the
 series holds, nothing in the config or the series changes — only the pin.
 
 ```sh
 # 1. Re-pin. This is the only command that consults upstream.
-boot2deb update turing-rk1/forky --kernel-ref v7.3.1
+boot2deb update turing-rk1/forky --kernel-ref v7.3.4
 
 # 2. Does the series still apply to the new tree? (--kernel-src makes the fetch
 #    near-instant if you have a checkout; omit it and the tree is auto-fetched.)
@@ -60,7 +60,7 @@ so:
 ```
   warning: recipe 'turing-rk1/forky' claims support = "validated" as of 2026-07-16, but
   this update moved its pins:
-    kernel v7.3 (c03c1a14507d) -> v7.3.1 (…)
+    kernel v7.3.3 (d50d994bffa3) -> v7.3.4 (…)
   that claim now describes a combination nothing has booted — re-validate on hardware and
   update the date, or set status = "expected" until you do
   note: this re-pin changes the generated support matrix — regenerate it:
@@ -86,7 +86,7 @@ the evidence the claim is re-earned or retired on. See
 [Comparing two build points](../reference/cli.md#comparing-two-build-points).
 
 If you would rather not touch the lock until you know the answer, step 2 can come first.
-`verify-patches turing-rk1/forky --kernel v7.3.1 --kernel-path ../linux` measures a
+`verify-patches turing-rk1/forky --kernel v7.3.4 --kernel-path ../linux` measures a
 version the lock does not name and leaves the lock alone. That is the [candidate
 path](#step-2-measure-and-change-nothing) below, and it works inside the envelope as well
 as outside it.

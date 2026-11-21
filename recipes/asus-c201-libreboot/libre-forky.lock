@@ -4,8 +4,10 @@
 [kernel]
 id = "rk3288-libre-7.3"
 source = "git://linux-libre.fsfla.org/releases.git"
-ref = "sources/v7.3-gnu"
-commit = "e2aac1c6a442f8bedc5d94c9ed73f11504b35980"
+ref = "sources/v7.3.1-gnu"
+commit = "3f87a38586c2598182a5c6b9ec41baa72891fa1f"
+revision = 1
+config_sha256 = "6aaace0ae5da6791cb466371512a2e3f77fa90de336b446c5d217c1760ac8825"
 
 [patches]
 series = ["rk3288-fixes"]
@@ -17,4 +19,4 @@ commit = "339beaf35d5a81f861e4a2229365fb8f07ade50c"
 distro = "debian"
 suite = "forky"
 manifest = "libre-forky.pkgs.lock"
-source_date_epoch = 1792427930
+source_date_epoch = 1793659760

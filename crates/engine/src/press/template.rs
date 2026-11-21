@@ -363,10 +363,12 @@ mod tests {
                 soc: "rk3588".into(),
                 boot_method: "rockchip-rkbin".into(),
                 board: None,
+                bl31: Some("rkbin".into()),
                 distro: "debian".into(),
                 suite: "forky".into(),
                 features: Vec::new(),
                 layout: "combined".into(),
+                loader: Some("extlinux".into()),
                 hostname: "rk1-03".into(),
             },
             kernel: IdentityKernel {

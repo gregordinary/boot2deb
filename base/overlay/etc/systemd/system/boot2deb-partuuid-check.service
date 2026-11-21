@@ -1,0 +1,16 @@
+[Unit]
+Description=boot2deb: warn when another disk shares a PARTUUID this system mounts by
+# Two disks written from one image share their root PARTUUID, and a boot mounts
+# whichever it finds first. This names them in the kernel log and fails, which
+# leaves the system degraded rather than stopping it: the boot that got here works.
+# After local-fs so the disks present at boot have been seen. One attached later
+# is caught by the selftest's unique-partuuid check.
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/boot2deb/partuuid-check --log
+
+[Install]
+WantedBy=multi-user.target

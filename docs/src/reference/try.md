@@ -32,7 +32,7 @@ One run is two boots of the same disk, and each boot must pass all of:
 
 1. systemd reaches the `running` state — no unit in `systemctl --failed`.
 2. The image's account logs in on the serial console with the generated
-   first-boot password from the provenance manifest. The first login walks the
+   first-boot password from the image's credentials file. The first login walks the
    forced password change the image ships with. That the whole conversation
    works *is* the account assertion, not a side effect of it.
 3. `first-boot` ran to completion and wrote its stamp — and, on the second
@@ -47,27 +47,71 @@ One run is two boots of the same disk, and each boot must pass all of:
 `try` exits non-zero on the first assertion that fails, with the guest's
 console tail in the error.
 
+## An `efi` image boots through firmware first
+
+An image whose [loader](config-model.md#the-loader-is-its-own-axis) is `efi` gets one
+more boot, before the two above. The guest gets the disk and the distribution's UEFI
+firmware for `-M virt`: edk2's ArmVirtQemu, from the `qemu-efi-aarch64` package of the
+image's own archive. It gets nothing else. There is no kernel on QEMU's command line, no
+boot entry in the firmware's variables, and no network to try first. It passes when:
+
+1. The firmware finds GRUB at the removable-media path on the image's EFI system
+   partition, and GRUB reaches its menu. GRUB draws the menu only once its core image
+   has found `/boot/grub` on the rootfs partition beside it and read `grub.cfg` there.
+2. The menu's default entry loads the image's own kernel and initramfs, with no
+   `error:` from GRUB.
+3. The kernel GRUB handed off to is running. The QEMU monitor reads the CPU's program
+   counter, which arm64 Linux moves to the upper half of the address space. A CPU
+   already in user mode passes too. The firmware, GRUB and the kernel's EFI stub all run
+   from the lower half.
+
+```
+try nanopi-r6s/efi-forky: PASS
+  UEFI boot    firmware -> GRUB (removable path) -> Linux 7.3.4-1-arm64 running (PC=ffffa71a7d2644b8 EL1h)
+  first boot   running, first-boot completed, selftest: 8 ok, 9 not applicable.
+  second boot  running, first-boot did not re-run, selftest: 8 ok, 9 not applicable.
+```
+
+The guest is stopped as soon as the kernel is seen running, before it could mount
+anything. The userland boots that follow therefore start from the disk exactly as built.
+The firmware keeps no variable between boots, as a board's firmware keeps none. The image
+has to boot from the removable-media path alone, as it does on the board.
+
+The two userland boots then mask the EFI system partition's mount. Its filesystem
+driver is a module of the fixture kernel's (see below), which the image's
+`/lib/modules`, the board kernel's, cannot provide. The selftest reports the
+partition's files not applicable in userland mode, since this phase reads them through
+the firmware instead.
+
 ## What it deliberately does not test
 
 The **board**. The guest machine is `-M virt`: no RK3588, no panel, no codec.
 The hardware half of the selftest runs on the device, not here.
 
-The **boot path**, too. QEMU loads the kernel directly, so u-boot, extlinux, and
-the depthcharge signing are exercised on hardware only. `try` replaces a
-flash-plus-serial-console cycle for userland faults, and replaces nothing else.
+The board's **firmware**. u-boot, the extlinux menu it reads, and the depthcharge
+signing are exercised on hardware only. Under the `efi` loader the firmware is
+ArmVirtQemu rather than the board's u-boot. The test covers the image's half of the
+UEFI contract: the partition, the loader at the removable path, the menu, and the
+kernel. `try` replaces a flash-plus-serial-console cycle for those faults
+and for userland ones, and replaces nothing else.
 
-The shipped kernel is not booted either. It is configured from the board's
-fragments and has no reason to include virtio drivers. Adding them would change
-the shipped kernel to serve the test, which is backwards.
+The shipped kernel does not run the userland boots. It is configured from the board's
+fragments, for the board's console and devices, and nothing guarantees it reaches a
+login under `-M virt`. Changing it to serve the test would change what ships, which is
+backwards. The UEFI phase runs it only as far as the hand-off.
 
-The guest boots the **suite's own generic kernel** (`linux-image-arm64` /
-`linux-image-armmp`), fetched and installed through the same provisioner every
-root here is built with. Its initramfs is built by `initramfs-tools` inside a
-target-arch root `try` provisions for the harvest and discards afterwards. The
-kernel is a fixture, and the userland is what is under test. For a
-`distro-package` kernel build the two coincide, and `try` says so. The pair is
-cached under the recipe's work dir, and `--refresh-fixture` re-harvests it when
-the suite's kernel moves.
+The guest boots the **suite's own generic kernel**, named per architecture by the
+distro layer's `virt_kernels` table. That is `linux-image-arm64` or
+`linux-image-armmp` on Debian, and `linux-image-virtual` on Ubuntu. An architecture
+the table leaves out has no `try`. The kernel is fetched and installed through the
+same provisioner every root here is built with.
+
+Its initramfs is built by `initramfs-tools` inside a target-arch root `try`
+provisions for the harvest and discards afterwards. The kernel is a fixture, and the
+userland is what is under test. For a `distro-package` kernel build the two coincide,
+and `try` says so. The UEFI firmware an `efi` image needs is harvested from the same
+root. The fixture is cached under the recipe's work dir, and `--refresh-fixture`
+re-harvests it when the suite's kernel or firmware moves.
 
 ## Mechanics worth knowing
 

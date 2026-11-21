@@ -16,7 +16,7 @@ build would quietly use a config tree you did not intend, which is exactly what 
 overlay exists to make explicit.
 
 An overlay has the **same directory layout** as the shipped root. That is any subset of
-`devices/`, `socs/`, `arches/`, `boot-methods/`, `kernels/`, `features/`, `recipes/`,
+`devices/`, `socs/`, `arches/`, `boot-methods/`, `loaders/`, `kernels/`, `features/`, `recipes/`,
 plus `fragments/`, `blobs/`, and per-layer `overlay/` trees. You ship only the files you
 add or change, and everything else resolves from the shipped tree underneath.
 
@@ -80,16 +80,25 @@ image. Its modes are normalized to **git's own file model** on the way in.
 Directories become `0755`, and a file becomes `0755` if its executable bit is set and
 `0644` otherwise. Symlinks are untouched.
 
+A symlink in a tree is a path on the target system, so the build never resolves one on
+the build host. The files the build generates itself (`/etc/fstab`, `/etc/hostname` and
+the rest) replace a file or symlink a layer placed at the same path, without following
+it. A symlink or a file where a generated file needs a directory fails the build. The
+error names both paths, and the generated file is never sent somewhere else.
+
 That is the identity function on everything a git tree can express, since git records
 exactly `100644` and `100755`, and no directory mode at all. It discards the one thing a
 git tree cannot express: your umask at checkout time. Set the executable bit on a hook
 and it stays executable in the image. Everything else about the mode is not yours to
 choose here.
 
-If a file needs a mode outside those two, an overlay tree is the wrong place for it. A
-git checkout cannot preserve that mode to begin with. A `0440` sudoers drop-in and a `0700`
-home are the usual cases. Ship it from a first-boot hook, which runs as root on the
-board.
+One directory is narrowed further. Every file under `/etc/netplan` becomes `0600`,
+because netplan warns on every run about a configuration file anyone else can read.
+
+If a file needs any other mode outside those two, an overlay tree is the wrong place for
+it. A git checkout cannot preserve that mode to begin with. A `0440` sudoers drop-in and
+a `0700` home are the usual cases. Ship it from a first-boot hook, which runs as root on
+the board.
 
 ## Locks in an overlay
 

@@ -12,13 +12,14 @@
 //! 33 sectors. The actual usable range is re-validated by the `gpt` crate when the
 //! partition is added.
 //!
-//! What sits ahead of the rootfs is the boot method's business, and the two shapes
+//! What sits ahead of the partitions is the boot method's business, and the two shapes
 //! are genuinely different. `rockchip-rkbin` writes two payloads into a *raw gap*
 //! outside any partition. `depthcharge` puts one signed payload in a *GPT
 //! partition* of its own.
 //!
-//! [`BootGeometry`] contains that difference. Everything after it is shared: the
-//! rootfs partition, the filesystem, and the backup table.
+//! [`BootGeometry`] contains that difference. Everything after it is shared: the EFI
+//! system partition where the loader has one ([`EspRegion`]), the rootfs partition,
+//! the filesystem, and the backup table.
 
 use crate::error::EngineError;
 use boot2deb_core::chromeos::{kpart_flags, SPARE_KPART_FLAGS};
@@ -83,6 +84,30 @@ pub(crate) struct KpartSlot {
     pub(crate) flags: u64,
 }
 
+/// The EFI system partition's placement: at the boot method's partition offset, ahead
+/// of the rootfs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct EspRegion {
+    /// Partition start byte offset: the boot method's partition offset, a multiple of
+    /// [`SECTOR`] and of [`EXT4_BLOCK`].
+    pub(crate) offset: u64,
+    /// Partition length in bytes: the loader's `esp_size`, a whole number of MiB by
+    /// resolution.
+    pub(crate) bytes: u64,
+}
+
+impl EspRegion {
+    /// Partition first LBA.
+    pub(crate) fn first_lba(&self) -> u64 {
+        self.offset / SECTOR
+    }
+
+    /// Partition length in sectors.
+    pub(crate) fn length_lba(&self) -> u64 {
+        self.bytes / SECTOR
+    }
+}
+
 /// The resolved byte/LBA layout of one image.
 ///
 /// All offsets are byte counts from the start of the medium. `rootfs_first_lba`
@@ -100,6 +125,9 @@ pub(crate) struct Geometry {
     /// Seed partition start byte offset (see [`BootRegion::seed_off`]). The
     /// partition is exactly [`SEED_PARTITION_BYTES`] long.
     pub(crate) seed_off: u64,
+    /// The EFI system partition, under a loader that has one (see
+    /// [`BootRegion::esp`]).
+    pub(crate) esp: Option<EspRegion>,
     /// Rootfs partition start byte offset.
     pub(crate) rootfs_off: u64,
     /// Rootfs partition first LBA (`rootfs_off / SECTOR`).
@@ -134,69 +162,100 @@ pub(crate) struct BootRegion {
     /// kernel slots, whose 12 MiB offset leaves the room; the slots' own end
     /// still abuts the rootfs exactly.
     pub(crate) seed_off: u64,
+    /// The EFI system partition, under the `efi` loader: it starts at the boot method's
+    /// partition offset, and the rootfs starts where it ends.
+    pub(crate) esp: Option<EspRegion>,
     /// Rootfs partition start byte offset — a multiple of both [`SECTOR`] and
     /// [`EXT4_BLOCK`], and at or past the byte the boot region ends at.
     pub(crate) rootfs_off: u64,
 }
 
 impl BootRegion {
-    /// Resolve the head of the disk from the resolved boot configuration, validating
+    /// Resolve the head of the disk from the resolved boot configuration and the EFI
+    /// system partition's size (`None` under a loader with no partition), validating
     /// every invariant that does not answer to the image's size: the offsets parse, they
     /// are aligned, they increase, they clear the primary GPT, and whatever the boot
-    /// method occupies ends at or before the rootfs begins.
+    /// method occupies ends at or before the partitions begin.
     ///
     /// # Errors
     ///
     /// [`EngineError::ImageGeometry`] on any malformed value, bad ordering, or
     /// misalignment.
-    pub(crate) fn resolve(boot: &ResolvedBoot) -> Result<BootRegion, EngineError> {
-        let rootfs_off = parse_size(boot.rootfs_offset())?;
+    pub(crate) fn resolve(
+        boot: &ResolvedBoot,
+        esp_bytes: Option<u64>,
+    ) -> Result<BootRegion, EngineError> {
+        let partition_off = parse_size(boot.partition_offset())?;
         let (boot_geom, boot_end) = match boot {
-            ResolvedBoot::RockchipRkbin(b) => Self::raw_gap(&b.offsets, rootfs_off)?,
+            ResolvedBoot::RockchipRkbin(b) => Self::raw_gap(&b.offsets, partition_off)?,
             ResolvedBoot::Depthcharge(b) => Self::kpart(b)?,
         };
 
         // Partitions and the GPT are sector-addressed.
-        if !rootfs_off.is_multiple_of(SECTOR) {
+        if !partition_off.is_multiple_of(SECTOR) {
             return Err(geom(format!(
-                "rootfs offset ({rootfs_off}) is not a multiple of {SECTOR}"
+                "partition offset ({partition_off}) is not a multiple of {SECTOR}"
             )));
         }
-        // The rootfs partition additionally aligns to the ext4 block size.
-        if !rootfs_off.is_multiple_of(EXT4_BLOCK) {
+        // The rootfs partition additionally aligns to the ext4 block size, and so does the
+        // EFI system partition ahead of it: its size is whole MiB, so the rootfs behind it
+        // keeps the alignment the offset has.
+        if !partition_off.is_multiple_of(EXT4_BLOCK) {
             return Err(geom(format!(
-                "rootfs offset ({rootfs_off}) is not a multiple of the ext4 block size {EXT4_BLOCK}"
+                "partition offset ({partition_off}) is not a multiple of the ext4 block size                  {EXT4_BLOCK}"
             )));
         }
-        // Whatever the boot method occupies at the head must end before the rootfs does.
-        if boot_end > rootfs_off {
+        // Whatever the boot method occupies at the head must end before the partitions do.
+        if boot_end > partition_off {
             return Err(geom(format!(
-                "the boot region ends at {boot_end}, past the rootfs offset ({rootfs_off})"
+                "the boot region ends at {boot_end}, past the partition offset ({partition_off})"
             )));
         }
+        let esp = match esp_bytes {
+            None => None,
+            Some(bytes) if bytes == 0 || !bytes.is_multiple_of(EXT4_BLOCK) => {
+                return Err(geom(format!(
+                    "the EFI system partition ({bytes} bytes) is not a non-zero multiple of                      {EXT4_BLOCK}"
+                )));
+            }
+            Some(bytes) => Some(EspRegion {
+                offset: partition_off,
+                bytes,
+            }),
+        };
+        let rootfs_off = match esp {
+            None => partition_off,
+            Some(esp) => esp.offset.checked_add(esp.bytes).ok_or_else(|| {
+                geom(format!(
+                    "an EFI system partition of {} bytes at {} overflows the offset arithmetic",
+                    esp.bytes, esp.offset
+                ))
+            })?,
+        };
 
         // Place the seed partition in the space the boot method leaves free (see
         // the field's docs). Alignment is inherited: the anchor is sector-aligned
-        // (and, before the rootfs, 4 KiB-aligned) and the seed size is a multiple
+        // (and, before the partitions, 4 KiB-aligned) and the seed size is a multiple
         // of both, so subtraction preserves it.
         let seed_off = match &boot_geom {
             BootGeometry::RawGap { uboot_itb_off, .. } => {
-                let seed_off = rootfs_off
-                    .checked_sub(SEED_PARTITION_BYTES)
-                    .ok_or_else(|| {
-                        geom(format!(
-                            "rootfs offset ({rootfs_off}) leaves no room for the \
+                let seed_off =
+                    partition_off
+                        .checked_sub(SEED_PARTITION_BYTES)
+                        .ok_or_else(|| {
+                            geom(format!(
+                                "partition offset ({partition_off}) leaves no room for the \
                          {SEED_PARTITION_BYTES}-byte seed partition ahead of it"
-                        ))
-                    })?;
+                            ))
+                        })?;
                 // The seed comes out of the u-boot.itb slot's tail, which must
                 // still start below it — a slot the seed swallowed whole is a
                 // layout with nowhere to put the bootloader.
                 if *uboot_itb_off >= seed_off {
                     return Err(geom(format!(
                         "the u-boot.itb offset ({uboot_itb_off}) leaves no room for the \
-                         {SEED_PARTITION_BYTES}-byte seed partition before the rootfs \
-                         ({rootfs_off}) — move the rootfs offset up"
+                         {SEED_PARTITION_BYTES}-byte seed partition before the partitions \
+                         ({partition_off}) — move the partition offset up"
                     )));
                 }
                 seed_off
@@ -224,13 +283,33 @@ impl BootRegion {
         Ok(BootRegion {
             boot: boot_geom,
             seed_off,
+            esp,
             rootfs_off,
         })
     }
 
+    /// The rootfs partition's GPT entry number. The table lists partitions in disk
+    /// order ([`super::gpt`]), and the seed, any kernel slots and any EFI system
+    /// partition all sit ahead of the rootfs.
+    pub(crate) fn rootfs_index(&self) -> u32 {
+        let slots = match &self.boot {
+            BootGeometry::RawGap { .. } => 0,
+            BootGeometry::Kpart { slots } => slots.len() as u32,
+        };
+        // The seed, the slots, the ESP, and then the rootfs itself.
+        1 + slots + u32::from(self.esp.is_some()) + 1
+    }
+
+    /// Where the image's partitions after the boot method's region begin: the EFI
+    /// system partition's start under a loader that has one, the rootfs's otherwise. A
+    /// bootloader-only medium is exactly this long.
+    pub(crate) fn partition_off(&self) -> u64 {
+        self.esp.map_or(self.rootfs_off, |esp| esp.offset)
+    }
+
     /// The raw-gap boot region: two payloads written outside any partition, ahead of
-    /// the rootfs. Returns the geometry and the byte the region ends at.
-    fn raw_gap(offsets: &Offsets, rootfs_off: u64) -> Result<(BootGeometry, u64), EngineError> {
+    /// the partitions. Returns the geometry and the byte the region ends at.
+    fn raw_gap(offsets: &Offsets, partition_off: u64) -> Result<(BootGeometry, u64), EngineError> {
         let idbloader_off = parse_size(&offsets.idbloader)?;
         let uboot_itb_off = parse_size(&offsets.uboot_itb)?;
         for (what, v) in [
@@ -249,9 +328,10 @@ impl BootRegion {
                 GPT_FRONT_SECTORS * SECTOR
             )));
         }
-        if !(idbloader_off < uboot_itb_off && uboot_itb_off < rootfs_off) {
+        if !(idbloader_off < uboot_itb_off && uboot_itb_off < partition_off) {
             return Err(geom(format!(
-                "raw-gap offsets must increase: idbloader ({idbloader_off}) < u-boot.itb ({uboot_itb_off}) < rootfs ({rootfs_off})"
+                "raw-gap offsets must increase: idbloader ({idbloader_off}) < u-boot.itb \
+                 ({uboot_itb_off}) < partitions ({partition_off})"
             )));
         }
         Ok((
@@ -265,8 +345,8 @@ impl BootRegion {
 
     /// The ChromeOS kernel slots: real GPT partitions, so they must be sector-aligned
     /// and clear the primary GPT table. Returns the geometry and the byte the **last**
-    /// slot ends at — which the caller checks against the rootfs offset, the same as it
-    /// does for a raw gap.
+    /// slot ends at — which the caller checks against the partition offset, the same as
+    /// it does for a raw gap.
     ///
     /// The slots are laid back to back from `kpart.offset`, so they cannot overlap each
     /// other by construction; the only placement question left is whether the set as a
@@ -406,9 +486,9 @@ impl BootRegion {
 }
 
 impl Geometry {
-    /// Resolve the whole layout from the resolved boot configuration and an authored
-    /// whole-disk size: the head of the disk, then the rootfs partition filling what is
-    /// left of it.
+    /// Resolve the whole layout from the resolved boot configuration, the EFI system
+    /// partition's size (see [`BootRegion::resolve`]), and an authored whole-disk size:
+    /// the head of the disk, then the rootfs partition filling what is left of it.
     ///
     /// `total_size` is the already-parsed whole-disk size — the caller has read the
     /// authored `image_size` to learn whether it is fixed at all, so re-parsing the
@@ -418,13 +498,17 @@ impl Geometry {
     ///
     /// [`EngineError::ImageGeometry`] on any malformed value, bad ordering,
     /// misalignment, or an image too small to hold the GPT plus a rootfs partition.
-    pub(crate) fn resolve(boot: &ResolvedBoot, total_size: u64) -> Result<Geometry, EngineError> {
+    pub(crate) fn resolve(
+        boot: &ResolvedBoot,
+        esp_bytes: Option<u64>,
+        total_size: u64,
+    ) -> Result<Geometry, EngineError> {
         if !total_size.is_multiple_of(SECTOR) {
             return Err(geom(format!(
                 "image size ({total_size}) is not a multiple of {SECTOR}"
             )));
         }
-        let region = BootRegion::resolve(boot)?;
+        let region = BootRegion::resolve(boot, esp_bytes)?;
         let rootfs_off = region.rootfs_off;
 
         let total_lba = total_size / SECTOR;
@@ -478,9 +562,10 @@ impl Geometry {
     /// arithmetic.
     pub(crate) fn around_rootfs(
         boot: &ResolvedBoot,
+        esp_bytes: Option<u64>,
         rootfs_bytes: u64,
     ) -> Result<Geometry, EngineError> {
-        let region = BootRegion::resolve(boot)?;
+        let region = BootRegion::resolve(boot, esp_bytes)?;
         // The disk is the head, the partition, and the backup GPT behind it — the
         // smallest medium that contains this filesystem at this offset.
         let total_size = region
@@ -555,6 +640,7 @@ impl Geometry {
             total_size,
             boot: region.boot,
             seed_off: region.seed_off,
+            esp: region.esp,
             rootfs_off,
             rootfs_first_lba,
             rootfs_length_lba,
@@ -625,25 +711,31 @@ mod tests {
     }
 
     fn rk1_boot_with(idbloader: &str, uboot_itb: &str, rootfs: &str) -> ResolvedBoot {
-        ResolvedBoot::RockchipRkbin(ResolvedRkbinBoot {
+        ResolvedBoot::RockchipRkbin(Box::new(ResolvedRkbinBoot {
             uboot_defconfig: "turing-rk1-rk3588_defconfig".into(),
             uboot_source: "https://example/u-boot.git".into(),
             uboot_ref: "v2026.04".into(),
             uboot_series: None,
             uboot_patches_url: None,
             uboot_patches_ref: None,
+            bl31: boot2deb_core::model::Bl31::Rkbin {
+                file: "atf.elf".into(),
+            },
             rkbin: Rkbin {
-                atf: "atf.elf".into(),
                 tpl: "tpl.bin".into(),
                 bl32: None,
-                upstream: None,
+                upstream: boot2deb_core::RkbinUpstream {
+                    git: "https://example.invalid/rkbin.git".into(),
+                    git_ref: "master".into(),
+                    dir: "bin".into(),
+                },
             },
             offsets: Offsets {
                 idbloader: idbloader.into(),
                 uboot_itb: uboot_itb.into(),
-                rootfs: rootfs.into(),
+                partitions: rootfs.into(),
             },
-        })
+        }))
     }
 
     /// The C201 kernel-slot layout (boot-methods/depthcharge.toml): two 16 MiB slots
@@ -672,7 +764,7 @@ mod tests {
 
     #[test]
     fn resolves_the_rk1_2g_layout() {
-        let g = Geometry::resolve(&rk1_boot(), 2 << 30).unwrap();
+        let g = Geometry::resolve_plain(&rk1_boot(), 2 << 30).unwrap();
         assert_eq!(g.total_size, 2 * 1024 * 1024 * 1024);
         assert_eq!(
             g.boot,
@@ -699,7 +791,7 @@ mod tests {
         // The exact numbers the C201 image contains: KERN-A at LBA 24576 spanning 32768
         // sectors, KERN-B abutting it at LBA 57344, and the rootfs behind both at LBA
         // 90112.
-        let g = Geometry::resolve(&c201_boot(), 4 << 30).unwrap();
+        let g = Geometry::resolve_plain(&c201_boot(), 4 << 30).unwrap();
         assert_eq!(
             g.boot,
             BootGeometry::Kpart {
@@ -745,7 +837,8 @@ mod tests {
     /// believe in.
     #[test]
     fn a_single_slot_layout_leaves_no_spare() {
-        let g = Geometry::resolve(&c201_boot_with("12MiB", "16MiB", 1, "28MiB"), 4 << 30).unwrap();
+        let g = Geometry::resolve_plain(&c201_boot_with("12MiB", "16MiB", 1, "28MiB"), 4 << 30)
+            .unwrap();
         let BootGeometry::Kpart { ref slots } = g.boot else {
             panic!("expected kernel slots")
         };
@@ -758,10 +851,10 @@ mod tests {
     /// depthcharge one — and the refusals when the space is not there.
     #[test]
     fn the_seed_partition_takes_the_free_mib_each_method_leaves() {
-        let g = Geometry::resolve(&rk1_boot(), 2 << 30).unwrap();
+        let g = Geometry::resolve_plain(&rk1_boot(), 2 << 30).unwrap();
         assert_eq!(g.seed_off, 15 * 1024 * 1024, "rootfs 16 MiB − 1 MiB");
 
-        let g = Geometry::resolve(&c201_boot(), 4 << 30).unwrap();
+        let g = Geometry::resolve_plain(&c201_boot(), 4 << 30).unwrap();
         assert_eq!(g.seed_off, 11 * 1024 * 1024, "kpart 12 MiB − 1 MiB");
         // The slots themselves still abut the rootfs exactly — the seed took
         // nothing from them.
@@ -770,13 +863,17 @@ mod tests {
         // A u-boot.itb slot the seed would swallow whole is refused: rootfs at
         // 8.5 MiB puts the seed at 7.5 MiB, below the itb at 8 MiB. (8.5 MiB is
         // 4 KiB-aligned, so the alignment gate does not mask this one.)
-        assert!(Geometry::resolve(&rk1_boot_with("32KiB", "8MiB", "8912896"), 2 << 30).is_err());
+        assert!(
+            Geometry::resolve_plain(&rk1_boot_with("32KiB", "8MiB", "8912896"), 2 << 30).is_err()
+        );
         // Kernel slots at 1 MiB leave the seed nowhere above the primary GPT.
-        assert!(Geometry::resolve(&c201_boot_with("1MiB", "16MiB", 2, "36MiB"), 4 << 30).is_err());
+        assert!(
+            Geometry::resolve_plain(&c201_boot_with("1MiB", "16MiB", 2, "36MiB"), 4 << 30).is_err()
+        );
 
         // The itb budget ends at the seed, not at the rootfs: a payload that fits the
         // raw gap but spills into the seed's MiB is refused.
-        let region = BootRegion::resolve(&rk1_boot()).unwrap();
+        let region = BootRegion::resolve(&rk1_boot(), None).unwrap();
         assert!(region
             .check_payload_fit(&[("idbloader.img", 1024), ("u-boot.itb", 7 << 20)])
             .is_ok());
@@ -788,27 +885,40 @@ mod tests {
     #[test]
     fn rejects_bad_ordering_and_alignment() {
         // rootfs before u-boot.itb.
-        assert!(Geometry::resolve(&rk1_boot_with("32KiB", "16MiB", "8MiB"), 2 << 30).is_err());
+        assert!(
+            Geometry::resolve_plain(&rk1_boot_with("32KiB", "16MiB", "8MiB"), 2 << 30).is_err()
+        );
         // idbloader inside the primary GPT reservation.
-        assert!(Geometry::resolve(&rk1_boot_with("512", "8MiB", "16MiB"), 2 << 30).is_err());
+        assert!(Geometry::resolve_plain(&rk1_boot_with("512", "8MiB", "16MiB"), 2 << 30).is_err());
         // rootfs offset 512-aligned (16385 sectors) but not 4 KiB-aligned.
-        assert!(Geometry::resolve(&rk1_boot_with("32KiB", "8MiB", "8389120"), 2 << 30).is_err());
+        assert!(
+            Geometry::resolve_plain(&rk1_boot_with("32KiB", "8MiB", "8389120"), 2 << 30).is_err()
+        );
     }
 
     #[test]
     fn rejects_kernel_slots_that_collide() {
         // Overlapping the primary GPT: the firmware's own table would be destroyed.
-        assert!(Geometry::resolve(&c201_boot_with("512", "16MiB", 2, "44MiB"), 4 << 30).is_err());
+        assert!(
+            Geometry::resolve_plain(&c201_boot_with("512", "16MiB", 2, "44MiB"), 4 << 30).is_err()
+        );
         // The *second* slot runs into the rootfs: 12 + 2*16 = 44 MiB, past a rootfs at
         // 40 MiB. This is the collision a one-slot geometry cannot have, and the reason
         // the rootfs offset is checked against the last slot rather than the first — a
         // spare silently overlapping the rootfs would be a kernel upgrade that eats the
         // filesystem.
-        assert!(Geometry::resolve(&c201_boot_with("12MiB", "16MiB", 2, "40MiB"), 4 << 30).is_err());
+        assert!(
+            Geometry::resolve_plain(&c201_boot_with("12MiB", "16MiB", 2, "40MiB"), 4 << 30)
+                .is_err()
+        );
         // A zero-size kernel slot could hold no kernel.
-        assert!(Geometry::resolve(&c201_boot_with("12MiB", "0", 2, "44MiB"), 4 << 30).is_err());
+        assert!(
+            Geometry::resolve_plain(&c201_boot_with("12MiB", "0", 2, "44MiB"), 4 << 30).is_err()
+        );
         // A gap between the last slot and the rootfs is allowed — only an overlap is not.
-        assert!(Geometry::resolve(&c201_boot_with("12MiB", "8MiB", 2, "44MiB"), 4 << 30).is_ok());
+        assert!(
+            Geometry::resolve_plain(&c201_boot_with("12MiB", "8MiB", 2, "44MiB"), 4 << 30).is_ok()
+        );
     }
 
     /// A fitted image inverts the layout: the filesystem is decided first and the disk
@@ -818,11 +928,11 @@ mod tests {
     #[test]
     fn a_fitted_rootfs_sizes_the_disk_around_itself() {
         let rootfs_bytes = 700 * 1024 * 1024;
-        let g = Geometry::around_rootfs(&rk1_boot(), rootfs_bytes).unwrap();
+        let g = Geometry::around_rootfs_plain(&rk1_boot(), rootfs_bytes).unwrap();
 
         // The head of the disk does not answer to the size, so it is what the authored
         // layout says regardless of which direction the geometry was resolved in.
-        let fixed = Geometry::resolve(&rk1_boot(), 2 << 30).unwrap();
+        let fixed = Geometry::resolve_plain(&rk1_boot(), 2 << 30).unwrap();
         assert_eq!(g.boot, fixed.boot);
         assert_eq!(g.rootfs_off, fixed.rootfs_off);
         assert_eq!(g.rootfs_first_lba, fixed.rootfs_first_lba);
@@ -842,13 +952,13 @@ mod tests {
 
         // A filesystem that is not whole ext4 blocks is refused rather than laid out
         // into a partition that would describe it wrongly.
-        assert!(Geometry::around_rootfs(&rk1_boot(), rootfs_bytes + 1).is_err());
+        assert!(Geometry::around_rootfs_plain(&rk1_boot(), rootfs_bytes + 1).is_err());
 
         // But the authored-size minimum does *not* apply to a fitted one. A format that
         // returned a small filesystem returned a working one, and rejecting it here
         // would fail a build after the whole rootfs had been written — which is exactly
         // what an 8 MiB fitted rootfs did before this was separated out.
-        let small = Geometry::around_rootfs(&rk1_boot(), 8 * 1024 * 1024)
+        let small = Geometry::around_rootfs_plain(&rk1_boot(), 8 * 1024 * 1024)
             .expect("a fitted size is reported by a completed format, not authored");
         assert!(small.rootfs_bytes < MIN_ROOTFS_BYTES);
         assert_eq!(
@@ -871,7 +981,7 @@ mod tests {
         const IMAGE_BYTES: u64 = 917_533_184;
 
         let boot = c201_boot_with("12MiB", "32MiB", 2, "76MiB");
-        let g = Geometry::around_rootfs(&boot, ROOTFS_BYTES).unwrap();
+        let g = Geometry::around_rootfs_plain(&boot, ROOTFS_BYTES).unwrap();
 
         assert_eq!(g.rootfs_off, 76 * 1024 * 1024, "the rootfs sits at 76 MiB");
         assert_eq!(
@@ -934,19 +1044,19 @@ mod tests {
     #[test]
     fn rejects_image_too_small_for_the_rootfs() {
         // 8 MiB total cannot hold a rootfs starting at 16 MiB.
-        assert!(Geometry::resolve(&rk1_boot(), 8 << 20).is_err());
+        assert!(Geometry::resolve_plain(&rk1_boot(), 8 << 20).is_err());
     }
 
     #[test]
     fn rejects_rootfs_area_below_the_minimum() {
         // The rootfs clears the 16 MiB gap, but the ~84 MiB left is under the
         // 128 MiB minimum a Debian rootfs needs.
-        assert!(Geometry::resolve(&rk1_boot(), 100 << 20).is_err());
+        assert!(Geometry::resolve_plain(&rk1_boot(), 100 << 20).is_err());
     }
 
     #[test]
     fn payload_fit_catches_overruns() {
-        let g = BootRegion::resolve(&rk1_boot()).unwrap();
+        let g = BootRegion::resolve(&rk1_boot(), None).unwrap();
         let gap = |idb: u64, itb: u64| {
             g.check_payload_fit(&[("idbloader.img", idb), ("u-boot.itb", itb)])
         };
@@ -964,7 +1074,7 @@ mod tests {
 
     #[test]
     fn a_kernel_payload_must_fit_its_slot() {
-        let g = BootRegion::resolve(&c201_boot()).unwrap();
+        let g = BootRegion::resolve(&c201_boot(), None).unwrap();
         let kpart = |len: u64| g.check_payload_fit(&[("vmlinuz.kpart", len)]);
         // The measured signed payload — 14,569,472 bytes — fits the 16 MiB slot.
         assert!(kpart(14_569_472).is_ok());
@@ -977,5 +1087,64 @@ mod tests {
         assert!(kpart(16 * 1024 * 1024).is_ok());
         assert!(kpart(16 * 1024 * 1024 + 1).is_err());
         assert!(kpart(u64::MAX).is_err());
+    }
+
+    impl Geometry {
+        /// [`Geometry::resolve`] with no EFI system partition: the extlinux and
+        /// depthcharge layouts.
+        fn resolve_plain(boot: &ResolvedBoot, total_size: u64) -> Result<Geometry, EngineError> {
+            Geometry::resolve(boot, None, total_size)
+        }
+
+        /// [`Geometry::around_rootfs`] with no EFI system partition.
+        fn around_rootfs_plain(
+            boot: &ResolvedBoot,
+            rootfs_bytes: u64,
+        ) -> Result<Geometry, EngineError> {
+            Geometry::around_rootfs(boot, None, rootfs_bytes)
+        }
+    }
+
+    const MIB: u64 = 1024 * 1024;
+
+    /// Under the efi loader the ESP takes the partition offset and the rootfs moves
+    /// behind it; the raw gap and the seed below the offset do not move.
+    #[test]
+    fn the_esp_takes_the_partition_offset_and_the_rootfs_follows_it() {
+        let plain = Geometry::resolve_plain(&rk1_boot(), 2 << 30).unwrap();
+        let g = Geometry::resolve(&rk1_boot(), Some(256 * MIB), 2 << 30).unwrap();
+        let esp = g.esp.expect("an ESP was asked for");
+        assert_eq!(esp.offset, 16 * MIB);
+        assert_eq!(esp.bytes, 256 * MIB);
+        assert_eq!(esp.first_lba(), 16 * MIB / SECTOR);
+        assert_eq!(esp.length_lba(), 256 * MIB / SECTOR);
+        assert_eq!(g.rootfs_off, 272 * MIB);
+        assert_eq!(g.rootfs_first_lba, 272 * MIB / SECTOR);
+        assert_eq!(
+            g.seed_off, plain.seed_off,
+            "the seed stays below the offset"
+        );
+        assert_eq!(g.boot, plain.boot, "the raw gap does not move");
+        // The rootfs fills what the ESP leaves: the plain layout's partition, less it.
+        assert_eq!(g.rootfs_bytes, plain.rootfs_bytes - 256 * MIB);
+        assert!(plain.esp.is_none());
+    }
+
+    /// A fitted image sizes the disk around the rootfs, with the ESP ahead of it.
+    #[test]
+    fn a_fitted_disk_holds_the_esp_ahead_of_the_rootfs() {
+        let rootfs_bytes = 1024 * MIB;
+        let g = Geometry::around_rootfs(&rk1_boot(), Some(256 * MIB), rootfs_bytes).unwrap();
+        assert_eq!(g.rootfs_off, 272 * MIB);
+        assert_eq!(g.total_size, 272 * MIB + rootfs_bytes + 33 * SECTOR);
+        assert_eq!(g.rootfs_bytes, rootfs_bytes);
+    }
+
+    /// A partition that would misalign the rootfs behind it is refused, as is an empty one.
+    #[test]
+    fn an_esp_that_would_misalign_the_rootfs_is_refused() {
+        assert!(BootRegion::resolve(&rk1_boot(), Some(0)).is_err());
+        assert!(BootRegion::resolve(&rk1_boot(), Some(256 * MIB + SECTOR)).is_err());
+        assert!(BootRegion::resolve(&rk1_boot(), Some(256 * MIB)).is_ok());
     }
 }

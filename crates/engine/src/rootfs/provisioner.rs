@@ -45,8 +45,8 @@
 //! every image built from one build point, unlike the password.
 
 use super::{
-    config, stage_overlay, stage_preinstall_overlay, AptRepo, BootConfig, RootfsArtifacts,
-    RootfsOptions,
+    config, stage_overlay, stage_preinstall_overlay, AptRepo, BootConfig, Partitions,
+    RootfsArtifacts, RootfsOptions,
 };
 use crate::archfetch::ArchiveFetch;
 use crate::error::{cage_message, EngineError};
@@ -141,7 +141,7 @@ pub fn build_rootfs(
         &overlay,
         opts.overlay_dirs,
         ib,
-        opts.rootfs_partuuid,
+        opts.partitions,
         opts.image_identity,
         opts.source_date_epoch,
         &step,
@@ -308,9 +308,12 @@ pub fn build_rootfs(
             &rootfs_dir,
             &overlay,
             image,
-            opts.boot_config,
-            &apt_replaced(opts.archive),
-            opts.source_date_epoch,
+            &CustomizeInputs {
+                boot: opts.boot_config,
+                partitions: &opts.partitions,
+                apt_replaced: &apt_replaced(opts.archive),
+                source_date_epoch: opts.source_date_epoch,
+            },
             &step,
         )?;
         step.progress(65);
@@ -705,11 +708,12 @@ pub(crate) fn feature_repositories(
 /// writes into it. Keying on the *solved* set is what makes a hit safe — a moved mirror
 /// resolves a different plan, hence a different key, and rebuilds.
 ///
-/// The account policy has to be folded explicitly because it is the one part of the
-/// tree the customize script writes from resolved config rather than from a staged
-/// file: the overlay fingerprints below cannot see it, so without it a build that added
-/// an authorized key or tightened `sudo` would key alike with one that had not, and be
-/// served the older tree.
+/// The account policy and the loader's install values have to be folded explicitly
+/// because they are the parts of the tree the customize script writes from resolved
+/// config rather than from a staged file: the overlay fingerprints below cannot see
+/// them, so without them a build that added an authorized key, tightened `sudo`, or
+/// moved its rootfs partition would key alike with one that had not, and be served the
+/// older tree.
 fn rootfs_key(
     ib: ImageBuild,
     opts: &RootfsOptions,
@@ -730,6 +734,13 @@ fn rootfs_key(
     let repo_fp = rootcache::file_fingerprints(opts.repo_debs)?;
     let apt_fp = apt_source_records(opts.apt_sources)?;
     let arch = build.arch.to_string();
+    // What the customize step installs the loader from, as it hands the values over.
+    // Empty under a loader that takes none, which keys like a tree with no such step.
+    let loader: Vec<String> = grub_env(image, &opts.partitions)
+        .into_iter()
+        .filter(|(_, value)| !value.is_empty())
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect();
     Ok(rootcache::cache_key(&rootcache::CacheKeyInputs {
         solved: &solved,
         overlay: &overlay_fp,
@@ -742,6 +753,7 @@ fn rootfs_key(
         interpreter: opts.interpreter_id,
         sudo: image.sudo.as_str(),
         authorized_keys: &image.ssh_authorized_keys,
+        loader: &loader,
         source_date_epoch: opts.source_date_epoch,
     }))
 }
@@ -825,9 +837,7 @@ fn customize(
     rootfs: &Path,
     overlay: &Path,
     image: &ResolvedImage,
-    boot: Option<BootConfig>,
-    apt_replaced: &[String],
-    source_date_epoch: u64,
+    inputs: &CustomizeInputs,
     step: &Step,
 ) -> Result<(), EngineError> {
     // Lay the customize overlay (layer trees + generated config) into the rootfs
@@ -873,12 +883,8 @@ fn customize(
     // (`useradd`, `run-parts`, `depthchargectl`) run directly, or via the host's
     // `qemu-user` binfmt when cross-arch — as the build sandbox's do.
     step.log("running the target-chroot customize steps in a cage");
-    run_customize_cage(
-        rootfs,
-        &customize_env(image, boot, apt_replaced, source_date_epoch),
-        step,
-    )?;
-    check_initramfs_modules(
+    run_customize_cage(rootfs, &customize_env(image, inputs), step)?;
+    check_initrd(
         rootfs,
         image.initramfs_generator,
         &image.initramfs_modules,
@@ -889,32 +895,64 @@ fn customize(
 /// The target-side initrd report program: one committed POSIX `sh` file, like
 /// [`CUSTOMIZE`], that prints what the built initrd holds in the tagged-line grammar
 /// [`InitrdReport`](boot2deb_core::initramfs::InitrdReport) parses. It reports and
-/// never judges. The rule is [`coverage`](boot2deb_core::initramfs::coverage).
+/// never judges. The rules are [`coverage`](boot2deb_core::initramfs::coverage) and
+/// [`missing_builtin_firmware`](boot2deb_core::initramfs::missing_builtin_firmware).
 const INITRD_REPORT: &str = include_str!("customize/initrd-report.sh");
 
-/// Fail the build unless the initrd the customize step built covers the image's
-/// [`initramfs_modules`](ResolvedImage::initramfs_modules).
+/// Fail the build unless the initrd the customize step built holds what the kernel
+/// needs from it before the root mounts.
 ///
-/// `initramfs-tools` drops a listed name it cannot find without a word, and dracut logs
-/// it as an error and still exits 0, so this is the check neither generator makes. It runs after [`CUSTOMIZE`], which built the initrd and, on a
-/// depthcharge board, signed it into the kernel partition. A failure here means neither
-/// ships. A module in the initrd that declares firmware the initrd does not hold is
-/// reported as a warning, since a driver's declarations name alternatives.
+/// It runs after [`CUSTOMIZE`], which built the initrd and, on a depthcharge board,
+/// signed it into the kernel partition. A failure here means neither ships. Two checks,
+/// neither of which a generator makes:
 ///
-/// Skipped where the list is empty: the generator then selects modules on its own,
-/// and the build declared nothing to hold it to.
-fn check_initramfs_modules(
+/// - **Built-in drivers' firmware**, on every image. A file a built-in driver declares
+///   and the image holds has to be in the initrd, since the driver probes from it.
+///   Both generators install such a file, so its absence is a generator that skipped
+///   it, which otherwise shows only on hardware.
+/// - **The image's [`initramfs_modules`](ResolvedImage::initramfs_modules)**, where it
+///   names any. `initramfs-tools` drops a listed name it cannot find without a word,
+///   and dracut logs it as an error and still exits 0. A module in the initrd that
+///   declares firmware the initrd does not hold is reported as a warning, since a
+///   driver's declarations name alternatives. An empty list leaves the generator to
+///   select modules on its own, and the build declared nothing to hold it to.
+fn check_initrd(
     rootfs: &Path,
     generator: InitramfsGenerator,
     modules: &[String],
     step: &Step,
 ) -> Result<(), EngineError> {
+    let report = boot2deb_core::initramfs::InitrdReport::parse(&run_initrd_report(
+        rootfs,
+        generator,
+        !modules.is_empty(),
+    )?)
+    .map_err(|message| EngineError::InitrdReport { message })?;
+
+    let missing = boot2deb_core::initramfs::missing_builtin_firmware(&report);
+    if !missing.is_empty() {
+        return Err(EngineError::InitrdBuiltinFirmwareMissing {
+            kernel: report.kernel,
+            missing: missing
+                .iter()
+                .map(|m| format!("{} ({})", m.module, m.firmware.join(", ")))
+                .collect(),
+        });
+    }
+    let held = report
+        .builtin_firmware
+        .iter()
+        .filter(|(_, file)| report.image_firmware.contains(file))
+        .count();
+    step.log(format!(
+        "the initramfs for kernel {} holds all {held} firmware file(s) its built-in \
+         drivers declare and the image contains",
+        report.kernel
+    ));
+
     if modules.is_empty() {
         return Ok(());
     }
-    let report =
-        boot2deb_core::initramfs::InitrdReport::parse(&run_initrd_report(rootfs, generator)?)
-            .map_err(|message| EngineError::InitrdReport { message })?;
     let verdict = boot2deb_core::initramfs::coverage(modules, &report);
     for missing in &verdict.missing_firmware {
         step.log(format!(
@@ -943,14 +981,23 @@ fn check_initramfs_modules(
 /// Run [`INITRD_REPORT`] in a cage rooted at the customized `rootfs` and return what it
 /// printed. The same profile and subordinate map as [`run_customize_cage`], because it
 /// reads the tree that cage wrote. `generator` is the one that built the initrd, and
-/// picks the program that lists it.
-fn run_initrd_report(rootfs: &Path, generator: InitramfsGenerator) -> Result<String, EngineError> {
+/// picks the program that lists it. `module_firmware` asks for each initrd module's
+/// declared firmware, which runs `modinfo` once per module.
+fn run_initrd_report(
+    rootfs: &Path,
+    generator: InitramfsGenerator,
+    module_firmware: bool,
+) -> Result<String, EngineError> {
     let context = || "report on the built initrd".to_string();
     let cage = crate::sandbox::baseline(rootfs)
         .identity_map(IdentityMap::Subordinate)
         .command("sh")
         .args(["-c", INITRD_REPORT])
         .env("B2D_INITRAMFS_GENERATOR", generator.package())
+        .env(
+            "B2D_INITRD_MODULE_FIRMWARE",
+            if module_firmware { "yes" } else { "no" },
+        )
         .current_dir("/")
         .build()
         .map_err(|source| EngineError::Sandbox {
@@ -998,16 +1045,20 @@ const CUSTOMIZE: &str = include_str!("customize/customize.sh");
 ///
 /// The program itself never reads `SOURCE_DATE_EPOCH`. `mkinitramfs`, `useradd` and
 /// `mkimage` do, which is why it is set for the whole run rather than passed as a value.
-fn customize_env(
-    image: &ResolvedImage,
-    boot: Option<BootConfig>,
-    apt_replaced: &[String],
-    source_date_epoch: u64,
-) -> Vec<(String, String)> {
+fn customize_env(image: &ResolvedImage, inputs: &CustomizeInputs) -> Vec<(String, String)> {
+    let CustomizeInputs {
+        boot,
+        partitions,
+        apt_replaced,
+        source_date_epoch,
+    } = *inputs;
     let depthcharge_board = match boot {
         Some(BootConfig::Depthcharge { board, .. }) => board,
         _ => "",
     };
+    // Chosen by the image's time client. The drop-in that bounds the unit is staged with
+    // the overlay, from the same value.
+    let wait = crate::rootfs::clock_wait(image.time_client);
     vec![
         ("B2D_USER".into(), image.user.clone()),
         // One absolute path per line. Each is built from a validated suite name, so
@@ -1035,6 +1086,12 @@ fn customize_env(
             crate::rootfs::INITRAMFS_STUB_LOG.to_string(),
         ),
         ("B2D_TIMEZONE".into(), image.timezone.clone()),
+        ("B2D_CLOCK_WAIT_UNIT".into(), wait.unit.to_string()),
+        (
+            "B2D_CLOCK_WAIT_WANTED_BY".into(),
+            wait.wanted_by.to_string(),
+        ),
+        ("B2D_CLOCK_WAIT_PROGRAM".into(), wait.program.to_string()),
         // A flag, not the list: the script only asks whether `locale-gen` was given
         // anything to do, and the list itself reaches the image through
         // `/etc/locale.gen` in the pre-install overlay.
@@ -1061,7 +1118,80 @@ fn customize_env(
                 config::depthcharge_config(depthcharge_board, true)
             },
         ),
-        ("SOURCE_DATE_EPOCH".into(), source_date_epoch.to_string()),
+    ]
+    .into_iter()
+    .chain(grub_env(image, partitions))
+    .chain([("SOURCE_DATE_EPOCH".into(), source_date_epoch.to_string())])
+    .collect()
+}
+
+/// What [`customize_env`] takes beyond the resolved image: the values the rootfs node
+/// was handed or derived for this build.
+#[derive(Clone, Copy)]
+struct CustomizeInputs<'a> {
+    /// The boot-method configuration the rootfs generates (depthcharge's board profile).
+    boot: Option<BootConfig<'a>>,
+    /// The partitions the image node will write ([`Partitions`]).
+    partitions: &'a Partitions,
+    /// The bootstrap's own apt sources files, which the image's deb822 sources replace.
+    apt_replaced: &'a [String],
+    /// The rootfs build's `SOURCE_DATE_EPOCH`.
+    source_date_epoch: u64,
+}
+
+/// The GRUB module that reads the rootfs's filesystem
+/// ([`ROOTFS_FS_KIND`](crate::image::ROOTFS_FS_KIND)): GRUB's `ext2` driver reads
+/// ext2, ext3 and ext4 alike.
+const GRUB_ROOTFS_MODULE: &str = "ext2";
+
+/// The `B2D_GRUB_*` values [`CUSTOMIZE`] installs GRUB from under the `efi` loader:
+/// the architecture's GRUB names, where the EFI system partition is mounted, and the
+/// rootfs partition the image node will write. Every value is the empty string under
+/// any other loader, which is what skips the step.
+///
+/// The partition values reach GRUB's core image and update-grub's menu, which the tree
+/// keeps, so [`rootfs_key`] folds these same records into the cache key.
+fn grub_env(image: &ResolvedImage, partitions: &Partitions) -> Vec<(String, String)> {
+    let efi = image.loader.as_ref().and_then(|l| l.efi());
+    let value =
+        |f: &dyn Fn(&boot2deb_core::model::ResolvedEfi) -> String| efi.map(f).unwrap_or_default();
+    vec![
+        (
+            "B2D_GRUB_PLATFORM".into(),
+            value(&|e| e.arch.grub_platform.to_string()),
+        ),
+        (
+            "B2D_GRUB_PACKAGE".into(),
+            value(&|e| e.arch.grub_package.to_string()),
+        ),
+        (
+            "B2D_GRUB_REMOVABLE".into(),
+            value(&|e| e.arch.removable_file.to_string()),
+        ),
+        (
+            "B2D_GRUB_FILE".into(),
+            value(&|e| e.arch.grub_file.to_string()),
+        ),
+        (
+            "B2D_GRUB_FS_MODULE".into(),
+            value(&|_| GRUB_ROOTFS_MODULE.to_string()),
+        ),
+        (
+            "B2D_ESP_MOUNT".into(),
+            value(&|_| boot2deb_core::model::ESP_MOUNT_POINT.to_string()),
+        ),
+        (
+            "B2D_ROOTFS_PARTITION".into(),
+            value(&|_| partitions.rootfs_index.to_string()),
+        ),
+        (
+            "B2D_ROOTFS_PARTUUID".into(),
+            value(&|_| partitions.rootfs_partuuid.hyphenated().to_string()),
+        ),
+        (
+            "B2D_ROOTFS_FS_UUID".into(),
+            value(&|_| partitions.rootfs_fs_uuid.hyphenated().to_string()),
+        ),
     ]
 }
 
@@ -1172,6 +1302,26 @@ mod tests {
         build.as_image().expect("the fixture recipes build images")
     }
     use super::*;
+
+    /// The partitions every customize test hands over: the raw-gap layout, seed then
+    /// rootfs.
+    const PARTITIONS: Partitions = Partitions {
+        rootfs_partuuid: uuid::Uuid::nil(),
+        rootfs_fs_uuid: uuid::Uuid::nil(),
+        rootfs_index: 2,
+        esp_partuuid: None,
+    };
+
+    /// The customize inputs a test passes alongside a resolved image.
+    fn inputs(boot: Option<BootConfig<'static>>) -> CustomizeInputs<'static> {
+        CustomizeInputs {
+            boot,
+            partitions: &PARTITIONS,
+            apt_replaced: &[],
+            source_date_epoch: 1_790_347_034,
+        }
+    }
+    use boot2deb_core::distro::TimeClient;
     use boot2deb_core::model::{AptSource, InitramfsCompress, SudoPolicy};
     use boot2deb_core::{resolve_recipe, ConfigRoot, Overrides};
     use std::process::Command;
@@ -1245,7 +1395,12 @@ mod tests {
             preinstall_overlay_dirs: &[],
             boot_config: None,
             image_identity: identity,
-            rootfs_partuuid: uuid::Uuid::nil(),
+            partitions: Partitions {
+                rootfs_partuuid: uuid::Uuid::nil(),
+                rootfs_fs_uuid: uuid::Uuid::nil(),
+                rootfs_index: 2,
+                esp_partuuid: None,
+            },
             out_dir: dir,
             stem: "sample",
             scratch_dir: dir,
@@ -1275,10 +1430,12 @@ mod tests {
                 soc: "sample".into(),
                 boot_method: "rockchip-rkbin".into(),
                 board: None,
+                bl31: Some("rkbin".into()),
                 distro: "debian".into(),
                 suite: "forky".into(),
                 features: Vec::new(),
                 layout: "combined".into(),
+                loader: Some("extlinux".into()),
                 hostname: "sample".into(),
             },
             kernel: IdentityKernel {
@@ -1656,7 +1813,7 @@ mod tests {
     /// program does not read is a value that silently reaches nothing.
     #[test]
     fn every_value_the_program_reads_comes_from_the_environment() {
-        let env = customize_env(image_of(&rk1()), None, &[], 1_790_347_034);
+        let env = customize_env(image_of(&rk1()), &inputs(None));
         let supplied: std::collections::BTreeSet<&str> = env
             .iter()
             .map(|(k, _)| k.as_str())
@@ -1686,7 +1843,7 @@ mod tests {
     /// account's last password change.
     #[test]
     fn the_customize_run_receives_the_lock_epoch() {
-        let env = customize_env(image_of(&rk1()), None, &[], 1_790_347_034);
+        let env = customize_env(image_of(&rk1()), &inputs(None));
         assert_eq!(env_of(&env, "SOURCE_DATE_EPOCH"), "1790347034");
     }
 
@@ -1802,7 +1959,7 @@ mod tests {
             boot2deb_core::distro::InitramfsGenerator::Dracut,
         ] {
             build.image.as_mut().unwrap().initramfs_generator = generator;
-            let env = customize_env(image_of(&build), None, &[], 1_790_347_034);
+            let env = customize_env(image_of(&build), &inputs(None));
             assert_eq!(
                 env_of(&env, "B2D_INITRAMFS_STUBS")
                     .lines()
@@ -1816,31 +1973,57 @@ mod tests {
         }
     }
 
-    /// Every image enables `systemd-time-wait-sync`, so `time-sync.target` means what
-    /// Debian's maintenance jobs already assume it means. Without it nothing reaches
-    /// that target, and the `After=time-sync.target` ordering on apt-daily, logrotate,
-    /// anacron and e2scrub is inert — they run against whatever the clock says at boot,
-    /// which on an RTC-less board is the last power-off.
+    /// Every image enables its time client's wait unit, so `time-sync.target` means what
+    /// the distribution's maintenance jobs already assume it means. Without it nothing
+    /// reaches that target, and the `After=time-sync.target` ordering on apt-daily,
+    /// logrotate and e2scrub is inert — they run against whatever the clock says at
+    /// boot, which on an RTC-less board is stale.
     #[test]
     fn every_image_enables_the_bounded_clock_wait() {
-        assert!(
-            CUSTOMIZE.contains(
-                "ln -sf /usr/lib/systemd/system/systemd-time-wait-sync.service \\\n    \
-                 /etc/systemd/system/sysinit.target.wants/systemd-time-wait-sync.service"
-            ),
-            "the wait-sync unit must be enabled"
-        );
-        // Enabled from the customize program, which runs *after* the systemd package is
-        // installed. A `.wants` symlink staged in the base overlay would land before
+        // The link `systemctl enable` would write, from values the build chose. Enabled
+        // from the customize program, which runs *after* the time client's package is
+        // installed: a `.wants` symlink staged in an overlay would be in place before
         // that package, where `deb-systemd-helper` may still apply the unit's preset.
+        assert!(CUSTOMIZE.contains(
+            r#"ln -sf "$unit" "/etc/systemd/system/$B2D_CLOCK_WAIT_WANTED_BY.wants/$B2D_CLOCK_WAIT_UNIT""#
+        ));
         assert!(
-            CUSTOMIZE.contains("[ -f /usr/lib/systemd/system/systemd-time-wait-sync.service ]"),
+            CUSTOMIZE.contains(r#"unit="/usr/lib/systemd/system/$B2D_CLOCK_WAIT_UNIT""#)
+                && CUSTOMIZE.contains(r#"[ -f "$unit" ]"#),
             "assert the unit exists rather than enabling a name that does not"
         );
-        // Both halves of the base overlay's bounded-wait drop-in: it is inert if the
-        // unit is missing, and it fails closed — holding the boot for the full 45
-        // seconds on every offline boot — if `timeout` is.
-        assert!(CUSTOMIZE.contains("[ -x /usr/bin/timeout ]"));
+        // The staged drop-in is inert if the unit is missing, and cannot run if its
+        // program is.
+        assert!(CUSTOMIZE.contains(r#"[ -x "$B2D_CLOCK_WAIT_PROGRAM" ]"#));
+
+        // Each unit goes where its own `[Install]` section puts it, read from the
+        // packages: systemd-timesyncd's `WantedBy=sysinit.target`, chrony's
+        // `WantedBy=multi-user.target`.
+        for (client, unit, wanted_by, program) in [
+            (
+                TimeClient::SystemdTimesyncd,
+                "systemd-time-wait-sync.service",
+                "sysinit.target",
+                "/usr/bin/timeout",
+            ),
+            (
+                TimeClient::Chrony,
+                "chrony-wait.service",
+                "multi-user.target",
+                "/usr/bin/chronyc",
+            ),
+        ] {
+            let mut build = rk1();
+            build.image.as_mut().unwrap().time_client = client;
+            let env = customize_env(image_of(&build), &inputs(None));
+            assert_eq!(env_of(&env, "B2D_CLOCK_WAIT_UNIT"), unit, "{client}");
+            assert_eq!(
+                env_of(&env, "B2D_CLOCK_WAIT_WANTED_BY"),
+                wanted_by,
+                "{client}"
+            );
+            assert_eq!(env_of(&env, "B2D_CLOCK_WAIT_PROGRAM"), program, "{client}");
+        }
     }
 
     /// The account policy reaches the image as resolved: the sudoers spec the build
@@ -1854,7 +2037,7 @@ mod tests {
         // takes the *last* matching rule, so a stray NOPASSWD beside it would not be
         // inert — and there is nowhere for one to be, since the program writes exactly
         // this value once.
-        let plain = customize_env(image_of(&rk1()), None, &[], 1_790_347_034);
+        let plain = customize_env(image_of(&rk1()), &inputs(None));
         assert_eq!(env_of(&plain, "B2D_SUDOERS"), "ALL");
         assert_eq!(env_of(&plain, "B2D_AUTHORIZED_KEYS"), "");
 
@@ -1868,7 +2051,7 @@ mod tests {
             },
         )
         .unwrap();
-        let env = customize_env(image_of(&build), None, &[], 1_790_347_034);
+        let env = customize_env(image_of(&build), &inputs(None));
         // `nopasswd` writes the no-prompt spec.
         assert_eq!(env_of(&env, "B2D_SUDOERS"), "NOPASSWD: ALL");
         // Both keys, one per line, in the order the config named them.
@@ -1884,12 +2067,17 @@ mod tests {
         // `useradd -m` would then decline to populate or chown it.
         assert!(CUSTOMIZE.contains(r#"install -d -m 0700 "/home/$B2D_USER/.ssh""#));
         assert!(CUSTOMIZE.contains(r#"chmod 0600 "/home/$B2D_USER/.ssh/authorized_keys""#));
-        // Trailing colon: the account's login group, whose name is the target's to
-        // decide.
-        assert!(CUSTOMIZE.contains(r#"chown -R "$B2D_USER": "/home/$B2D_USER/.ssh""#));
+        // The account's login group, whose name is the target's to decide, read back
+        // with `id -gn`. uutils' chown, Ubuntu's, ignores a trailing colon's group.
+        assert!(CUSTOMIZE
+            .contains(r#"chown -R "$B2D_USER:$(id -gn "$B2D_USER")" "/home/$B2D_USER/.ssh""#));
         assert!(
             !CUSTOMIZE.contains("$B2D_USER:$B2D_USER"),
             "the group name must not be guessed"
+        );
+        assert!(
+            !CUSTOMIZE.contains(r#""$B2D_USER": "#),
+            "a trailing colon leaves the group as root under uutils"
         );
         let useradd = CUSTOMIZE
             .find("useradd -m")
@@ -1963,13 +2151,11 @@ mod tests {
 
         let env = customize_env(
             image_of(&c201()),
-            Some(BootConfig::Depthcharge {
+            &inputs(Some(BootConfig::Depthcharge {
                 board: "speedy",
                 cmdline: "console=tty1 ro",
                 initramfs_compress: InitramfsCompress::Xz,
-            }),
-            &[],
-            1_790_347_034,
+            })),
         );
         assert_eq!(env_of(&env, "B2D_DEPTHCHARGE_BOARD"), "speedy");
         // Armed — unlike the build-time config in the pre-install overlay, which must
@@ -1977,7 +2163,7 @@ mod tests {
         assert!(env_of(&env, "B2D_DEPTHCHARGE_CONFIG").contains("enable-system-hooks = True"));
 
         // A raw-gap board takes the early exit instead: no board, so no tail.
-        let raw = customize_env(image_of(&rk1()), None, &[], 1_790_347_034);
+        let raw = customize_env(image_of(&rk1()), &inputs(None));
         assert_eq!(env_of(&raw, "B2D_DEPTHCHARGE_BOARD"), "");
         assert_eq!(env_of(&raw, "B2D_DEPTHCHARGE_CONFIG"), "");
         assert!(
@@ -1996,7 +2182,7 @@ mod tests {
         assert!(CUSTOMIZE.contains("is not in this suite's tzdata"));
         assert!(CUSTOMIZE.contains("[ -s /usr/lib/locale/locale-archive ]"));
 
-        let env = customize_env(image_of(&rk1()), None, &[], 1_790_347_034);
+        let env = customize_env(image_of(&rk1()), &inputs(None));
         assert_eq!(env_of(&env, "B2D_TIMEZONE"), "UTC");
         // The flag is set because the RK1 image generates locales; the check is
         // meaningless on an image that generates none, where the archive is absent by

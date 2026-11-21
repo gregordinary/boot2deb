@@ -10,6 +10,10 @@ supported_boot_methods  = ["rockchip-rkbin"]
 
 # Validated against u-boot v2026.10: builds idbloader.img + u-boot.itb.
 uboot_defconfig         = "generic-rk3576_defconfig"
+# u-boot boots the generic RK3576 tree and names it as its `fdtfile`. Under the efi
+# loader the kernel's DTB goes onto the EFI system partition under that name, which
+# is the one u-boot's UEFI boot reads and hands the kernel.
+uboot_fdtfile           = "rockchip/rk3576-generic.dtb"
 
 # In mainline arch/arm64/boot/dts/rockchip/ — a plain mainline build produces it.
 kernel_dtb              = "rockchip/rk3576-evb1-v10.dtb"
@@ -27,4 +31,4 @@ default_layout          = "combined"
 hostname                = "rk3576-evb1"
 image_size              = "2G"
 
-# rkbin inherited from socs/rk3576.toml (ATF + unified DDR loader; no BL32).
+# rkbin inherited from socs/rk3576.toml (BL31 + unified DDR loader; no BL32).

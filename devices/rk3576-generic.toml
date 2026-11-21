@@ -40,4 +40,4 @@ default_layout          = "combined"
 hostname                = "rk3576-generic"
 image_size              = "2G"
 
-# rkbin (ATF + unified DDR loader; no BL32) is inherited from socs/rk3576.toml.
+# rkbin (BL31 + unified DDR loader; no BL32) is inherited from socs/rk3576.toml.

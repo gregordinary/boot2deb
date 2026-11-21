@@ -1,0 +1,26 @@
+# recipes/turing-rk1/resolute.toml — the Turing RK1 base image on Ubuntu 26.04 LTS.
+# The resolute-suite sibling of turing-rk1/forky: the same device, the same
+# accel-capable kernel (rk3588-accel patches + accel/full kconfig, so the VEPU/VDPU/RGA
+# and NPU drivers are present) and the same u-boot, over an Ubuntu server userland from
+# archive.ubuntu.com instead of a Debian one. A base image: it contains no Rockchip
+# media userspace.
+#
+# The userland is what a minimal Ubuntu server installs, through the distro layer:
+# ubuntu-minimal with netplan bringing up the wired interfaces over systemd-networkd,
+# chrony on Ubuntu's NTS pools, sudo-rs and the uutils coreutils, an initrd dracut
+# builds, and the `ubuntu` account. It has no snapd and no cloud-init. Ubuntu ships
+# its firmware zstd-compressed, which the kernel's loader reads, and the initrd
+# contains the GPU's CSF firmware, since panthor is built in and probes from it.
+# Constraints only; the exact resolution is written to the sibling .lock.
+device     = "turing-rk1"
+kernel     = "rk3588-mainline-7.3"       # omit -> device default_kernel
+suite      = "resolute"
+features   = []                          # base: accel kernel, no media userspace
+layout     = "combined"                  # omit -> device default_layout
+image_size = "2G"
+
+# `expected`: the kernel and bootloader are turing-rk1/forky's, and nothing built from
+# this recipe has booted the board yet.
+[support]
+status = "expected"
+date   = "2026-11-21"

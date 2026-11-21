@@ -4,8 +4,11 @@
 //! The image artifact is `.img` raw, or `.img.xz` or `.img.gz` as the build
 //! compressed it ([`Container::of`] reads the extension). The stream goes straight
 //! from the decoder into the destination, with no staged raw file and no temp space.
-//! The SHA-256 of the *decompressed* bytes is computed on the way through, so
-//! [verification](super::verify) costs one re-read rather than a second decompress.
+//! Two SHA-256s are computed on the way through. One is of the artifact's own bytes as
+//! read, which the caller holds to the digest the build recorded for the file. The other
+//! is of the *decompressed* bytes, which the caller holds to the recorded disk digest.
+//! [Verification](super::verify) re-reads the destination against it, at the cost of one
+//! re-read rather than a second decompress.
 //!
 //! Progress is reported from the compressed input's consumption against its file
 //! length. That is the honest coordinate. It advances at the rate the operation
@@ -58,27 +61,34 @@ impl Container {
     }
 }
 
-/// What a completed write measured: the decompressed length and its SHA-256.
+/// What a completed write measured: the decompressed length and its SHA-256, and the
+/// artifact's own length and SHA-256 as read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WrittenImage {
     /// Decompressed bytes written to the destination.
     pub bytes: u64,
     /// SHA-256 of those bytes, lowercase hex — what verification re-reads against.
     pub sha256: String,
+    /// The artifact's own length as read, compressed or not.
+    pub source_bytes: u64,
+    /// SHA-256 of the artifact's own bytes as read, lowercase hex.
+    pub source_sha256: String,
 }
 
-/// A reader that counts what has been consumed, for progress against the
-/// compressed input's length. The count lives behind a shared `Rc<Cell<..>>` so
-/// it stays readable while the decoder owns the reader.
-struct CountingReader<R> {
+/// A reader that counts and hashes what has been consumed: the count for progress
+/// against the compressed input's length, the hash for the artifact's own digest. Both
+/// live behind shared `Rc`s so they stay readable while the decoder owns the reader.
+struct TapReader<R> {
     inner: R,
     consumed: std::rc::Rc<std::cell::Cell<u64>>,
+    hasher: std::rc::Rc<std::cell::RefCell<Sha256>>,
 }
 
-impl<R: Read> Read for CountingReader<R> {
+impl<R: Read> Read for TapReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let n = self.inner.read(buf)?;
         self.consumed.set(self.consumed.get() + n as u64);
+        self.hasher.borrow_mut().update(&buf[..n]);
         Ok(n)
     }
 }
@@ -107,11 +117,13 @@ pub fn stream_image(
     let container = Container::of(artifact)?;
 
     let consumed = std::rc::Rc::new(std::cell::Cell::new(0u64));
-    let counting = CountingReader {
+    let source_hasher = std::rc::Rc::new(std::cell::RefCell::new(Sha256::new()));
+    let tap = TapReader {
         inner: std::io::BufReader::with_capacity(1 << 20, file),
         consumed: std::rc::Rc::clone(&consumed),
+        hasher: std::rc::Rc::clone(&source_hasher),
     };
-    let mut decoder = decode(container, counting);
+    let mut decoder = decode(container, tap);
 
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; CHUNK];
@@ -143,11 +155,30 @@ pub fn stream_image(
     }
     drop(decoder);
     dest.flush().map_err(|e| EngineError::io(artifact, e))?;
+    // A decoder that stopped short of the file's end left bytes no stream accounted for.
+    // They are still the artifact's, so they are hashed too, and a digest check then
+    // fails on them rather than passing without them.
+    let mut source_bytes = consumed.get();
+    let mut rest = File::open(artifact).map_err(|e| EngineError::io(artifact, e))?;
+    std::io::Seek::seek(&mut rest, std::io::SeekFrom::Start(source_bytes))
+        .map_err(|e| EngineError::io(artifact, e))?;
+    loop {
+        let n = rest
+            .read(&mut buf)
+            .map_err(|e| EngineError::io(artifact, e))?;
+        if n == 0 {
+            break;
+        }
+        source_hasher.borrow_mut().update(&buf[..n]);
+        source_bytes += n as u64;
+    }
     step.progress(100);
 
     Ok(WrittenImage {
         bytes: written,
         sha256: crate::blobs::hex(&hasher.finalize()),
+        source_bytes,
+        source_sha256: crate::blobs::hex(&source_hasher.take().finalize()),
     })
 }
 
@@ -160,19 +191,13 @@ pub fn stream_image(
 /// [`EngineError`] for an unreadable artifact or a corrupt stream. A stream shorter
 /// than `len` returns what there is.
 pub fn decompressed_prefix(artifact: &Path, len: usize) -> Result<Vec<u8>, EngineError> {
-    let mut decoder = open_decoded(artifact)?;
-    let mut out = vec![0u8; len];
-    let mut filled = 0;
-    while filled < len {
-        let n = decoder
-            .read(&mut out[filled..])
-            .map_err(|e| EngineError::io(artifact, e))?;
-        if n == 0 {
-            break;
-        }
-        filled += n;
-    }
-    out.truncate(filled);
+    // Grown as bytes arrive rather than allocated at `len` up front, so a prefix longer
+    // than the artifact costs what the artifact holds, not what was asked for.
+    let mut out = Vec::new();
+    open_decoded(artifact)?
+        .take(len as u64)
+        .read_to_end(&mut out)
+        .map_err(|e| EngineError::io(artifact, e))?;
     Ok(out)
 }
 
@@ -259,6 +284,36 @@ mod tests {
         assert_eq!(dest, raw);
         assert_eq!(out.bytes, raw.len() as u64);
         assert_eq!(out.sha256, sha256_hex(&raw));
+        // The artifact's own digest is of the compressed file, whole.
+        let compressed = std::fs::read(&artifact).unwrap();
+        assert_eq!(out.source_bytes, compressed.len() as u64);
+        assert_eq!(out.source_sha256, sha256_hex(&compressed));
+    }
+
+    /// Bytes after the end of the compressed stream are part of the artifact, so they
+    /// change its digest even though no decoder reads them.
+    #[test]
+    fn trailing_bytes_reach_the_artifacts_digest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let raw = payload();
+        let artifact = xz_file(tmp.path(), "t.img.xz", &raw);
+        let clean = std::fs::read(&artifact).unwrap();
+        let sink_fn = sink();
+        let step = Step::start(&sink_fn, "press");
+        let before = stream_image(&artifact, &mut Vec::new(), &step).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&artifact)
+            .unwrap();
+        f.write_all(&[0u8; 4]).unwrap();
+        drop(f);
+        // Whether the decoder accepts the padding is its business; if it does, the
+        // artifact's digest still has to move.
+        if let Ok(after) = stream_image(&artifact, &mut Vec::new(), &step) {
+            assert_ne!(after.source_sha256, before.source_sha256);
+            assert_eq!(after.source_bytes, clean.len() as u64 + 4);
+        }
+        step.finish();
     }
 
     #[test]

@@ -28,10 +28,10 @@ mkdir -p "$state"
 
 # ssh-keygen -A creates only the missing host keys (the image ships with none --
 # the build strips them so every device gets unique keys). Best-effort: a
-# failure must not abort the rootfs grow below, so under `set -e` the ssh steps
-# are guarded with `|| true`.
+# failure must not abort the rootfs grow below, so under `set -e` it is guarded
+# with `|| true`. Which unit starts sshd stays openssh-server's own choice, made
+# when it installed: ssh.service on Debian, ssh.socket on Ubuntu.
 ssh-keygen -A || true
-systemctl enable ssh.service || true
 
 # Grow the root partition to fill the disk. sfdisk leaves every field the
 # descriptor does not name unchanged, so the partition keeps its PARTUUID;

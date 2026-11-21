@@ -31,7 +31,11 @@ way to pin. Reproducibility is only as strong as the weakest one you froze.
 ### 1. Upstream sources (git commits, blobs)
 
 Every compiled input is pinned to an exact commit in the lock. That covers the kernel,
-u-boot, and the MPP/RGA/ffmpeg trees. rkbin blobs are pinned by sha256.
+u-boot, Trusted Firmware-A where it provides the BL31, and the MPP/RGA/ffmpeg trees.
+The rkbin blobs are pinned twice: by the commit of Rockchip's `rkbin` repository they
+are fetched at, and by each file's sha256. The hash decides the bytes. The commit
+decides only where they come from. rkbin publishes no tags, so the commit is always on a
+branch, and `verify-sources` reports whether it is still reachable.
 
 A commit is only re-fetchable if its remote still advertises it, so pins fall into
 durability classes:
@@ -54,6 +58,63 @@ which orphans the pinned commit.
 
 Keep it in the durable class by **tagging the patch repo at each release**. The pinned
 commit then lives under an immutable ref, and stays fetchable across future rebases.
+
+#### The kernel's revision and configuration
+
+A compiled kernel's release is `<version>-<revision>-<arch>`, as in `7.3.3-1-arm64`,
+and its packages are versioned `<version>-<revision>`. The lock's `[kernel]` table
+records the revision. Beside it is a digest of the kernel's configuration inputs from
+the config tree. Those are the base defconfig, each config fragment's contents in merge
+order, and the board's device-tree sources.
+
+```toml
+[kernel]
+id = "rk3588-mainline-7.3"
+source = "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git"
+ref = "v7.3.3"
+commit = "..."
+revision = 1
+config_sha256 = "5364bdc5ce6839a5513883ae3311046d7223b57acac1adf3eb5449ab2a179037"
+```
+
+`update` keeps the revision while the kernel is the same kernel. Under the same ref it
+moves the revision on when the kernel changed. That is a new commit, a new kernel patch
+series or pin, or a new configuration. A new ref starts again at 1. A kernel
+built after any of those changes is therefore a new release. It installs beside the
+previous kernel, rather than replacing it with one apt cannot tell apart.
+
+`build` recomputes the digest and refuses a config tree that does not match its lock,
+naming `update` as the fix. `boot2deb resolve <recipe>` prints the digest beside the
+fragments, so the config tree and a lock can be compared without a build.
+
+#### The u-boot package's revision and configuration
+
+The `u-boot-<device>` package is versioned `<upstream>-<revision>`, as in
+`2026.10+rkbin1.56-1`. The upstream half is the u-boot ref and the BL31's own version,
+the rkbin blob's (`rkbin1.56`) or Trusted Firmware-A's ref (`tfa2.16.0`). A prerelease
+ref sorts before its release, so `v2026.10-rc1` gives `2026.10~rc1`. The lock's
+`[uboot]` table records `revision`, and `config_sha256` for the package's inputs from
+the config tree. Those are the board defconfig, the raw-gap offsets, and the device's
+name, description, SoC, boot method and architecture. Under TF-A they include its
+platform and submodules.
+
+The upstream half does not name everything the package is built from, so the revision
+does the rest. `update` keeps it while the package is built from the same pins. Under
+the same upstream version it moves the revision on when any of these moved:
+
+- The u-boot commit, which moves under a branch ref, or the configuration digest.
+- The u-boot patch series or its pin.
+- The DDR TPL, the rkbin BL31 or the BL32, by hash.
+- The TF-A commit under the same TF-A ref.
+
+A new u-boot ref or BL31 version starts again at 1. The rkbin commit is not on the list,
+since each blob's hash decides its bytes. Each package a re-pin produces therefore sorts
+after the last, and no two packages share a version.
+
+`build` holds the config tree to `config_sha256` as it does the kernel's, and
+`boot2deb resolve <recipe>` prints the digest on its `u-boot config` line. Installing
+the package writes nothing to a disk. The image build writes its payloads, or the `dd`
+its `README.Debian` documents does.
 
 ### 2. The Debian archive (rootfs)
 
@@ -167,6 +228,13 @@ that move independently:
 | `commit` / `dirty` | the *program* — the boot2deb binary that ran | stamped into the binary when it is compiled |
 | `config_commit` / `config_dirty` | the *data* — the config tree it read layers, recipes and the lock from | read from `--root` when the build starts |
 
+The binary is dirty when its sources differ from its commit. Its sources are
+everything under `crates/`, plus `Cargo.toml` and `Cargo.lock`. A tracked file edited
+there counts, staged or not, and so does any file git does not track. That includes an
+ignored one, because a module compiles from disk whether git ignores it or not.
+Only rustfmt's `*.rs.bk` backups are exempt. Build output under `target/` sits outside
+those paths.
+
 A config tree is dirty when a tracked file has changed. It is also dirty when an
 untracked file sits under a directory the build reads layers, overlays or recipes from.
 A new overlay file ships in the image before anyone commits it, so it counts. A scratch
@@ -214,14 +282,20 @@ away. Run `cargo build` (seconds) to re-stamp it.
 ```
 
 Two cases are certain enough to refuse. Either the stamp names a different commit than
-`HEAD`, or it names `HEAD` but the sources under `crates/` have been edited since.
+`HEAD`, or it names `HEAD` but the sources under `crates/` have changed since. A new
+file there is a change too.
 
 Editing a device `.toml` or a `.dts` is *not* one of them. That is build input, recorded
 by the lock and by `config_commit`, and it leaves the binary's identity intact. A binary
 compiled from an already-dirty tree is reported and not refused. It records
 `dirty = true`, which is the honest answer rather than a false one.
 
-`--allow-stale-builder` proceeds anyway, for when you mean it. The check itself is two
+A failed `git` read never counts as a clean tree. A binary compiled where git failed to
+read its sources records `dirty = true`, since nothing shows that its commit identifies
+it. A checkout that git fails to read at the start of a build is reported and not
+refused. A failed read proves no mismatch either.
+
+`--allow-stale-builder` proceeds anyway, for when you mean it. The check itself is three
 `git` reads, and it runs before any compile. The alternative is discovering the wrong
 stamp in a provenance file written at the *end* of the build. `boot2deb doctor` reports
 the same verdict standing still, and `why-rebuild` shows it as a `builder` row above the
@@ -299,8 +373,8 @@ What is kept out:
   There is no `fakeroot` on any path either. Every root maps the caller to uid 0, so a
   staged tree is already root-owned where it is archived, and `dpkg-buildpackage` needs
   no gain-root command.
-- **Your compiler.** Every compile runs in a provisioned root. The kernel, u-boot and the
-  out-of-tree modules build in a host-arch **cross root** containing
+- **Your compiler.** Every compile runs in a provisioned root. The kernel, u-boot, TF-A
+  and the out-of-tree modules build in a host-arch **cross root** containing
   `crossbuild-essential-<target>`, and the media-accel `.deb`s in a target-arch **build
   sandbox**. Neither your `gcc` nor your `make` is on any build path, and the host cross
   toolchain is not either.
@@ -600,6 +674,12 @@ kernel needs two more settings, because parts of it read no `SOURCE_DATE_EPOCH`:
 - The kernel's Debian packaging writes the wall clock into the changelog that every
   package ships. A `dpkg-buildpackage` init hook re-dates it from the epoch before any
   package installs it.
+
+TF-A reads no `SOURCE_DATE_EPOCH` either. Its BL31 embeds a version string, which it
+takes from `git describe --dirty`, and a build time, which it takes from the C
+preprocessor. The build passes both. The version string is `<ref>-g<commit>`, and the
+time is the commit's date in RFC 3339 UTC. The BL31 banner on the serial console
+therefore reads the same from every build of one lock.
 
 The rootfs takes its epoch from the lock, as `[rootfs] source_date_epoch`. `update`
 writes it: the time of the `update` that last moved a pin. An `update` that moves

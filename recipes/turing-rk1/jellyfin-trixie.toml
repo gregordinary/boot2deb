@@ -18,7 +18,7 @@ image_size = "3G"                        # Jellyfin + media-accel over the base
 # Jellyfin on either suite. Re-assessed over the 7.3 generation with its forky sibling.
 [support]
 status = "experimental"
-date   = "2026-10-19"
+date   = "2026-11-21"
 
 # The same two, for the same reasons: the acceleration shape is a property of the
 # ffmpeg-rk build and the seeded configuration, neither of which is suite-dependent.

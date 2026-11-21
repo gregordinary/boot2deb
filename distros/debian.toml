@@ -51,17 +51,31 @@ default_user = "debian"
 # The initramfs generator Debian's kernels expect. A recipe may pick the other one.
 initramfs_generator = "initramfs-tools"
 
+# SNTP from systemd. The base layer's `ntp_servers` render into a timesyncd.conf
+# drop-in, and systemd-time-wait-sync holds time-sync.target until the first
+# synchronization, for 45 seconds at most.
+time_client = "systemd-timesyncd"
+
 # Joined to the base set in base.toml. Only what differs between distributions lives
 # here.
 packages = [
     # A light DHCP client, which brings the board onto the network before anyone has
-    # logged in.
+    # logged in. It rewrites /etc/resolv.conf from each lease, and nothing else in the
+    # image creates that file. dhcpcd.service runs under ProtectSystem=strict with the
+    # path among its ReadWritePaths, and systemd refuses to set up the namespace for a
+    # path that does not exist, so without the placeholder in this layer's overlay/ tree
+    # DHCP fails at 226/NAMESPACE before dhcpcd runs.
     "dhcpcd",
-    # SNTP from systemd. The base layer's `ntp_servers` configure it.
-    "systemd-timesyncd",
 ]
 # The DHCP client Debian's important set would otherwise install beside dhcpcd.
 exclude = ["isc-dhcp-client"]
+
+# The kernel `boot2deb try` boots a QEMU `virt` guest with, by architecture: the
+# metapackage that follows each suite's current kernel. Both have the virtio drivers
+# the guest's disk needs; armmp is the armhf multiplatform flavour.
+[virt_kernels]
+arm64 = "linux-image-arm64"
+armhf = "linux-image-armmp"
 
 # The pockets beside the release one, in the order the image's apt sources list them.
 # A build resolves against every one of them, so an image ships the fixes published

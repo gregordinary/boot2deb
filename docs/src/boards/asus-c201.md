@@ -132,10 +132,10 @@ kernel definition contains `libre = true`, and resolution reads it:
 
 Moving it to a newer release works like any compiled recipe, with one difference worth
 knowing. The linux-libre project publishes its trees under a tag namespace, and appends
-`-gnu` to the version. The ref is therefore `sources/v7.3-gnu` rather than `v7.3`.
+`-gnu` to the version. The ref is therefore `sources/v7.3.1-gnu` rather than `v7.3.1`.
 
 ```sh
-boot2deb update asus-c201/libre-forky --kernel-ref sources/v7.3-gnu
+boot2deb update asus-c201/libre-forky --kernel-ref sources/v7.3.1-gnu
 ```
 
 ### What stops working
@@ -281,8 +281,10 @@ sudo boot2deb-install-to /dev/mmcblk0
 sudo reboot                 # Ctrl+D boots the eMMC, Ctrl+U the card
 ```
 
-The helper finds the embedded artifact, and refuses the disk the system is running from
-and anything mounted. It asks you to type the target's name before it writes. A card
+The helper finds the embedded artifact and checks it against the record pressed beside
+it. It refuses the disk the system is running from, anything mounted, and a disk too
+small for the image. It asks you to type the target's name before it writes. It reads
+the eMMC back after the write and reports the install done only when it holds the image. A card
 pressed without `--embed-image` can still do it by hand: copy the `.img.xz` over and
 `xzcat` it into `dd` yourself.
 
@@ -418,7 +420,7 @@ kernel and the `rk3288-fixes` patch are therefore both proven on silicon. A late
 of it also booted from USB and **installed cleanly to internal eMMC**. That exercises the
 whole image path rather than just the boot.
 
-That was `v7.1.3`. The recipe now pins `v7.3`, which is why its claim reads `expected`
+That was `v7.1.3`. The recipe now pins `v7.3.3`, which is why its claim reads `expected`
 rather than `validated`. That kernel has not been on the board.
 
 ### What the first minutes look like

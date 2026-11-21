@@ -46,6 +46,9 @@ pub struct MatrixRow {
     /// The u-boot patch series pinned for this build: series, ref, and short commit.
     /// [`None`] where the boot method compiles no u-boot, or u-boot ships pristine.
     pub uboot: Option<PatchesCell>,
+    /// The BL31 the u-boot packs, as the lock pins it. [`None`] where the boot method
+    /// compiles no u-boot.
+    pub bl31: Option<Bl31Cell>,
     /// The out-of-tree kernel modules the image ships, in lock order. Empty for a
     /// board that declares no `device_kmods`. Stated because a `.ko` built from a
     /// driver repo is shipped bytes like any other pin. It is also the one the board's
@@ -80,6 +83,41 @@ pub struct PatchesCell {
     pub reference: String,
     /// The exact commit, truncated for display.
     pub commit: String,
+}
+
+/// The BL31 a build point packs: the rkbin blob it vendors, or the TF-A release and
+/// commit it builds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Bl31Cell {
+    /// Rockchip's prebuilt BL31.
+    Rkbin {
+        /// The vendored file's name.
+        file: String,
+    },
+    /// Trusted Firmware-A built from source.
+    Tfa {
+        /// The release tag the pin was taken at.
+        reference: String,
+        /// The exact commit, truncated for display.
+        commit: String,
+    },
+}
+
+impl Bl31Cell {
+    /// The cell for `lock`'s BL31, or `None` for a lock that builds no u-boot.
+    fn of(lock: &Lock) -> Option<Bl31Cell> {
+        if let Some(t) = &lock.tfa {
+            return Some(Bl31Cell::Tfa {
+                reference: t.reference.clone(),
+                commit: t.commit.chars().take(SHORT_COMMIT).collect(),
+            });
+        }
+        let pin = lock.blobs.as_ref()?.atf.as_deref()?;
+        let file = pin.rsplit_once("@sha256:").map_or(pin, |(f, _)| f);
+        Some(Bl31Cell::Rkbin {
+            file: file.to_string(),
+        })
+    }
 }
 
 /// One out-of-tree kernel module the image contains: which driver, and the commit its
@@ -152,6 +190,7 @@ fn row(
         kernel_ref: lock.kernel.as_ref().map(|k| k.reference.clone()),
         patches: patches_cell(lock.patches.as_ref()),
         uboot: patches_cell(lock.uboot_patches.as_ref()),
+        bl31: Bl31Cell::of(lock),
         kmods: lock
             .kmods
             .iter()
@@ -234,6 +273,17 @@ impl MatrixRow {
         Self::pin_cell(self.uboot.as_ref())
     }
 
+    /// The BL31 cell: `rkbin <file>`, `tf-a <ref> (<commit>)`, or `none` where the
+    /// boot method compiles no u-boot. Plain text, like
+    /// [`kernel_cell`](Self::kernel_cell).
+    pub fn bl31_cell(&self) -> String {
+        match &self.bl31 {
+            Some(Bl31Cell::Rkbin { file }) => format!("rkbin {file}"),
+            Some(Bl31Cell::Tfa { reference, commit }) => format!("tf-a {reference} ({commit})"),
+            None => "none".to_string(),
+        }
+    }
+
     /// The out-of-tree-modules cell: `name ref (commit)` per module, comma-joined, or
     /// `none` for a board that declares none. Plain text, like
     /// [`kernel_cell`](Self::kernel_cell).
@@ -297,6 +347,12 @@ fn axis_pins(lock: &Lock) -> Vec<AxisPin> {
             lock.uboot_patches
                 .as_ref()
                 .map(|p| git(&p.reference, &p.commit)),
+        ),
+        // The TF-A tree, on its own axis rather than folded into the blob pins: moving
+        // between providers shows as this axis and `blob atf` trading places.
+        (
+            "tf-a".into(),
+            lock.tfa.as_ref().map(|t| git(&t.reference, &t.commit)),
         ),
         (
             "suite".into(),
@@ -371,8 +427,11 @@ fn axis_pins(lock: &Lock) -> Vec<AxisPin> {
             Some(d.sha256.chars().take(SHORT_COMMIT).collect()),
         ));
     }
+    // The blobs are content pins too. The rkbin commit is where they are fetched from,
+    // not what ships: a commit that moved with every hash unchanged ships the same
+    // bytes, so it is not an axis here.
     if let Some(b) = &lock.blobs {
-        v.push(("blob atf".into(), Some(b.atf.clone())));
+        v.push(("blob atf".into(), b.atf.clone()));
         v.push(("blob tpl".into(), Some(b.tpl.clone())));
         v.push(("blob bl32".into(), b.bl32.clone()));
     }
@@ -487,9 +546,9 @@ pub fn render_markdown(matrix: &Matrix) -> String {
     s.push('\n');
     s.push_str(PAGE_INTRO);
     s.push_str(
-        "\n| Recipe | Device | Suite | Kernel | Patches | U-boot | Modules | Status | As of |\n",
+        "\n| Recipe | Device | Suite | Kernel | Patches | U-boot | BL31 | Modules | Status | As of |\n",
     );
-    s.push_str("|---|---|---|---|---|---|---|---|---|\n");
+    s.push_str("|---|---|---|---|---|---|---|---|---|---|\n");
     for r in &matrix.rows {
         // Code spans mark the values a reader would copy — an id, a tag, a commit.
         // The qualifiers around them ("from the suite", "none") are prose about the
@@ -520,12 +579,19 @@ pub fn render_markdown(matrix: &Matrix) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         };
+        let bl31 = match &r.bl31 {
+            Some(Bl31Cell::Rkbin { file }) => format!("rkbin `{file}`"),
+            Some(Bl31Cell::Tfa { reference, commit }) => {
+                format!("TF-A `{reference}` (`{commit}`)")
+            }
+            None => "none".to_string(),
+        };
         let as_of = match &r.commit {
             Some(c) => format!("{} (`{c}`)", r.date),
             None => r.date.clone(),
         };
         s.push_str(&format!(
-            "| `{}` | {} | {} | {kernel} | {} | {} | {kmods} | `{}` | {as_of} |\n",
+            "| `{}` | {} | {} | {kernel} | {} | {} | {bl31} | {kmods} | `{}` | {as_of} |\n",
             r.recipe,
             r.device,
             r.suite_cell(),
@@ -609,6 +675,7 @@ mod tests {
                 commit: "527d03d54ea6".into(),
             }),
             uboot: None,
+            bl31: None,
             kmods: vec![],
             status: SupportStatus::Validated,
             date: "2026-07-14".into(),
@@ -618,7 +685,24 @@ mod tests {
         assert_eq!(compiled.kernel_cell(), "rk3588-mainline-7.1 v7.1.1");
         assert_eq!(compiled.patches_cell(), "rk3588-accel main (527d03d54ea6)");
         assert_eq!(compiled.uboot_cell(), "none");
+        assert_eq!(compiled.bl31_cell(), "none");
         assert_eq!(compiled.kmods_cell(), "none");
+        // Each BL31 provider states its own identity: a file, or a release and commit.
+        let rkbin = MatrixRow {
+            bl31: Some(Bl31Cell::Rkbin {
+                file: "rk3588_bl31_v1.56.elf".into(),
+            }),
+            ..compiled.clone()
+        };
+        assert_eq!(rkbin.bl31_cell(), "rkbin rk3588_bl31_v1.56.elf");
+        let tfa = MatrixRow {
+            bl31: Some(Bl31Cell::Tfa {
+                reference: "v2.16.0".into(),
+                commit: "9347b8bbd8d5".into(),
+            }),
+            ..compiled.clone()
+        };
+        assert_eq!(tfa.bl31_cell(), "tf-a v2.16.0 (9347b8bbd8d5)");
 
         // A distro kernel pins no commit — its version comes from the suite — and
         // applies no series. Neither cell may imply a pin the lock does not hold.
@@ -645,6 +729,7 @@ mod tests {
                 reference: "main".into(),
                 commit: "e86ef2a00000".into(),
             }),
+            bl31: None,
             kmods: vec![],
             status: SupportStatus::Expected,
             date: "2026-07-21".into(),
@@ -692,6 +777,7 @@ mod tests {
                 kernel_ref: None,
                 patches: None,
                 uboot: None,
+                bl31: None,
                 kmods: vec![],
                 status: SupportStatus::Expected,
                 date: "2026-07-20".into(),
@@ -713,6 +799,7 @@ mod tests {
                 kernel_ref: None,
                 patches: None,
                 uboot: None,
+                bl31: None,
                 kmods: vec![],
                 status: SupportStatus::Validated,
                 date: "2026-07-14".into(),
@@ -749,6 +836,8 @@ id = \"rk3588-mainline-7.1\"
 source = \"https://example.invalid/linux.git\"
 ref = \"v7.1.1\"
 commit = \"c9acdc466e9aa96352f658b9276aa8a45b8e817d\"
+revision = 1
+config_sha256 = \"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"
 
 [patches]
 series = [\"rk3588-accel\"]

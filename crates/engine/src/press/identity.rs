@@ -11,11 +11,16 @@
 //! as it lays those out. The tree is the rest of the work, because the build wrote the
 //! root PARTUUID into it:
 //!
-//! | File | Who wrote the root PARTUUID there | What the press does |
+//! | File | Who wrote the build's identifiers there | What the press does |
 //! | --- | --- | --- |
-//! | `/etc/fstab` | the rootfs node | swaps the one `PARTUUID=` it names |
-//! | `/boot/extlinux/extlinux.conf` | `mk_extlinux`, from fstab, on a `rockchip-rkbin` board | swaps every `root=PARTUUID=` |
+//! | `/etc/fstab` | the rootfs node | swaps the root `PARTUUID=`, and the EFI system partition's under the `efi` loader |
+//! | `/boot/extlinux/extlinux.conf` | `mk_extlinux`, from fstab, under the `extlinux` loader | swaps every `root=PARTUUID=` |
+//! | `/boot/grub/grub.cfg` | `update-grub`, under the `efi` loader | swaps every root PARTUUID and every ext4 UUID |
 //! | `/boot/depthcharge/*.img` | `depthchargectl`, from fstab, on a `depthcharge` board | replaces it with the kernel re-signed for the new root |
+//!
+//! The EFI system partition's files name no identifier: GRUB's core image finds the
+//! rootfs as a partition number on the disk it was loaded from. The press formats the
+//! partition afresh, under the fresh GUID and serial.
 //!
 //! The press then checks every file under `/etc` and `/boot` for any of the build's
 //! identifiers, and refuses the image when one is left. A file nothing here rewrites is
@@ -23,7 +28,7 @@
 
 use crate::error::EngineError;
 use crate::image::ImageIdentity;
-use boot2deb_core::model::ResolvedBoot;
+use boot2deb_core::model::{Loader, ResolvedImage};
 use ferrosys::{EntryKind, FileContent, FileRange, SourceEntry};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -78,8 +83,11 @@ impl PressIdentity {
 /// The root entry in `/etc/fstab`, which the rootfs node writes on every image.
 const FSTAB: &[u8] = b"/etc/fstab";
 
-/// The u-boot menu `mk_extlinux` writes on a `rockchip-rkbin` board.
+/// The u-boot menu `mk_extlinux` writes under the `extlinux` loader.
 const EXTLINUX_CONF: &[u8] = b"/boot/extlinux/extlinux.conf";
+
+/// The GRUB menu `update-grub` writes under the `efi` loader.
+const GRUB_CFG: &[u8] = b"/boot/grub/grub.cfg";
 
 /// The tree prefixes [`TreeRekey::check`] reads. Configuration lives in the first, and
 /// the boot payloads and bootloader menu in the second.
@@ -93,7 +101,8 @@ const UUID_TEXT_LEN: usize = 36;
 enum Occurrences {
     /// Exactly once, as the one root line of `/etc/fstab`.
     Once,
-    /// One or more times, one per boot entry of an extlinux menu.
+    /// One or more times: one per boot entry of a menu, and more where GRUB's menu
+    /// names the filesystem it searches for.
     AtLeastOnce,
 }
 
@@ -109,19 +118,21 @@ pub(crate) struct TreeRekey {
     built: ImageIdentity,
     /// The identifiers that replace them.
     fresh: ImageIdentity,
-    /// Whether the boot method writes an extlinux menu that roots on the PARTUUID.
-    extlinux: bool,
+    /// The image's loader, which decides the menu that names the root and whether
+    /// fstab mounts an EFI system partition. `None` under a boot method whose firmware
+    /// loads the kernel itself.
+    loader: Option<Loader>,
     /// The tree path of the signed kernel image, and the re-signed file that replaces it.
     kpart: Option<(Vec<u8>, PathBuf)>,
 }
 
 impl TreeRekey {
-    /// The rewrite from `built` to `fresh` for an image booted by `boot`.
-    pub(crate) fn new(built: ImageIdentity, fresh: ImageIdentity, boot: &ResolvedBoot) -> Self {
+    /// The rewrite from `built` to `fresh` for `image`.
+    pub(crate) fn new(built: ImageIdentity, fresh: ImageIdentity, image: &ResolvedImage) -> Self {
         TreeRekey {
             built,
             fresh,
-            extlinux: matches!(boot, ResolvedBoot::RockchipRkbin(_)),
+            loader: image.loader.as_ref().map(|l| l.loader()),
             kpart: None,
         }
     }
@@ -141,9 +152,9 @@ impl TreeRekey {
     ///
     /// # Errors
     ///
-    /// [`EngineError::IdentityRewrite`] when a file the boot method writes is missing, is
-    /// not a regular file, or does not name the build's root PARTUUID the way the build
-    /// writes it.
+    /// [`EngineError::IdentityRewrite`] when a file the loader or boot method writes is
+    /// missing, is not a regular file, or does not name the build's identifiers the way
+    /// the build writes them.
     pub(crate) fn apply(&self, entries: &mut [SourceEntry]) -> Result<Vec<String>, EngineError> {
         let old = hyphenated(self.built.rootfs_partuuid);
         let new = hyphenated(self.fresh.rootfs_partuuid);
@@ -159,17 +170,55 @@ impl TreeRekey {
         log.push(format!(
             "rewrote /etc/fstab: root PARTUUID {old} is now {new} ({count} line)"
         ));
-        if self.extlinux {
-            let count = rewrite_text(
-                entries,
-                EXTLINUX_CONF,
-                &format!("root=PARTUUID={old}"),
-                &format!("root=PARTUUID={new}"),
-                Occurrences::AtLeastOnce,
-            )?;
-            log.push(format!(
-                "rewrote /boot/extlinux/extlinux.conf: {count} boot entry(ies) root on {new}"
-            ));
+        match self.loader {
+            Some(Loader::Extlinux) => {
+                let count = rewrite_text(
+                    entries,
+                    EXTLINUX_CONF,
+                    &format!("root=PARTUUID={old}"),
+                    &format!("root=PARTUUID={new}"),
+                    Occurrences::AtLeastOnce,
+                )?;
+                log.push(format!(
+                    "rewrote /boot/extlinux/extlinux.conf: {count} boot entry(ies) root on {new}"
+                ));
+            }
+            Some(Loader::Efi) => {
+                let (esp_old, esp_new) = (
+                    hyphenated(self.built.esp_partuuid),
+                    hyphenated(self.fresh.esp_partuuid),
+                );
+                rewrite_text(
+                    entries,
+                    FSTAB,
+                    &format!("PARTUUID={esp_old}"),
+                    &format!("PARTUUID={esp_new}"),
+                    Occurrences::Once,
+                )?;
+                log.push(format!(
+                    "rewrote /etc/fstab: EFI system partition PARTUUID {esp_old} is now {esp_new}"
+                ));
+                // update-grub names the root partition on each boot entry's command line
+                // and the root filesystem in the search that finds /boot, so both
+                // identifiers move, every time either appears.
+                let roots = rewrite_text(entries, GRUB_CFG, &old, &new, Occurrences::AtLeastOnce)?;
+                let (fs_old, fs_new) = (
+                    hyphenated(self.built.ext4_uuid),
+                    hyphenated(self.fresh.ext4_uuid),
+                );
+                let searches = rewrite_text(
+                    entries,
+                    GRUB_CFG,
+                    &fs_old,
+                    &fs_new,
+                    Occurrences::AtLeastOnce,
+                )?;
+                log.push(format!(
+                    "rewrote /boot/grub/grub.cfg: {roots} root PARTUUID(s) and {searches} \
+                     filesystem UUID(s) now name {new} and {fs_new}"
+                ));
+            }
+            None => {}
         }
         if let Some((tree_path, resigned)) = &self.kpart {
             let len = std::fs::metadata(resigned)
@@ -261,7 +310,7 @@ fn rewrite_text(
                 printable(path),
                 match rule {
                     Occurrences::Once => "exactly once",
-                    Occurrences::AtLeastOnce => "once per boot entry",
+                    Occurrences::AtLeastOnce => "at least once",
                 }
             ),
         });
@@ -303,6 +352,7 @@ fn identifier_names(identity: &ImageIdentity) -> HashMap<[u8; UUID_TEXT_LEN], &'
     add(identity.ext4_uuid, "ext4 UUID");
     add(identity.disk_guid, "GPT disk GUID");
     add(identity.seed_partuuid, "seed PARTUUID");
+    add(identity.esp_partuuid, "EFI system partition PARTUUID");
     for slot in identity.kpart_guids {
         add(slot, "kernel-slot GUID");
     }
@@ -354,10 +404,18 @@ mod tests {
         )
     }
 
-    fn boot_of(recipe: &str) -> ResolvedBoot {
-        resolve_recipe(&repo_root(), recipe, &Overrides::default())
-            .unwrap()
-            .boot
+    fn image_of(recipe: &str, loader: Option<Loader>) -> ResolvedImage {
+        resolve_recipe(
+            &repo_root(),
+            recipe,
+            &Overrides {
+                loader,
+                ..Overrides::default()
+            },
+        )
+        .unwrap()
+        .image
+        .expect("an image recipe")
     }
 
     fn file(path: &str, body: &str) -> SourceEntry {
@@ -423,7 +481,7 @@ mod tests {
             ),
             file("/etc/hostname", "turing-rk1\n"),
         ];
-        let rekey = TreeRekey::new(built, fresh, &boot_of("turing-rk1/forky"));
+        let rekey = TreeRekey::new(built, fresh, &image_of("turing-rk1/forky", None));
         rekey.apply(&mut entries).unwrap();
         assert_eq!(body(&entries, "/etc/fstab"), fstab(fresh.rootfs_partuuid));
         assert_eq!(
@@ -438,7 +496,7 @@ mod tests {
     #[test]
     fn a_file_that_does_not_name_the_builds_root_as_the_build_writes_it_is_refused() {
         let (built, fresh) = identities();
-        let rekey = TreeRekey::new(built, fresh, &boot_of("turing-rk1/forky"));
+        let rekey = TreeRekey::new(built, fresh, &image_of("turing-rk1/forky", None));
 
         // An fstab already naming another root: this is not the build's tree.
         let mut entries = vec![
@@ -486,7 +544,7 @@ mod tests {
                 &format!("signed for {}", hyphenated(built.rootfs_partuuid)),
             ),
         ];
-        let rekey = TreeRekey::new(built, fresh, &boot_of("asus-c201/forky")).with_kpart(
+        let rekey = TreeRekey::new(built, fresh, &image_of("asus-c201/forky", None)).with_kpart(
             b"/boot/depthcharge/7.2.9-1-armv7.img".to_vec(),
             resigned.clone(),
         );
@@ -502,7 +560,7 @@ mod tests {
     #[test]
     fn a_file_left_naming_any_build_identifier_fails_the_check() {
         let (built, fresh) = identities();
-        let rekey = TreeRekey::new(built, fresh, &boot_of("asus-c201/forky"));
+        let rekey = TreeRekey::new(built, fresh, &image_of("asus-c201/forky", None));
         let upper = hyphenated(built.disk_guid).to_ascii_uppercase();
         let entries = vec![
             file("/etc/fstab", &fstab(fresh.rootfs_partuuid)),
@@ -522,5 +580,88 @@ mod tests {
             "{detail}"
         );
         assert!(!detail.contains("/var/lib"), "{detail}");
+    }
+
+    fn efi_fstab(root: Uuid, esp: Uuid) -> String {
+        format!(
+            "PARTUUID={}\t/\text4\terrors=remount-ro\t0      1\n\
+             PARTUUID={}\t/boot/efi\tvfat\tumask=0077,nofail\t0      2\n",
+            hyphenated(root),
+            hyphenated(esp)
+        )
+    }
+
+    /// The shape update-grub writes: the filesystem UUID in the entry ids and the
+    /// search, the root PARTUUID on each linux line.
+    fn grub_cfg(root: Uuid, fs: Uuid) -> String {
+        let (root, fs) = (hyphenated(root), hyphenated(fs));
+        format!(
+            "menuentry 'Debian GNU/Linux' $menuentry_id_option 'gnulinux-simple-{fs}' {{\n\
+             \tsearch --no-floppy --fs-uuid --set=root {fs}\n\
+             \tlinux /boot/vmlinuz-7.3.4-1-arm64 root=PARTUUID={root} ro rw rootwait\n}}\n\
+             menuentry 'Debian GNU/Linux (recovery mode)' {{\n\
+             \tsearch --no-floppy --fs-uuid --set=root {fs}\n\
+             \tlinux /boot/vmlinuz-7.3.4-1-arm64 root=PARTUUID={root} ro single\n}}\n"
+        )
+    }
+
+    #[test]
+    fn an_efi_tree_has_its_fstab_and_grub_menu_rewritten() {
+        let (built, fresh) = identities();
+        let mut entries = vec![
+            file(
+                "/etc/fstab",
+                &efi_fstab(built.rootfs_partuuid, built.esp_partuuid),
+            ),
+            file(
+                "/boot/grub/grub.cfg",
+                &grub_cfg(built.rootfs_partuuid, built.ext4_uuid),
+            ),
+            file("/boot/efi/EFI/BOOT/BOOTAA64.EFI", "MZ"),
+        ];
+        let rekey = TreeRekey::new(
+            built,
+            fresh,
+            &image_of("turing-rk1/forky", Some(Loader::Efi)),
+        );
+        rekey.apply(&mut entries).unwrap();
+        assert_eq!(
+            body(&entries, "/etc/fstab"),
+            efi_fstab(fresh.rootfs_partuuid, fresh.esp_partuuid)
+        );
+        assert_eq!(
+            body(&entries, "/boot/grub/grub.cfg"),
+            grub_cfg(fresh.rootfs_partuuid, fresh.ext4_uuid)
+        );
+        rekey.check(&entries).unwrap();
+    }
+
+    #[test]
+    fn an_efi_tree_without_its_grub_menu_or_esp_line_is_refused() {
+        let (built, fresh) = identities();
+        let rekey = TreeRekey::new(
+            built,
+            fresh,
+            &image_of("turing-rk1/forky", Some(Loader::Efi)),
+        );
+        let mut no_menu = vec![file(
+            "/etc/fstab",
+            &efi_fstab(built.rootfs_partuuid, built.esp_partuuid),
+        )];
+        assert!(rekey.apply(&mut no_menu).is_err());
+        let mut no_esp = vec![
+            file("/etc/fstab", &fstab(built.rootfs_partuuid)),
+            file(
+                "/boot/grub/grub.cfg",
+                &grub_cfg(built.rootfs_partuuid, built.ext4_uuid),
+            ),
+        ];
+        assert!(rekey.apply(&mut no_esp).is_err());
+        // The check names a leftover ESP PARTUUID like any other identifier.
+        let left = vec![file("/etc/site.conf", &hyphenated(built.esp_partuuid))];
+        let Err(EngineError::IdentityRewrite { detail }) = rekey.check(&left) else {
+            panic!("the check passed a tree naming the build's ESP");
+        };
+        assert!(detail.contains("EFI system partition PARTUUID"), "{detail}");
     }
 }

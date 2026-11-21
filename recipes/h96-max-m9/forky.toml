@@ -30,7 +30,11 @@ image_size = "2G"
 # board description: 5 Gbps, ~154 MB/s over 92 GB of continuous reads, no link error.
 # A device that enumerates at 480 Mb/s there is a seating problem — see the board page.
 #
-# What the move from the 7.2 generation changes on this SoC's paths. The pin is v7.3.
+# What the move from the 7.2 generation changes on this SoC's paths. The pin is v7.3.3,
+# whose point releases touch none of the files the patch series does and no Rockchip
+# path. The fixes that reach this board are 7.3.2's to the remote-control core, which
+# the GPIO IR receiver registers with: races in device registration and removal, and a
+# use-after-free in raw-event handling.
 #
 # The patch series gets shorter. 7.3 includes the Rockchip IOMMU's all-clocks and
 # stale-fault fixes, which the NPU series included as 0004 and 0005, so it no longer
@@ -43,7 +47,8 @@ image_size = "2G"
 # the remain-on-channel and probe cookies itself and `cfg80211_probe_status()`'s new
 # `link_id`; `kmods/aic8800.toml` takes it. The firmware path stays split into a
 # compiled-in root and a per-chip subdirectory, so the driver still requests its
-# firmware from `aic8800_fw/SDIO/aic8800D80`.
+# firmware from `aic8800_fw/SDIO/aic8800D80`. The commits after that guard add
+# USB-only patches and radxa's 7.4 build fix, and `repo_patches` names none of them.
 #
 # The display path is where 7.3 moves most on this board. The Samsung HDMI PHY drops the
 # TMDS-rate workarounds it kept for the old clock interface and programs a link rate or
@@ -59,8 +64,10 @@ image_size = "2G"
 # patches apply unchanged.
 #
 # Mainline still has no Rockchip video *encoder*, so nothing changes there. The kernel
-# configuration differs from 7.2.9's in 47 symbols, none of them on a Rockchip, media,
-# NPU or GPU path.
+# configuration differs from 7.2.9's in the 47 symbols 7.3 brings, none of them on a
+# Rockchip, media, NPU or GPU path, and in three that let the firmware loader read
+# `.zst` and `.xz` files (`FW_LOADER_COMPRESS`), as Debian's own arm64 kernel does.
+# Debian's firmware packages ship uncompressed files, which load as before.
 #
 # The bootloader is u-boot v2026.10 with rkbin's BL31 v1.25 and DDR init v1.13. BL31
 # v1.25 loads at the same addresses as v1.24 and enters at the same point; Rockchip
@@ -78,4 +85,4 @@ image_size = "2G"
 # `expected` until an image from this pin boots.
 [support]
 status = "expected"
-date   = "2026-10-19"
+date   = "2026-11-20"

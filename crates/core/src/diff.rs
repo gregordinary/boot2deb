@@ -48,6 +48,10 @@ pub struct Side {
     pub sources: Vec<SourcePin>,
     /// The rkbin blobs its boot chain consumes.
     pub blobs: Option<BlobFacts>,
+    /// The pre-built `.deb`s it pulls from outside the suite's archive, each pinned by
+    /// sha256. A lock and a provenance manifest both record the full set, so an empty
+    /// list from either is evidence that the build pulls none.
+    pub extra_debs: Option<Vec<crate::model::ExtraDeb>>,
     /// The solved package set of its rootfs — read from the manifest the lock or the
     /// provenance names, which is why the caller fills it.
     pub packages: Option<Vec<Package>>,
@@ -68,17 +72,23 @@ pub struct KernelFacts {
     /// Kernel definition id (`rk3588-mainline-7.1`).
     pub id: String,
     /// How it is obtained (`mainline`, `vendor`, `distro-package`). Recorded by a
-    /// provenance manifest. A lock states it only implicitly, by whether it pins a
-    /// commit at all.
+    /// provenance manifest and by a resolve. A lock states it only implicitly, by
+    /// whether it pins a commit at all. A side read from a lock alone leaves it `None`,
+    /// which the comparison reads as unstated rather than as a change.
     pub flavor: Option<String>,
     /// The clone URL the commit was pinned from. Lock-only: a commit id means
     /// nothing outside its repo, so a source that moved reinterprets every pin under
-    /// it.
+    /// it. A side read from a provenance manifest leaves it `None`, which the
+    /// comparison reads as unstated.
     pub source: Option<String>,
     /// The pinned ref. Absent for a distro-package kernel, which is not fetched.
     pub reference: Option<String>,
     /// The exact commit that ref pointed at.
     pub commit: Option<String>,
+    /// The package revision a lock gives a compiled kernel
+    /// ([`KernelPin::revision`](crate::lock::KernelPin::revision)). Lock-only, so a side
+    /// read from a provenance manifest leaves it unstated.
+    pub revision: Option<String>,
     /// The package a distro-package kernel installs. Absent for a compiled one.
     pub package: Option<String>,
 }
@@ -91,7 +101,8 @@ pub struct PatchAxis {
     /// Series names, in application order.
     pub series: Vec<String>,
     /// The patches-repo ref. Absent from a provenance manifest, which records the
-    /// commit alone.
+    /// commit alone, so an axis both sides pin compares its ref only where both
+    /// documents record one.
     pub reference: Option<String>,
     /// The patches-repo commit.
     pub commit: Option<String>,
@@ -103,6 +114,8 @@ pub struct SourcePin {
     /// Axis name. One of:
     ///
     /// - `uboot`.
+    /// - `tfa`, when the BL31 is built from Trusted Firmware-A.
+    /// - `rkbin`, the commit the boot chain's rkbin blobs are fetched at.
     /// - `mpp`, `librga`, or `libmali`.
     /// - `ffmpeg-base` or `ffmpeg-rockchip`.
     /// - `kmod:<name>`, for a board's out-of-tree module.
@@ -111,13 +124,17 @@ pub struct SourcePin {
     pub reference: Option<String>,
     /// The exact commit.
     pub commit: Option<String>,
+    /// The package revision a lock gives what this axis builds. Only the `uboot` axis
+    /// has one ([`UbootPin::revision`](crate::lock::UbootPin::revision)). It is
+    /// lock-only, like the kernel's ([`KernelFacts::revision`]).
+    pub revision: Option<String>,
 }
 
 /// The rkbin blob pins a boot chain consumes, each `"<file>@sha256:<hex>"`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlobFacts {
-    /// ATF / BL31 pin.
-    pub atf: String,
+    /// rkbin BL31 pin, `None` when the BL31 is built from TF-A.
+    pub atf: Option<String>,
     /// DDR TPL pin.
     pub tpl: String,
     /// Optional BL32 (OP-TEE) pin.
@@ -183,22 +200,26 @@ fn app_sources(
         axis: format!("app:{name}"),
         reference: reference.cloned(),
         commit: commit.cloned(),
+        revision: None,
     }];
     if let Some(d) = dotnet {
         pins.push(SourcePin {
             axis: format!("app:{name}:packaging"),
             reference: d.packaging_ref.cloned(),
             commit: d.packaging_commit.cloned(),
+            revision: None,
         });
         pins.push(SourcePin {
             axis: format!("app:{name}:sdk"),
             reference: Some(d.sdk_version.to_string()),
             commit: None,
+            revision: None,
         });
         pins.push(SourcePin {
             axis: format!("app:{name}:nuget"),
             reference: Some(d.nuget_manifest.to_string()),
             commit: Some(d.nuget_sha256.to_string()),
+            revision: None,
         });
     }
     pins
@@ -218,6 +239,23 @@ impl Side {
                 axis: "uboot".into(),
                 reference: Some(u.reference.clone()),
                 commit: Some(u.commit.clone()),
+                revision: Some(u.revision.to_string()),
+            });
+        }
+        if let Some(t) = &lock.tfa {
+            sources.push(SourcePin {
+                axis: "tfa".into(),
+                reference: Some(t.reference.clone()),
+                commit: Some(t.commit.clone()),
+                revision: None,
+            });
+        }
+        if let Some(b) = &lock.blobs {
+            sources.push(SourcePin {
+                axis: "rkbin".into(),
+                reference: Some(b.reference.clone()),
+                commit: Some(b.commit.clone()),
+                revision: None,
             });
         }
         for pin in &lock.userspace {
@@ -225,6 +263,7 @@ impl Side {
                 axis: pin.name.clone(),
                 reference: Some(pin.reference.clone()),
                 commit: Some(pin.commit.clone()),
+                revision: None,
             });
         }
         if let Some(ff) = &lock.ffmpeg {
@@ -232,12 +271,14 @@ impl Side {
                 axis: "ffmpeg-base".into(),
                 reference: Some(ff.base.reference.clone()),
                 commit: Some(ff.base.commit.clone()),
+                revision: None,
             });
             if let Some(rk) = &ff.rockchip {
                 sources.push(SourcePin {
                     axis: "ffmpeg-rockchip".into(),
                     reference: Some(rk.reference.clone()),
                     commit: Some(rk.commit.clone()),
+                    revision: None,
                 });
             }
         }
@@ -246,6 +287,7 @@ impl Side {
                 axis: format!("kmod:{}", k.name),
                 reference: Some(k.reference.clone()),
                 commit: Some(k.commit.clone()),
+                revision: None,
             });
         }
         for a in &lock.apps {
@@ -284,6 +326,7 @@ impl Side {
                 source: Some(k.source.clone()),
                 reference: Some(k.reference.clone()),
                 commit: Some(k.commit.clone()),
+                revision: Some(k.revision.to_string()),
                 package: None,
             }),
             patches: [
@@ -300,6 +343,7 @@ impl Side {
                 tpl: b.tpl.clone(),
                 bl32: b.bl32.clone(),
             }),
+            extra_debs: Some(lock.extra_debs.clone()),
             packages: None,
             kconfig: None,
             builder: None,
@@ -322,6 +366,23 @@ impl Side {
                 axis: "uboot".into(),
                 reference: s.uboot_ref.clone(),
                 commit: s.uboot_commit.clone(),
+                revision: None,
+            });
+        }
+        if s.tfa_ref.is_some() || s.tfa_commit.is_some() {
+            sources.push(SourcePin {
+                axis: "tfa".into(),
+                reference: s.tfa_ref.clone(),
+                commit: s.tfa_commit.clone(),
+                revision: None,
+            });
+        }
+        if let Some(b) = &prov.blobs {
+            sources.push(SourcePin {
+                axis: "rkbin".into(),
+                reference: Some(b.reference.clone()),
+                commit: Some(b.commit.clone()),
+                revision: None,
             });
         }
         for u in &prov.userspace {
@@ -329,6 +390,7 @@ impl Side {
                 axis: u.name.clone(),
                 reference: Some(u.reference.clone()),
                 commit: Some(u.commit.clone()),
+                revision: None,
             });
         }
         if let Some(ma) = &s.media_accel {
@@ -337,12 +399,14 @@ impl Side {
                     axis: "ffmpeg-rockchip".into(),
                     reference: ma.ffmpeg_rockchip_ref.clone(),
                     commit: ma.ffmpeg_rockchip_commit.clone(),
+                    revision: None,
                 });
             }
             sources.push(SourcePin {
                 axis: "ffmpeg-base".into(),
                 reference: Some(ma.ffmpeg_base_ref.clone()),
                 commit: Some(ma.ffmpeg_base_commit.clone()),
+                revision: None,
             });
         }
         for a in &prov.apps {
@@ -369,6 +433,7 @@ impl Side {
                 source: None,
                 reference: s.kernel_ref.clone(),
                 commit: s.kernel_commit.clone(),
+                revision: None,
                 package: s.kernel_package.clone(),
             }),
             patches: if s.patch_series.is_empty() && s.patches_commit.is_none() {
@@ -397,6 +462,7 @@ impl Side {
                 tpl: b.tpl.clone(),
                 bl32: b.bl32.clone(),
             }),
+            extra_debs: Some(prov.extra_debs.clone()),
             packages: None,
             kconfig: None,
             builder: Some(BuilderFacts {
@@ -456,9 +522,10 @@ impl Side {
     /// Fold `other`'s facts into this side wherever this one has none.
     ///
     /// For the caller that holds both documents for one build. The lock supplies the
-    /// clone URLs, the patches ref and the u-boot patch axis. The manifest supplies
-    /// the flavor and the builder. Taking this side's value wherever it has one makes
-    /// the merge order the caller's declaration of which document it trusts.
+    /// clone URLs, the patches ref, the u-boot patch axis and the package revisions.
+    /// The manifest supplies the flavor and the builder. Taking this side's value
+    /// wherever it has one makes the merge order the caller's declaration of which
+    /// document it trusts.
     pub fn merge(mut self, other: Side) -> Self {
         self.kernel = match (self.kernel, other.kernel) {
             (Some(a), Some(b)) => Some(KernelFacts {
@@ -467,6 +534,7 @@ impl Side {
                 source: a.source.or(b.source),
                 reference: a.reference.or(b.reference),
                 commit: a.commit.or(b.commit),
+                revision: a.revision.or(b.revision),
                 package: a.package.or(b.package),
             }),
             (a, b) => a.or(b),
@@ -478,12 +546,16 @@ impl Side {
         }
         self.patches.sort_by(|a, b| a.axis.cmp(&b.axis));
         for pin in other.sources {
-            if !self.sources.iter().any(|s| s.axis == pin.axis) {
-                self.sources.push(pin);
+            match self.sources.iter_mut().find(|s| s.axis == pin.axis) {
+                // Only a lock states a revision, so it is taken from whichever side has
+                // one, as the kernel's is.
+                Some(own) => own.revision = own.revision.take().or(pin.revision),
+                None => self.sources.push(pin),
             }
         }
         self.sources.sort_by(|a, b| a.axis.cmp(&b.axis));
         self.blobs = self.blobs.or(other.blobs);
+        self.extra_debs = self.extra_debs.or(other.extra_debs);
         self.packages = self.packages.or(other.packages);
         self.kconfig = self.kconfig.or(other.kconfig);
         self.builder = self.builder.or(other.builder);
@@ -550,6 +622,21 @@ impl Change {
             to: to.map(str::to_string),
         })
     }
+
+    /// A change between two values of a field some kind of document does not record,
+    /// or `None` when they agree or either side leaves it unstated.
+    ///
+    /// For the fields whose `None` means "this document does not say" and never
+    /// "there is none". A lock records no kernel flavor. A provenance manifest records
+    /// no kernel clone URL, package revision or patch series ref. A side read from such a
+    /// document says nothing about the value, so the comparison has nothing to report
+    /// about it.
+    fn where_both_state(from: Option<&str>, to: Option<&str>) -> Option<Change> {
+        match (from, to) {
+            (Some(from), Some(to)) => Change::between(Some(from), Some(to)),
+            _ => None,
+        }
+    }
 }
 
 /// Every section's comparison, in the order a reader checks them.
@@ -569,6 +656,8 @@ pub struct Report {
     pub sources: Section<Vec<SourceChange>>,
     /// rkbin blob pins.
     pub blobs: Section<Vec<Change>>,
+    /// Pre-built `.deb`s from outside the suite's archive, by where each comes from.
+    pub extra_debs: Section<Vec<ExtraDebChange>>,
     /// What built each side.
     pub builder: Section<BuilderChanges>,
     /// The files each image's rootfs holds, path by path. Every difference is reported,
@@ -586,6 +675,7 @@ impl Report {
             && self.patches.is_quiet()
             && self.sources.is_quiet()
             && self.blobs.is_quiet()
+            && self.extra_debs.is_quiet()
             && self.builder.is_quiet()
             && self.files.is_quiet()
     }
@@ -656,6 +746,8 @@ pub struct KernelChanges {
     pub reference: Option<Change>,
     /// The exact commit.
     pub commit: Option<Change>,
+    /// The package revision, which names the kernel's release and packages.
+    pub revision: Option<Change>,
     /// The package a distro-package kernel installs.
     pub package: Option<Change>,
     /// Symbols whose requested value differs between the two fragment sets. It is a
@@ -672,6 +764,7 @@ impl IsEmpty for KernelChanges {
             && self.source.is_none()
             && self.reference.is_none()
             && self.commit.is_none()
+            && self.revision.is_none()
             && self.package.is_none()
             && self.kconfig.is_quiet()
     }
@@ -730,6 +823,9 @@ pub struct SourceChange {
     pub reference: Option<Change>,
     /// The exact commit.
     pub commit: Option<Change>,
+    /// The package revision, which with the ref names the `u-boot` package's version.
+    /// Compared only where both sides state one.
+    pub revision: Option<Change>,
 }
 
 impl IsEmpty for Vec<SourceChange> {
@@ -739,6 +835,28 @@ impl IsEmpty for Vec<SourceChange> {
 }
 
 impl IsEmpty for Vec<Change> {
+    fn is_empty(&self) -> bool {
+        self.as_slice().is_empty()
+    }
+}
+
+/// How one pre-built `.deb` differs between the two sides.
+///
+/// Keyed by where the deb comes from, since that is what names it in the config. A deb
+/// one side pulls and the other does not shows its sha256 against a `-`. A vendored file
+/// replaced at the same path, or a URL serving new bytes under the same name, is a
+/// sha256 change on one row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExtraDebChange {
+    /// The deb's URL, or its path along the config search path.
+    pub location: String,
+    /// The content pin.
+    pub sha256: Option<Change>,
+    /// The places its bytes are staged into, comma-separated in declared order.
+    pub targets: Option<Change>,
+}
+
+impl IsEmpty for Vec<ExtraDebChange> {
     fn is_empty(&self) -> bool {
         self.as_slice().is_empty()
     }
@@ -808,9 +926,75 @@ pub fn compare(left: &Side, right: &Side) -> Report {
         patches: compare_patches(left, right),
         sources: compare_sources(left, right),
         blobs: compare_blobs(left, right),
+        extra_debs: compare_extra_debs(left, right),
         builder: compare_builder(left, right),
         files: compare_files(left, right),
     }
+}
+
+/// The pre-built debs each side pulls, matched by location.
+fn compare_extra_debs(left: &Side, right: &Side) -> Section<Vec<ExtraDebChange>> {
+    let (Some(l), Some(r)) = (&left.extra_debs, &right.extra_debs) else {
+        return Section::Unavailable {
+            why: missing(
+                left,
+                right,
+                left.extra_debs.is_some(),
+                right.extra_debs.is_some(),
+                "its pre-built debs",
+            ),
+        };
+    };
+    if l.is_empty() && r.is_empty() {
+        return Section::Unavailable {
+            why: "neither side pulls a pre-built deb".to_string(),
+        };
+    }
+    // A deb's location is the url or the path, whichever it was declared with;
+    // validation guarantees exactly one.
+    let location = |d: &crate::model::ExtraDeb| -> String {
+        d.url.clone().or_else(|| d.path.clone()).unwrap_or_default()
+    };
+    let targets = |d: &crate::model::ExtraDeb| -> String {
+        d.targets
+            .iter()
+            .map(|t| match t {
+                crate::model::ExtraDebTarget::Image => "image",
+                crate::model::ExtraDebTarget::Ffmpeg => "ffmpeg",
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let index = |debs: &[crate::model::ExtraDeb]| -> BTreeMap<String, (String, String)> {
+        debs.iter()
+            .map(|d| (location(d), (d.sha256.clone(), targets(d))))
+            .collect()
+    };
+    let (l, r) = (index(l), index(r));
+    let mut locations: Vec<&String> = l.keys().chain(r.keys()).collect();
+    locations.sort();
+    locations.dedup();
+    let changes = locations
+        .into_iter()
+        .filter_map(|loc| {
+            let (ld, rd) = (l.get(loc), r.get(loc));
+            let change = ExtraDebChange {
+                location: loc.clone(),
+                sha256: Change::between(
+                    ld.map(|(sha, _)| sha.as_str()),
+                    rd.map(|(sha, _)| sha.as_str()),
+                ),
+                // Targets are compared only for a deb both sides pull: on a deb one side
+                // lacks, the sha256 row already says it was added or dropped.
+                targets: match (ld, rd) {
+                    (Some((_, lt)), Some((_, rt))) => Change::between(Some(lt), Some(rt)),
+                    _ => None,
+                },
+            };
+            (change.sha256.is_some() || change.targets.is_some()).then_some(change)
+        })
+        .collect();
+    Section::Compared { changes }
 }
 
 /// The two images' files, when both sides name a file manifest.
@@ -935,10 +1119,11 @@ fn compare_kernel(left: &Side, right: &Side) -> Section<KernelChanges> {
     Section::Compared {
         changes: KernelChanges {
             id: Change::between(Some(&l.id), Some(&r.id)),
-            flavor: Change::between(l.flavor.as_deref(), r.flavor.as_deref()),
-            source: Change::between(l.source.as_deref(), r.source.as_deref()),
+            flavor: Change::where_both_state(l.flavor.as_deref(), r.flavor.as_deref()),
+            source: Change::where_both_state(l.source.as_deref(), r.source.as_deref()),
             reference: Change::between(l.reference.as_deref(), r.reference.as_deref()),
             commit: Change::between(l.commit.as_deref(), r.commit.as_deref()),
+            revision: Change::where_both_state(l.revision.as_deref(), r.revision.as_deref()),
             package: Change::between(l.package.as_deref(), r.package.as_deref()),
             kconfig,
         },
@@ -971,10 +1156,17 @@ fn compare_patches(left: &Side, right: &Side) -> Section<Vec<PatchAxisChange>> {
             let change = PatchAxisChange {
                 series_added: rs.iter().filter(|s| !ls.contains(s)).cloned().collect(),
                 series_removed: ls.iter().filter(|s| !rs.contains(s)).cloned().collect(),
-                reference: Change::between(
-                    l.as_ref().and_then(|p| p.reference.as_deref()),
-                    r.as_ref().and_then(|p| p.reference.as_deref()),
-                ),
+                // An axis only one side pins really was gained or dropped, ref and all.
+                // On an axis both pin, a provenance manifest leaves the ref unstated.
+                reference: match (&l, &r) {
+                    (Some(lp), Some(rp)) => {
+                        Change::where_both_state(lp.reference.as_deref(), rp.reference.as_deref())
+                    }
+                    _ => Change::between(
+                        l.as_ref().and_then(|p| p.reference.as_deref()),
+                        r.as_ref().and_then(|p| p.reference.as_deref()),
+                    ),
+                },
                 commit: Change::between(
                     l.as_ref().and_then(|p| p.commit.as_deref()),
                     r.as_ref().and_then(|p| p.commit.as_deref()),
@@ -1021,9 +1213,15 @@ fn compare_sources(left: &Side, right: &Side) -> Section<Vec<SourceChange>> {
                     l.and_then(|s| s.commit.as_deref()),
                     r.and_then(|s| s.commit.as_deref()),
                 ),
+                revision: Change::where_both_state(
+                    l.and_then(|s| s.revision.as_deref()),
+                    r.and_then(|s| s.revision.as_deref()),
+                ),
                 axis,
             };
-            (change.reference.is_some() || change.commit.is_some()).then_some(change)
+            let quiet =
+                change.reference.is_none() && change.commit.is_none() && change.revision.is_none();
+            (!quiet).then_some(change)
         })
         .collect();
     Section::Compared { changes }
@@ -1043,7 +1241,7 @@ fn compare_blobs(left: &Side, right: &Side) -> Section<Vec<Change>> {
     };
     Section::Compared {
         changes: [
-            Change::between(Some(&l.atf), Some(&r.atf)),
+            Change::between(l.atf.as_deref(), r.atf.as_deref()),
             Change::between(Some(&l.tpl), Some(&r.tpl)),
             Change::between(l.bl32.as_deref(), r.bl32.as_deref()),
         ]
@@ -1140,6 +1338,8 @@ mod tests {
                 source: "https://example.invalid/linux.git".into(),
                 reference: "v7.1.5".into(),
                 commit: "a".repeat(40),
+                revision: 1,
+                config_sha256: "d".repeat(64),
             }),
             patches: Some(PatchesPin {
                 series: vec!["rk3588-fixes".into(), "media-accel".into()],
@@ -1151,8 +1351,11 @@ mod tests {
                 source: "https://example.invalid/u-boot.git".into(),
                 reference: "v2026.04".into(),
                 commit: "c".repeat(40),
+                revision: 1,
+                config_sha256: "9".repeat(64),
             }),
             uboot_patches: None,
+            tfa: None,
             userspace: vec![
                 named_pin("mpp", git("mainline-cma-fix", "d")),
                 named_pin("librga", git("master", "e")),
@@ -1169,7 +1372,10 @@ mod tests {
                 source_date_epoch: 1_790_347_034,
             }),
             blobs: Some(BlobsPin {
-                atf: format!("bl31.elf@sha256:{}", "1".repeat(64)),
+                source: "https://example.invalid/rkbin.git".into(),
+                reference: "master".into(),
+                commit: "c".repeat(40),
+                atf: Some(format!("bl31.elf@sha256:{}", "1".repeat(64))),
                 tpl: format!("ddr.bin@sha256:{}", "2".repeat(64)),
                 bl32: None,
             }),
@@ -1424,6 +1630,41 @@ mod tests {
         );
     }
 
+    /// The u-boot package's revision is a lock's, so two locks compare it on the u-boot
+    /// axis, and a re-pin that moved only a blob reads as a revision move there. A side
+    /// that does not state it, a provenance manifest's, reports no change, and a merge
+    /// takes it from the lock.
+    #[test]
+    fn the_uboot_revision_is_compared_where_both_sides_state_it() {
+        let old_lock = Side::from_lock("old.lock", &base_lock());
+        let mut repinned = base_lock();
+        repinned.uboot.as_mut().unwrap().revision = 2;
+        let Section::Compared { changes } =
+            compare(&old_lock, &Side::from_lock("new.lock", &repinned)).sources
+        else {
+            panic!("both sides pin sources");
+        };
+        assert_eq!(changes.len(), 1, "{changes:?}");
+        assert_eq!(changes[0].axis, "uboot");
+        assert_eq!((&changes[0].reference, &changes[0].commit), (&None, &None));
+        assert_eq!(
+            changes[0].revision,
+            Some(Change {
+                from: Some("1".into()),
+                to: Some("2".into()),
+            })
+        );
+
+        let mut unstated = Side::from_lock("forky.provenance.toml", &repinned);
+        for pin in &mut unstated.sources {
+            pin.revision = None;
+        }
+        assert!(compare(&old_lock, &unstated).sources.is_quiet());
+        let merged = unstated.merge(Side::from_lock("new.lock", &repinned));
+        let uboot = merged.sources.iter().find(|s| s.axis == "uboot").unwrap();
+        assert_eq!(uboot.revision.as_deref(), Some("2"));
+    }
+
     /// An app's build pins more than its tree, and each input is its own axis: a new
     /// SDK and the NuGet set it re-resolved read as two changes while the app's commit
     /// holds. Its patches are a patch axis of their own, apart from the kernel's.
@@ -1525,6 +1766,177 @@ mod tests {
         assert!(merged.builder.is_some());
         // The label is the left side's: merge folds facts in, it does not rename.
         assert_eq!(merged.label, "turing-rk1/forky");
+    }
+
+    /// A lock records no kernel flavor, so an unchanged kernel compared against the
+    /// recipe it was written for (whose resolve states the flavor) is unchanged.
+    #[test]
+    fn a_flavor_one_side_does_not_record_is_not_a_change() {
+        let old_lock = Side::from_lock("old.lock", &base_lock());
+        let recipe = Side::from_lock("turing-rk1/forky", &base_lock()).merge(Side {
+            kernel: Some(KernelFacts {
+                id: "rk3588-mainline-7.1".into(),
+                flavor: Some("mainline".into()),
+                ..KernelFacts::default()
+            }),
+            ..Side::default()
+        });
+        let Section::Compared { changes } = compare(&old_lock, &recipe).kernel else {
+            panic!("both sides name a kernel");
+        };
+        assert_eq!(changes.flavor, None);
+        assert!(changes.is_empty(), "{changes:?}");
+
+        // The revision is a lock's, so two locks compare it.
+        let mut repinned = base_lock();
+        repinned.kernel.as_mut().unwrap().revision = 2;
+        let Section::Compared { changes } =
+            compare(&old_lock, &Side::from_lock("new.lock", &repinned)).kernel
+        else {
+            panic!("both sides name a kernel");
+        };
+        assert_eq!(
+            changes.revision,
+            Some(Change {
+                from: Some("1".into()),
+                to: Some("2".into()),
+            })
+        );
+    }
+
+    /// A provenance manifest records neither the kernel's clone URL nor a patch
+    /// series' ref. Compared against the lock it was built from, neither is a change,
+    /// while a gained patch axis still reports its ref, since that axis is new.
+    #[test]
+    fn values_a_provenance_manifest_does_not_record_are_not_changes() {
+        let lock = base_lock();
+        let lock_side = Side::from_lock("forky.lock", &lock);
+        let mut prov_side = lock_side.clone();
+        prov_side.label = "forky.provenance.toml".into();
+        prov_side.kernel.as_mut().unwrap().source = None;
+        for axis in &mut prov_side.patches {
+            axis.reference = None;
+        }
+        let report = compare(&lock_side, &prov_side);
+        assert!(report.kernel.is_quiet(), "{:?}", report.kernel);
+        assert!(report.patches.is_quiet(), "{:?}", report.patches);
+
+        let mut gained = lock.clone();
+        gained.uboot_patches = Some(PatchesPin {
+            series: vec!["uboot-fixes".into()],
+            source: "https://example.invalid/patches.git".into(),
+            reference: "v1.2.0".into(),
+            commit: "b".repeat(40),
+        });
+        let Section::Compared { changes } =
+            compare(&lock_side, &Side::from_lock("new.lock", &gained)).patches
+        else {
+            panic!("both sides pin patch axes");
+        };
+        let uboot = changes.iter().find(|c| c.axis == "uboot").unwrap();
+        assert_eq!(
+            uboot.reference.as_ref().unwrap().to.as_deref(),
+            Some("v1.2.0")
+        );
+        assert_eq!(uboot.reference.as_ref().unwrap().from, None);
+    }
+
+    fn deb(
+        location: &str,
+        sha: char,
+        targets: &[crate::model::ExtraDebTarget],
+    ) -> crate::model::ExtraDeb {
+        let (url, path) = if location.starts_with("https://") {
+            (Some(location.to_string()), None)
+        } else {
+            (None, Some(location.to_string()))
+        };
+        crate::model::ExtraDeb {
+            url,
+            path,
+            sha256: sha.to_string().repeat(64),
+            targets: targets.to_vec(),
+        }
+    }
+
+    /// Pre-built debs are matched by where they come from: a vendored file replaced in
+    /// place is one sha256 change, and a deb only one side pulls is an addition or a
+    /// removal.
+    #[test]
+    fn extra_debs_are_matched_by_location() {
+        use crate::model::ExtraDebTarget::{Ffmpeg, Image};
+        let mut old = base_lock();
+        old.extra_debs = vec![
+            deb("debs/libdavs2.deb", '1', &[Image]),
+            deb("debs/libdavs2-dev.deb", '2', &[Ffmpeg]),
+            deb("https://example.invalid/gone.deb", '3', &[Image]),
+        ];
+        let mut new = base_lock();
+        new.extra_debs = vec![
+            deb("debs/libdavs2.deb", '4', &[Image]),
+            deb("debs/libdavs2-dev.deb", '2', &[Image, Ffmpeg]),
+            deb("https://example.invalid/new.deb", '5', &[Image]),
+        ];
+        let Section::Compared { changes } =
+            compare(&Side::from_lock("old", &old), &Side::from_lock("new", &new)).extra_debs
+        else {
+            panic!("both sides pull debs");
+        };
+        let row = |loc: &str| changes.iter().find(|c| c.location == loc).unwrap();
+        assert_eq!(changes.len(), 4);
+
+        let replaced = row("debs/libdavs2.deb");
+        assert!(replaced
+            .sha256
+            .as_ref()
+            .unwrap()
+            .to
+            .as_ref()
+            .unwrap()
+            .starts_with('4'));
+        assert_eq!(replaced.targets, None);
+
+        let retargeted = row("debs/libdavs2-dev.deb");
+        assert_eq!(retargeted.sha256, None);
+        assert_eq!(
+            retargeted.targets,
+            Some(Change {
+                from: Some("ffmpeg".into()),
+                to: Some("image,ffmpeg".into()),
+            })
+        );
+
+        assert_eq!(
+            row("https://example.invalid/gone.deb")
+                .sha256
+                .as_ref()
+                .unwrap()
+                .to,
+            None
+        );
+        assert_eq!(
+            row("https://example.invalid/new.deb")
+                .sha256
+                .as_ref()
+                .unwrap()
+                .from,
+            None
+        );
+    }
+
+    /// Two builds that pull no pre-built deb have nothing to compare, and a side that
+    /// does not record its debs at all says so.
+    #[test]
+    fn extra_debs_neither_side_pulls_are_unavailable() {
+        let lock = Side::from_lock("a", &base_lock());
+        assert!(matches!(
+            compare(&lock, &Side::from_lock("b", &base_lock())).extra_debs,
+            Section::Unavailable { .. }
+        ));
+        let Section::Unavailable { why } = compare(&lock, &Side::default()).extra_debs else {
+            panic!("a default side records no debs");
+        };
+        assert!(why.contains("does not record"), "{why}");
     }
 
     /// Two images' files compare path by path, the per-image `/etc/shadow` included; a

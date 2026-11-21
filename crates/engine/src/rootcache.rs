@@ -71,7 +71,7 @@ use std::path::{Path, PathBuf};
 /// bootstrapped tree's dpkg state, apt configuration, and configure ordering, so a
 /// dependency bump that changes the emitted tree for unchanged inputs is a bump here
 /// too.
-const ROOTFS_STAGE_VERSION: u32 = 14;
+const ROOTFS_STAGE_VERSION: u32 = 15;
 
 /// Everything that determines the produced rootfs tree *except* the per-image
 /// password (applied on restore) — the inputs [`cache_key`] hashes.
@@ -136,6 +136,12 @@ pub struct CacheKeyInputs<'a> {
     /// different order is a different file, and the key must describe the bytes rather
     /// than the intent.
     pub authorized_keys: &'a [String],
+    /// What the customize step installs the image's loader from, as `NAME=value`
+    /// records in the order it receives them. Under the `efi` loader these are the GRUB
+    /// platform, and the rootfs partition's number and identifiers. GRUB's core image and
+    /// update-grub's menu name them. The list is empty under a loader that takes none.
+    /// An empty list folds nothing, so such a tree keys as it would with no loader step.
+    pub loader: &'a [String],
     /// The rootfs `SOURCE_DATE_EPOCH`
     /// ([`RootfsOptions::source_date_epoch`](crate::rootfs::RootfsOptions::source_date_epoch)).
     ///
@@ -168,6 +174,9 @@ pub fn cache_key(inputs: &CacheKeyInputs) -> Signature {
     b.fold_scalar("source_date_epoch", &inputs.source_date_epoch.to_string());
     if !inputs.authorized_keys.is_empty() {
         b.fold_ordered("authorized_keys", inputs.authorized_keys);
+    }
+    if !inputs.loader.is_empty() {
+        b.fold_ordered("loader", inputs.loader);
     }
     b.finish()
 }
@@ -430,6 +439,7 @@ mod tests {
             interpreter: None,
             sudo: "nopasswd",
             authorized_keys: &[],
+            loader: &[],
             source_date_epoch: 1_790_347_034,
         }
     }
@@ -668,7 +678,7 @@ mod tests {
         let debs = vec!["def".to_string()];
         assert_eq!(
             cache_key(&inputs(&solved, &overlay, &debs)).as_str(),
-            "187bfb020019976e732285bfbd15e6ac1af3defba7a68c6d9889abf83014887c"
+            "f6712bae0830d86fd6b3d5e8e47e9a7a3a30daa1be06f2da41a882b8bfe18347"
         );
     }
 

@@ -177,6 +177,7 @@ name = "boot2deb-engine"
 version = "0.0.0"
 dependencies = [
  "boot2deb-core",
+ "crc32fast",
  "ferroday-cage",
  "ferrosys",
  "flate2",

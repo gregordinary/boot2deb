@@ -14,8 +14,8 @@
 #
 # Two modes. `hardware` (the default) runs everything and is what an operator
 # runs on the board. `userland` marks the checks that only mean something on
-# the board -- driver-bound, devnode, sound-card, no-dmesg-match, and the
-# running-kernel half of the kernel checks -- as not applicable, and checks
+# the board -- driver-bound, devnode, sound-card, no-dmesg-match, esp-file, and
+# the running-kernel half of the kernel checks -- as not applicable, and checks
 # the disk-content half (files, firmware, the initramfs) against /boot
 # instead of `uname`: it is how `boot2deb try` runs this rootfs under a
 # generic QEMU kernel without failing on hardware the emulator does not have.
@@ -142,6 +142,21 @@ check_file() {
     fi
 }
 
+# The EFI system partition is mounted at /boot/efi on the board, and the path is
+# taken from its root. Under `boot2deb try` the emulator's fixture kernel cannot
+# mount it, and try's firmware boot reads it instead, so userland mode reports
+# these as not applicable. On the board an unmounted partition leaves an empty
+# mount point, which reads as a missing file -- as it does to the firmware.
+check_esp_file() {
+    if [ "$mode" = userland ]; then
+        report na esp-file "$1"
+    elif any_path "$root/boot/efi"$1; then
+        report ok esp-file "$1"
+    else
+        report fail esp-file "$1" "not on the EFI system partition (/boot/efi)"
+    fi
+}
+
 check_dtb() {
     # Every layout a shipped kernel installs DTBs into: the rkbin hooks'
     # /boot/<name>-<kver>, a bindeb-pkg kernel's /usr/lib/linux-image-<ver>/,
@@ -247,6 +262,33 @@ check_single_kernel() {
     fi
 }
 
+# Every PARTUUID the running system mounts by names one attached partition. Two disks
+# written from one image share them, and a boot mounts whichever it finds first. The
+# helper the boot-time unit runs gives the answer, one line per shared PARTUUID. It
+# reads this machine's disks, so a root examined from outside (--root) is not
+# applicable.
+check_unique_partuuid() {
+    if [ -n "$root" ]; then
+        report na unique-partuuid ""
+        return
+    fi
+    if [ ! -x /usr/lib/boot2deb/partuuid-check ]; then
+        report skip unique-partuuid "" "no /usr/lib/boot2deb/partuuid-check"
+        return
+    fi
+    if _shared=$(/usr/lib/boot2deb/partuuid-check); then
+        report ok unique-partuuid ""
+    else
+        # A here-document rather than a pipe, so the loop runs in this shell and
+        # each report reaches the failure count.
+        while IFS= read -r _line; do
+            report fail unique-partuuid "$_line" "detach one, or press it with --fresh-identity"
+        done <<EOF
+$_shared
+EOF
+    fi
+}
+
 check_driver_bound() {
     if [ "$mode" = userland ]; then
         report na driver-bound "$1"
@@ -310,7 +352,7 @@ run_check() {
     # Every known kind requires its argument text; a known kind with none is a
     # malformed line, and saying so beats guessing what it meant.
     case "$1" in
-        kernel-release | kernel-flavor | file | dtb | firmware | \
+        kernel-release | kernel-flavor | file | esp-file | dtb | firmware | \
             initramfs-module | driver-bound | devnode | sound-card | no-dmesg-match)
             if [ -z "$2" ]; then
                 report skip "$1" "" "malformed line: no argument"
@@ -321,8 +363,10 @@ run_check() {
     case "$1" in
         kernel-release)   check_kernel_release "$2" ;;
         single-kernel)    check_single_kernel ;;
+        unique-partuuid)  check_unique_partuuid ;;
         kernel-flavor)    check_kernel_flavor "$2" ;;
         file)             check_file "$2" ;;
+        esp-file)         check_esp_file "$2" ;;
         dtb)              check_dtb "$2" ;;
         firmware)         check_firmware "$2" ;;
         initramfs-module) check_initramfs_module "$2" ;;

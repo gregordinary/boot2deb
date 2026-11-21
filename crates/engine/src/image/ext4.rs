@@ -117,18 +117,48 @@ const REFERENCE_PIN_BYTES: u64 = 4 << 30;
 /// module's choices — so the two cannot be changed independently without the pin moving.
 pub const ROOTFS_FS_KIND: &str = "ext4";
 
-/// Format `dest` as an ext4 filesystem holding the rootfs `tarball`'s contents, then
-/// verify it.
+/// Parse the rootfs `tarball` into the entry list the image's filesystems are formatted
+/// from, with a press re-assembly's changes applied.
 ///
-/// `size` either states the filesystem's size or asks for it to be found — see
-/// [`RootfsSize`]. `label` is the ext4 volume label (≤ 16 bytes) the rootfs's
-/// `/etc/fstab` mounts by. `uuid` is the deterministic superblock UUID the caller derived
-/// from the lock, so a rebuild reproduces it. `first_boot` is the per-image credential
-/// spliced into the rootfs's `/etc/shadow` before the filesystem is written.
-/// `press` is what a press re-assembly changes in the tree, applied to the parsed entry
-/// list before the credential splice, so the per-image password wins over anything a
-/// press could copy. See [`PressTree`] for the order. It is `None` for a build, whose
-/// image contains exactly the tar.
+/// `press` is what a press re-assembly changes in the tree. It is applied here, before
+/// anything is split off the tree or spliced into it, so the EFI system partition is
+/// formatted from the pressed tree too, and the per-image password
+/// ([`build_rootfs_ext4`]) still wins over anything a press could copy. See
+/// [`PressTree`] for the order. It is `None` for a build, whose image contains exactly
+/// the tar.
+///
+/// `ArchiveSource` reads ownership, mode, times, xattrs, ACLs, and device nodes straight
+/// from the (PAX) headers, so no privileged extraction and no user namespace is needed.
+/// It leaves each member's bytes in the archive and reads them a window at a time as
+/// that file is placed, so the bytes in memory are one mebibyte however large the rootfs
+/// or its largest file. The entries hold the archive open until they are dropped, so
+/// `tarball` must not be rewritten in place while they live — the rootfs node finishes
+/// writing it before the image node runs, so nothing holds it open for writing here.
+pub(crate) fn read_tree(
+    tarball: &Path,
+    press: Option<PressTree<'_>>,
+    step: &Step,
+) -> Result<Vec<SourceEntry>, EngineError> {
+    let mut entries = ArchiveSource::from_path(tarball)
+        .map_err(|e| EngineError::Ext4Format {
+            detail: format!("parsing rootfs tar {}: {e}", tarball.display()),
+        })?
+        .into_entries();
+    if let Some(press) = press {
+        press.apply(&mut entries, step)?;
+    }
+    Ok(entries)
+}
+
+/// Format `dest` as an ext4 filesystem holding the rootfs `entries`, then verify it.
+///
+/// `entries` is the tree from [`read_tree`], less anything the image places elsewhere
+/// (the EFI system partition's subtree). `size` either states the filesystem's size or
+/// asks for it to be found — see [`RootfsSize`]. `label` is the ext4 volume label
+/// (≤ 16 bytes) the rootfs's `/etc/fstab` mounts by. `uuid` is the deterministic
+/// superblock UUID the caller derived from the lock, so a rebuild reproduces it.
+/// `first_boot` is the per-image credential spliced into the rootfs's `/etc/shadow`
+/// before the filesystem is written.
 ///
 /// The superblock's format times are deterministic: they take the newest source mtime,
 /// which the rootfs export has already clamped to the lock's `SOURCE_DATE_EPOCH`. The
@@ -137,15 +167,13 @@ pub const ROOTFS_FS_KIND: &str = "ext4";
 ///
 /// Returns what the format realized and what it was checked with — see
 /// [`RootfsFilesystem`].
-#[allow(clippy::too_many_arguments)] // two call sites; the args are the format itself
 pub(crate) fn build_rootfs_ext4(
     dest: &Path,
     size: RootfsSize,
-    tarball: &Path,
+    mut entries: Vec<SourceEntry>,
     label: &str,
     uuid: Uuid,
     first_boot: FirstBoot,
-    press: Option<PressTree<'_>>,
     step: &Step,
 ) -> Result<RootfsFilesystem, EngineError> {
     if let RootfsSize::Exact(bytes) = size {
@@ -166,34 +194,12 @@ pub(crate) fn build_rootfs_ext4(
         ),
     });
 
-    // 1. Parse the rootfs tar into an entry list in-process. `ArchiveSource` reads
-    //    ownership, mode, times, xattrs, ACLs, and device nodes straight from the
-    //    (PAX) headers — no privileged extraction, so no user namespace.
-    //
-    //    `from_path` leaves each member's bytes in the archive and reads them a window
-    //    at a time as that file is placed, so the bytes in memory are one mebibyte
-    //    however large the rootfs or its largest file. It holds the archive open for
-    //    the whole format, so `tarball` must not be rewritten in place until this
-    //    returns — the rootfs node finishes writing it before the image node runs, so
-    //    nothing holds it open for writing here.
-    let mut entries = ArchiveSource::from_path(tarball)
-        .map_err(|e| EngineError::Ext4Format {
-            detail: format!("parsing rootfs tar {}: {e}", tarball.display()),
-        })?
-        .into_entries();
-
-    // 2. A press re-assembly's changes, made before the password splice below so the
-    //    per-image credential always wins over anything copied in.
-    if let Some(press) = press {
-        press.apply(&mut entries, step)?;
-    }
-
-    // 3. Splice the unique per-image first-boot password into /etc/shadow: the one
+    // 1. Splice the unique per-image first-boot password into /etc/shadow: the one
     //    per-build-unique step, done on the parsed entry rather than a staged file.
     splice_first_boot_password(&mut entries, first_boot)?;
     step.log("spliced the unique per-image first-boot password into /etc/shadow");
 
-    // 4. Format straight into `dest`. `format_to` streams only the blocks it uses into
+    // 2. Format straight into `dest`. `format_to` streams only the blocks it uses into
     //    the (sparse) file and extends it to the full size, so the whole image never
     //    lives in memory; a freshly truncated file gives it the zeroed holes it needs.
     //    It returns the geometry it realized, which is the writer's own account of what
@@ -824,7 +830,8 @@ mod tests {
             user: "debian",
             password_hash: "$6$saltsalt$0123456789abcdef",
         };
-        let fs = build_rootfs_ext4(&img, size, &tar, "rootfs", uuid, first_boot, None, &step)?;
+        let entries = read_tree(&tar, None, &step)?;
+        let fs = build_rootfs_ext4(&img, size, entries, "rootfs", uuid, first_boot, &step)?;
         Ok((img, fs))
     }
 

@@ -74,6 +74,7 @@ mod tests {
         write(r, "boot/initrd.img-7.1.6-1-arm64", "");
         write(r, "boot/extlinux/extlinux.conf", "label l\n");
         write(r, "boot/rk3588-turing-rk1.dtb-7.1.6-1-arm64", "");
+        write(r, "boot/efi/EFI/BOOT/BOOTAA64.EFI", "");
         write(r, "sys/bus/platform/drivers/panthor/fb000000.gpu", "");
         write(r, "dev/dri/renderD128", "");
         write(r, "proc/asound/cards", " 0 [Analog]: H96 Analog\n");
@@ -125,6 +126,7 @@ mod tests {
             "soc-rk3588",
             "file              /boot/vmlinuz-*\n\
              file              /boot/extlinux/extlinux.conf\n\
+             esp-file          /EFI/BOOT/BOOTAA64.EFI\n\
              firmware          arm/mali/arch10.8/mali_csffw.bin\n\
              initramfs-module  dw_mmc_rockchip\n\
              driver-bound      fb000000.gpu panthor\n\
@@ -141,8 +143,96 @@ mod tests {
             out.contains("turing-rk1 / forky / rk3588-mainline-7.1"),
             "{out}"
         );
-        assert_eq!(out.matches("\n  ok      ").count(), 11, "{out}");
-        assert!(out.contains("11 ok."), "{out}");
+        assert_eq!(out.matches("\n  ok      ").count(), 12, "{out}");
+        assert!(out.contains("12 ok."), "{out}");
+    }
+
+    /// `unique-partuuid` reads the machine's own disks, so a root examined from outside
+    /// says nothing about them: not applicable, and never a pass.
+    #[test]
+    fn unique_partuuid_is_not_applicable_to_a_root_read_from_outside() {
+        if !crate::hosttool::require(&["sh"]) {
+            return;
+        }
+        let tmp = fixture();
+        checks(tmp.path(), "identity", "unique-partuuid\n");
+        let (code, out) = run(tmp.path(), UNAME);
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains("n/a     unique-partuuid"), "{out}");
+    }
+
+    /// The helper behind `unique-partuuid` and the boot-time unit, driven with stand-ins
+    /// for the disks: `lsblk` lists two disks written from one image, `findmnt` says
+    /// which one is mounted. The shipped script is run with its two system files
+    /// pointed at fixtures, and nothing else changed.
+    #[test]
+    fn partuuid_check_names_a_shared_partuuid_the_system_mounts_by() {
+        if !crate::hosttool::require(&["sh", "awk", "sed", "tr", "sort", "grep"]) {
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let script = std::fs::read_to_string(runner().with_file_name("partuuid-check")).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let stub = |name: &str, body: &str| {
+            let path = dir.join("bin").join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        // The second disk has the same identifiers in the other case, as a tag may be
+        // written. The partition only the other disk has a twin of is not mounted by.
+        stub(
+            "lsblk",
+            "printf '%s\\n' '/dev/mmcblk0 ' '/dev/mmcblk0p1 1111aaaa-01' \
+             '/dev/mmcblk0p2 2222bbbb-02' '/dev/sda1 1111aaaa-01' '/dev/sda2 2222BBBB-02' \
+             '/dev/nvme0n1p1 3333cccc-03'",
+        );
+        stub(
+            "findmnt",
+            "case \"$*\" in *2222bbbb-02*) echo /dev/mmcblk0p2 ;; esac",
+        );
+        let path = format!(
+            "{}:{}",
+            dir.join("bin").display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let run_with = |fstab: &str, cmdline: &str| {
+            std::fs::write(dir.join("fstab"), fstab).unwrap();
+            std::fs::write(dir.join("cmdline"), cmdline).unwrap();
+            let text = script
+                .replace("/etc/fstab", &dir.join("fstab").display().to_string())
+                .replace("/proc/cmdline", &dir.join("cmdline").display().to_string());
+            let out = Command::new("sh")
+                .arg("-c")
+                .arg(text)
+                .env("PATH", &path)
+                .output()
+                .unwrap();
+            (
+                out.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&out.stdout).into_owned(),
+            )
+        };
+
+        let (code, out) = run_with(
+            "PARTUUID=2222BBBB-02\t/\text4\tdefaults\t0 1\n\
+             PARTUUID=3333cccc-03\t/data\text4\tnofail\t0 2\n",
+            "console=ttyS2 root=PARTUUID=2222bbbb-02 rootwait\n",
+        );
+        assert_eq!(code, 1, "{out}");
+        assert_eq!(
+            out.trim(),
+            "PARTUUID 2222bbbb-02 is on 2 partitions: /dev/mmcblk0p2 /dev/sda2, \
+             mounted from /dev/mmcblk0p2"
+        );
+
+        let (code, out) = run_with(
+            "PARTUUID=3333cccc-03\t/\text4\tdefaults\t0 1\n",
+            "root=PARTUUID=3333cccc-03\n",
+        );
+        assert_eq!(code, 0, "{out}");
+        assert!(out.is_empty(), "{out}");
     }
 
     /// The one-kernel invariant: the fixture contains one and passes; a second
@@ -220,6 +310,7 @@ mod tests {
             "kernel-release    7.1.6\n\
              kernel-flavor     arm64\n\
              file              /boot/vmlinuz-*\n\
+             esp-file          /EFI/BOOT/BOOTAA64.EFI\n\
              dtb               rockchip/rk3588-turing-rk1.dtb\n\
              firmware          arm/mali/arch10.8/mali_csffw.bin\n\
              initramfs-module  dw_mmc_rockchip\n\
@@ -238,7 +329,8 @@ mod tests {
             ],
         );
         assert_eq!(code, 1, "{out}");
-        assert_eq!(out.matches("\n  FAILED  ").count(), 10, "{out}");
+        assert_eq!(out.matches("\n  FAILED  ").count(), 11, "{out}");
+        assert!(out.contains("not on the EFI system partition"), "{out}");
         assert!(out.contains("running 7.1.7-1-rt-arm64"), "{out}");
         assert!(out.contains("running an -rt kernel"), "{out}");
         assert!(out.contains("pattern matched the kernel log"), "{out}");
@@ -268,6 +360,35 @@ mod tests {
         assert!(out.contains("  FAILED  kernel-flavor"), "{out}");
     }
 
+    /// Ubuntu ships every firmware file compressed. With `FW_LOADER_COMPRESS` the
+    /// kernel's loader opens the bare name, then `.zst`, then `.xz`, and the check
+    /// accepts exactly those: a `.gz` is a file the loader never opens.
+    #[test]
+    fn the_firmware_check_accepts_the_names_the_loader_opens() {
+        if !crate::hosttool::require(&["sh"]) {
+            return;
+        }
+        for (name, expected) in [
+            ("mali_csffw.bin.zst", 0),
+            ("mali_csffw.bin.xz", 0),
+            ("mali_csffw.bin.gz", 1),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            write(
+                tmp.path(),
+                &format!("usr/lib/firmware/arm/mali/arch10.8/{name}"),
+                "",
+            );
+            checks(
+                tmp.path(),
+                "soc-rk3588",
+                "firmware          arm/mali/arch10.8/mali_csffw.bin\n",
+            );
+            let (code, out) = run(tmp.path(), UNAME);
+            assert_eq!(code, expected, "{name}:\n{out}");
+        }
+    }
+
     /// Userland mode (`boot2deb try` under `-M virt`): the hardware checks are
     /// not-applicable rather than failed, the running kernel is a fixture so
     /// the kernel checks look at /boot instead of uname, and the disk-content
@@ -289,18 +410,20 @@ mod tests {
              driver-bound      fb000000.gpu panthor\n\
              devnode           /dev/dri/renderD128\n\
              sound-card        H96 Analog\n\
-             no-dmesg-match    SError\n",
+             no-dmesg-match    SError\n\
+             esp-file          /dtb/rockchip/rk3588-turing-rk1.dtb\n",
         );
         // The emulator's uname: nothing like the board kernel. Must not fail
-        // anything in this mode.
+        // anything in this mode. The ESP file is absent from the fixture, as the
+        // partition is absent from a try boot's mounts, and is not applicable either.
         let (code, out) = run(
             tmp.path(),
             &["--mode", "userland", "--uname", "6.12.0-virt"],
         );
         assert_eq!(code, 0, "{out}");
-        assert_eq!(out.matches("\n  n/a     ").count(), 4, "{out}");
+        assert_eq!(out.matches("\n  n/a     ").count(), 5, "{out}");
         assert_eq!(out.matches("\n  ok      ").count(), 5, "{out}");
-        assert!(out.contains("4 not applicable"), "{out}");
+        assert!(out.contains("5 not applicable"), "{out}");
     }
 
     /// A dracut image has `lsinitrd` and no `lsinitramfs`, and the module check
@@ -404,7 +527,11 @@ mod tests {
     #[test]
     fn the_shipped_runner_and_wrapper_are_executable() {
         use std::os::unix::fs::PermissionsExt;
-        for rel in [super::RUNNER_IMAGE_PATH, super::WRAPPER_IMAGE_PATH] {
+        for rel in [
+            super::RUNNER_IMAGE_PATH,
+            super::WRAPPER_IMAGE_PATH,
+            "/usr/lib/boot2deb/partuuid-check",
+        ] {
             let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .ancestors()
                 .nth(2)

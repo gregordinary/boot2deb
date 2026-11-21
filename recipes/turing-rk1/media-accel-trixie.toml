@@ -19,5 +19,5 @@ image_size = "2G"
 # source and so suite-independent, and Mesa's Vulkan drivers come from each suite.
 [support]
 status = "expected"
-date   = "2026-10-19"
+date   = "2026-11-21"
 

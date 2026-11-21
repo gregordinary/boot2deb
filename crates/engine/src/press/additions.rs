@@ -367,15 +367,26 @@ impl TreeAdditions {
         Ok(())
     }
 
-    /// Add the `--embed-image` payload: the recipe's own compressed artifact,
-    /// stored at [`EMBEDDED_IMAGE_DIR`] for `boot2deb-install-to` to write onto
-    /// the board's internal storage from the booted system.
+    /// Add the `--embed-image` payload: the recipe's own compressed artifact, stored at
+    /// [`EMBEDDED_IMAGE_DIR`] for `boot2deb-install-to` to write onto the board's
+    /// internal storage from the booted system.
+    ///
+    /// Beside it goes `<name>.info` ([`embedded_info`]): the artifact's digest and the
+    /// disk it decompresses to, as the build's inventory recorded them. The installer
+    /// holds the payload to them before it touches the target disk. It holds what it
+    /// wrote to the disk digest before it reports success. A payload damaged on the card
+    /// therefore cannot become a half-written disk that claims to be installed.
     ///
     /// # Errors
     ///
     /// [`EngineError::PressAddition`] when the artifact is missing or not a
     /// regular file.
-    pub fn embed_image(&mut self, artifact: &Path) -> Result<(), EngineError> {
+    pub fn embed_image(
+        &mut self,
+        artifact: &Path,
+        sha256: &str,
+        disk: &boot2deb_core::inventory::DiskDigest,
+    ) -> Result<(), EngineError> {
         let name = file_name(artifact)?;
         let (content, _) = host_file(artifact, &name)?;
         self.push(
@@ -383,6 +394,14 @@ impl TreeAdditions {
             AddedContent::Host(content),
             0o644,
             "embedded artifact",
+        );
+        self.push(
+            format!("{EMBEDDED_IMAGE_DIR}/{name}.info"),
+            AddedContent::Host(FileContent::Owned(
+                embedded_info(&name, sha256, disk).into_bytes(),
+            )),
+            0o644,
+            "embedded artifact record",
         );
         self.embedded_image = Some(name);
         Ok(())
@@ -617,6 +636,30 @@ fn normalize_tree_dest(
 /// The mode an addition is placed with: `0755` when the host file is executable,
 /// `0644` otherwise. Deliberately normalized rather than kept, so a
 /// site tree's umask is not a property of the image.
+/// The record `boot2deb-install-to` reads beside an embedded payload: `key=value` lines,
+/// one per fact, so a POSIX shell reads it with nothing but `read`.
+///
+/// `sha256` is the payload file's own digest. `image_bytes` and `image_sha256` are the
+/// disk it decompresses to, which is exactly what the installer writes and then reads
+/// back from the target.
+#[must_use]
+pub fn embedded_info(
+    name: &str,
+    sha256: &str,
+    disk: &boot2deb_core::inventory::DiskDigest,
+) -> String {
+    format!(
+        "# Written by `boot2deb press --embed-image`: the payload beside this file, as its\n\
+         # build recorded it. boot2deb-install-to checks the payload and the disk it\n\
+         # writes against these.\n\
+         file={name}\n\
+         sha256={sha256}\n\
+         image_bytes={}\n\
+         image_sha256={}\n",
+        disk.bytes, disk.sha256
+    )
+}
+
 fn file_mode(executable: bool) -> u16 {
     if executable {
         0o755

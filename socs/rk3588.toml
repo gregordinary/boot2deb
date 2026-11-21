@@ -3,11 +3,6 @@ description = "Rockchip RK3588 (4x Cortex-A76 + 4x Cortex-A55)"
 arch        = "arm64"
 dt_dir      = "rockchip"                 # arch/arm64/boot/dts/<dt_dir>
 
-# Accel modules force-loaded on the RK3588 media stack via
-# /etc/modules-load.d/. Auto-probed via DT compat strings; listed here so
-# they are guaranteed present on first boot.
-modules = ["vsi_iommu", "rockchip_vdec", "hantro_vpu", "rga3", "rkvenc", "rocket"]
-
 # What every RK3588 image contains, regardless of board or feature selection.
 #
 # Non-free firmware the RK3588 loads at runtime, from the distribution's archive and
@@ -42,19 +37,34 @@ packages = [
     "v4l-utils",
 ]
 
-# rkbin defaults for RK3588 boards. ATF (BL31) is SoC-generic; the DDR TPL is a
+# rkbin defaults for RK3588 boards. BL31 is SoC-generic; the DDR TPL is a
 # common-memory default a board with different DRAM overrides on its device layer.
 # RK3588 boots BL31-only, so there is no BL32/OP-TEE.
 [rkbin]
 atf = "rk3588_bl31_v1.56.elf"
 tpl = "rk3588_ddr_lp4_2112MHz_lp5_2400MHz_v1.24.bin"
 
-# Where the vendored blobs above are published. The build never reads it, since the
-# blobs are vendored under blobs/rk3588/ and pinned by sha256; `boot2deb outdated`
-# lists it to find a newer file spelled like each pinned one.
+# The repository the blobs above are fetched from. The lock pins a commit of it and
+# each file's sha256, and the u-boot stage fetches only the named files at that commit.
+# `update` keeps the locked commit while it still contains every named file, and moves
+# to the head of `ref` when the layer names a file it lacks. `boot2deb outdated` lists
+# `dir` for a newer file spelled like each pinned one.
 [rkbin.upstream]
 git = "https://github.com/rockchip-linux/rkbin.git"
+ref = "master"
 dir = "bin/rk35"
+
+# Trusted Firmware-A, the BL31 a board selects with `bl31 = "tfa"` in place of the rkbin
+# blob above. The `tfa` node builds `make PLAT=rk3588 bl31` in the cross root, and u-boot
+# packs the resulting bl31.elf. `ref` is the default constraint; the exact commit is
+# pinned in the lock. A board lists `tfa` in `supported_bl31` once it is validated on it.
+# `submodules` names what the BL31 build reads of the tree's submodules: libfdt, from
+# contrib/dtc. Each is fetched at the commit the pinned TF-A tree records for it.
+[tfa]
+git        = "https://git.trustedfirmware.org/TF-A/trusted-firmware-a.git"
+ref        = "v2.16-rc0"
+plat       = "rk3588"
+submodules = ["contrib/dtc"]
 
 # Media-accel userspace source trees, shared across the RK35xx family.
 # `ref` is the default constraint; the exact commit is pinned in the lock. mpp
@@ -113,36 +123,34 @@ build_deps     = [
 # ffmpeg source pair: an FFmpeg release tag as the base, plus the Rockchip
 # rkmpp-encode / rkrga-filter graft (nyanmisaka). The rk3588-accel series' `ffmpeg`
 # scope applies onto the tag, in order: Kwiboo's V4L2 request-API decode hwaccel,
-# taken verbatim from the `v4l2-request-n8.1` branch, then the graft, then the
-# fixes. The graft is a `git am` series rather than a cherry-pick because one graft
-# commit (the RKMPP hwcontext) needs a 3-way conflict resolution a plain cherry-pick
+# rebased onto the tag from the `v4l2-request-n8.1` branch, then the graft, then the
+# fixes. The graft is a `git am` series rather than a cherry-pick because three of
+# its commits need a conflict resolution against this base that a plain cherry-pick
 # cannot reproduce, so `rockchip` here is recorded as provenance and is not fetched
 # at build time.
 #
-# The base is a tag on FFmpeg's `release/8.1` rather than Kwiboo's branch, whose own
-# base is `n8.1`. The image therefore includes the point releases' demuxer, decoder
-# and swscale fixes. Both refs stay on 8.1, the generation the graft is written
-# against.
+# The base is an FFmpeg release tag rather than Kwiboo's branch, whose own base is
+# `n8.1`, so the image includes the release's demuxer, decoder and swscale fixes.
 [ffmpeg.base]
 git = "https://code.ffmpeg.org/FFmpeg/FFmpeg.git"
-ref = "n8.1.3"
+ref = "n9.1"
 
-# The commit on nyanmisaka's `8.1` branch the graft is cut from, named as a commit
-# rather than as the branch. nyanmisaka rebases the branch onto newer 8.1
-# releases, so its head is a commit that does not contain this one, and a lock that
-# followed it would record a tree the graft did not come from.
+# The commit on nyanmisaka's `9.0` branch the graft is cut from, named as a commit
+# rather than as the branch. nyanmisaka rebases the branch onto newer releases,
+# after which its head no longer contains this commit, and a lock that followed the
+# branch would record a tree the graft did not come from.
 [ffmpeg.rockchip]
 git = "https://github.com/nyanmisaka/ffmpeg-rockchip.git"
-ref = "f66f2f804627e4464c2d1b10181772b5437bb991"
+ref = "12b8e9618e98783542cf0136f57e0011c9c6090c"
 
 # What every booted RK3588 image must have, checked by boot2deb-selftest.
 #
 # The Mali-G610 is a Valhall CSF part driven by mainline panthor, which builds
 # the firmware path from the GPU_ID register — arch10.8 is hardware-fixed for
 # the G610 (never arch14.8, a different GPU's blob). The blob ships in
-# firmware-misc-nonfree above; this check is what catches that package ever
-# moving or dropping the path, which otherwise surfaces as a GPU that is
-# silently absent.
+# firmware-misc-nonfree or linux-firmware-misc above; this check is what catches
+# that package ever moving or dropping the path, which otherwise surfaces as a GPU
+# that is silently absent.
 [[expect]]
 check = "firmware"
 path  = "arm/mali/arch10.8/mali_csffw.bin"

@@ -2,11 +2,15 @@
 //!
 //! Its own module for the same reason [`wifi`](crate::wifi) is: the value crosses
 //! a trust boundary. It is typed at press time and travels as a line of `seed.txt`.
-//! The device's first-boot hook renders it into whichever line-based format the
-//! image's network stack reads, either a NetworkManager keyfile or a `dhcpcd.conf`
-//! stanza. The check here holds the grammar those two renderings share. A bad value
-//! is then a press-time error naming the flag, rather than a board that silently
-//! never gets an address.
+//! The device's first-boot hook renders it into whichever format the image's network
+//! stack reads: a NetworkManager keyfile, a netplan file, or a `dhcpcd.conf` stanza.
+//! The check here holds the grammar those renderings share. A bad value is then a
+//! press-time error naming the flag, rather than a board that silently never gets an
+//! address.
+//!
+//! A `seed.txt` edited by hand never passes through press, so the hook holds its value
+//! to these same rules in sh. The engine's `first_boot_hooks` test keeps that copy in
+//! agreement with this one.
 //!
 //! The grammar is `address/prefix[,gateway[,dns...]]`, IPv4 throughout. The fields
 //! are comma-separated:

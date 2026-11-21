@@ -1,7 +1,12 @@
 //! u-boot compile stage. It clones the pinned u-boot and applies the locked u-boot
 //! patch series where the resolved device selects one. It then builds the board
-//! defconfig with the sha256-verified rkbin ATF/TPL blobs, and stages the raw-gap
-//! payloads (`idbloader.img`, `u-boot.itb`).
+//! defconfig with the sha256-verified rkbin DDR TPL and the selected BL31, and stages
+//! the raw-gap payloads (`idbloader.img`, `u-boot.itb`).
+//!
+//! The BL31 is the rkbin blob, verified like the TPL, or the `bl31.elf` the
+//! [`tfa`](crate::build::tfa) stage builds. This stage runs that one itself, after
+//! its own artifact-cache probe misses, so a cached u-boot never builds TF-A. Either
+//! way the BL31 reaches `make` as `BL31=`.
 //!
 //! RK3588 u-boot builds with the aarch64 toolchain (`CROSS_COMPILE` on a
 //! non-arm64 host) and `CONFIG_ARM64=y` from the defconfig, so no `ARCH=` is
@@ -15,8 +20,8 @@ use crate::build::{
 use crate::error::EngineError;
 use crate::event::{EventSink, Step};
 use crate::sandbox::{BuildRoot, BuildRootSpec, BuildSandbox, CompileRoot, PackagingSandbox};
-use boot2deb_core::lock::Lock;
-use boot2deb_core::model::ResolvedRkbinBoot;
+use boot2deb_core::lock::{Lock, TfaPin};
+use boot2deb_core::model::{Bl31, ResolvedRkbinBoot};
 use boot2deb_core::size::parse_size;
 use boot2deb_core::ResolvedBuild;
 use std::path::{Path, PathBuf};
@@ -79,7 +84,19 @@ pub const UBOOT_BUILD_DEPS: &[&str] = &[
 /// folded inputs do not already capture. That covers a defconfig generated with
 /// different `make` variables, a change to which artifacts the stage emits, and a
 /// different archive compressor.
-const OUTPUT_STAGE_VERSION: u32 = 6;
+const OUTPUT_STAGE_VERSION: u32 = 8;
+
+/// Where the u-boot stage reads the lock's rkbin blobs from. Either way each file is
+/// verified against its sha256 pin and the verified bytes are what `make` reads.
+#[derive(Debug, Clone, Copy)]
+pub enum BlobSource<'a> {
+    /// Fetch the pinned files from the rkbin repository at the locked commit into this
+    /// durable, commit-addressed cache ([`rkbin::ensure_files`](crate::rkbin::ensure_files)).
+    Fetch(&'a Path),
+    /// Read them from this local directory (`--blobs-dir`), for an offline build or a
+    /// blob under test. The files are named as the lock names them.
+    Dir(&'a Path),
+}
 
 /// Filesystem inputs for the u-boot stage.
 pub struct UbootOptions<'a> {
@@ -89,9 +106,14 @@ pub struct UbootOptions<'a> {
     /// The patch series to apply, or `None` when the resolved kernel names no patch
     /// series. u-boot is then compiled exactly as cloned.
     pub patches: Option<PatchSource<'a>>,
-    /// Directory holding the vendored rkbin blobs, verified against the lock
-    /// before use.
-    pub blobs_dir: &'a Path,
+    /// Where the rkbin blobs the lock pins come from. Read only after the Tier-2
+    /// probe misses, so a build that restores u-boot from the artifact cache fetches
+    /// nothing.
+    pub blobs: BlobSource<'a>,
+    /// Git URL or local path to clone Trusted Firmware-A from, for a build point whose
+    /// BL31 provider is `tfa`. Defaults to the SoC's `[tfa].git`. Unread under the
+    /// rkbin provider.
+    pub tfa_source: &'a str,
     /// Scratch directory holding the u-boot clone (`<work>/u-boot`).
     pub work_dir: &'a Path,
     /// The host-arch cross root every `make` in this stage runs in
@@ -173,7 +195,7 @@ pub struct MaskromImages {
 pub struct UbootArtifacts {
     /// `idbloader.img` (SPL + TPL), written at the boot method's idbloader offset.
     pub idbloader: PathBuf,
-    /// `u-boot.itb` (FIT: u-boot proper + ATF + DT), written at its offset.
+    /// `u-boot.itb` (FIT: u-boot proper + BL31 + DT), written at its offset.
     pub uboot_itb: PathBuf,
     /// The `u-boot-<device>` `.deb` staging the payloads under `/usr/lib/u-boot`.
     /// The image build still writes the raw payloads to the gap directly. This deb is
@@ -276,32 +298,62 @@ pub fn build_uboot(
     step.progress(20);
 
     // Verify blobs against the lock and stage the verified bytes into a private
-    // dir the build consumes, so `make` reads exactly what was hashed.
+    // dir the build consumes, so `make` reads exactly what was hashed. The BL31 is
+    // the rkbin blob, verified the same way, or the TF-A stage's `bl31.elf`.
+    let blobs_dir = match opts.blobs {
+        BlobSource::Fetch(cache) => {
+            crate::rkbin::ensure_files(blob_pins, &boot.rkbin.upstream, cache, &step)?
+        }
+        BlobSource::Dir(dir) => dir.to_path_buf(),
+    };
     let blob_stage = opts.work_dir.join("blobs");
-    let atf = absolute(blobs::verify_to(
-        opts.blobs_dir,
-        &blob_pins.atf,
-        &blob_stage,
-    )?)?;
-    let tpl = absolute(blobs::verify_to(
-        opts.blobs_dir,
-        &blob_pins.tpl,
-        &blob_stage,
-    )?)?;
+    let (atf, deb_bl31) = match &boot.bl31 {
+        Bl31::Rkbin { .. } => {
+            let pin = blob_pins.atf.as_deref().ok_or(EngineError::MissingPin {
+                what: "blobs.atf",
+                stage: NODE,
+            })?;
+            let path = absolute(blobs::verify_to(&blobs_dir, pin, &blob_stage)?)?;
+            (
+                path,
+                DebBl31::Rkbin {
+                    file: pin_file(pin),
+                },
+            )
+        }
+        Bl31::Tfa(_) => {
+            let pin = crate::build::tfa::tfa_pin(lock)?;
+            // Built into this stage's work dir, which its compile root binds, so `make`
+            // reads `bl31.elf` at the path returned here.
+            let tfa = crate::build::tfa::build_tfa(
+                build,
+                lock,
+                &crate::build::tfa::TfaOptions {
+                    source: opts.tfa_source,
+                    work_dir: opts.work_dir,
+                    cross: opts.cross,
+                    store: opts.store,
+                },
+                env,
+                sink,
+            )?;
+            let license = std::fs::read_to_string(&tfa.license)
+                .map_err(|s| EngineError::io(&tfa.license, s))?;
+            (absolute(tfa.bl31.clone())?, DebBl31::Tfa { pin, license })
+        }
+    };
+    let tpl = absolute(blobs::verify_to(&blobs_dir, &blob_pins.tpl, &blob_stage)?)?;
     // BL32/OP-TEE only where the boot chain has one (RK3576); BL31-only SoCs
     // (RK3588/RK1) pin no bl32, so nothing is verified or passed.
     let bl32 = match &blob_pins.bl32 {
-        Some(pin) => Some(absolute(blobs::verify_to(
-            opts.blobs_dir,
-            pin,
-            &blob_stage,
-        )?)?),
+        Some(pin) => Some(absolute(blobs::verify_to(&blobs_dir, pin, &blob_stage)?)?),
         None => None,
     };
-    step.log(if bl32.is_some() {
-        "verified rkbin ATF + TPL + BL32 against the lock"
-    } else {
-        "verified rkbin ATF + TPL against the lock"
+    step.log(match (&deb_bl31, bl32.is_some()) {
+        (DebBl31::Rkbin { .. }, true) => "verified rkbin BL31 + TPL + BL32 against the lock",
+        (DebBl31::Rkbin { .. }, false) => "verified rkbin BL31 + TPL against the lock",
+        (DebBl31::Tfa { .. }, true) => "verified rkbin TPL + BL32 against the lock; BL31 is TF-A",
+        (DebBl31::Tfa { .. }, false) => "verified rkbin TPL against the lock; BL31 is TF-A",
     });
     step.progress(30);
 
@@ -314,6 +366,20 @@ pub fn build_uboot(
         binds: &binds,
     };
     configure(boot, env, &cr, &tree, &blobs, reused, &step)?;
+    // Under the efi loader u-boot hands the kernel the DTB it finds on the EFI system
+    // partition under its own `fdtfile`, so the name the image places it under has to
+    // be that one. Said rather than refused: a board's code can set `fdtfile` at boot
+    // (the Radxa ZERO 3 picks its tree by a resistor it reads), which no build can see.
+    if let Some(efi) = build
+        .image
+        .as_ref()
+        .and_then(|i| i.loader.as_ref())
+        .and_then(|l| l.efi())
+    {
+        if let Some(line) = fdtfile_mismatch(&tree, &efi.dtb) {
+            step.log(line);
+        }
+    }
     step.progress(40);
 
     // Deterministic build timestamp from the locked commit, so `u-boot.itb` does
@@ -328,13 +394,14 @@ pub fn build_uboot(
     let deb = package_deb(
         build,
         boot,
-        &uboot.reference,
+        lock,
         opts,
         epoch,
         Payloads {
             idbloader: &idbloader,
             uboot_itb: &uboot_itb,
         },
+        &deb_bl31,
         &step,
     )?;
 
@@ -374,8 +441,13 @@ pub fn build_uboot(
 /// - The board defconfig.
 /// - The sha256-pinned rkbin blob hashes. A blob change means a new signature and so a
 ///   rebuild, which is why a hit implies the same verified blobs.
+/// - The BL31: the provider, then the rkbin blob's hash or the
+///   [`tfa`](crate::build::tfa::output_manifest) stage's input signature. Inputs
+///   rather than `bl31.elf`'s bytes, so a hit is decided without building TF-A.
 /// - The deb's packaged fields: device, description, SoC, arch, the raw offsets, and
-///   the u-boot ref that becomes the deb version.
+///   the deb version ([`Lock::uboot_deb_version`]). Its revision is a lock value of
+///   its own, so two locks with every other input equal still archive two debs when
+///   their revisions differ.
 /// - Whether the build is cross, and the host toolchain identity.
 /// - The identity of the packaging root that archives the deb.
 ///
@@ -398,8 +470,20 @@ pub fn output_manifest(
     let mut b = crate::signature::SignatureBuilder::new("uboot:out", OUTPUT_STAGE_VERSION);
     b.fold_dep(&tree_sig)
         .fold_scalar("uboot_defconfig", &boot.uboot_defconfig)
-        .fold_scalar("blob.atf", &pins.atf)
-        .fold_scalar("blob.tpl", &pins.tpl)
+        .fold_scalar("bl31", boot.bl31.provider().as_str());
+    match &boot.bl31 {
+        Bl31::Rkbin { .. } => {
+            let atf = pins.atf.as_deref().ok_or(EngineError::MissingPin {
+                what: "blobs.atf",
+                stage: NODE,
+            })?;
+            b.fold_scalar("blob.atf", atf);
+        }
+        Bl31::Tfa(src) => {
+            b.fold_dep(&crate::build::tfa::output_manifest(src, lock, env)?.signature());
+        }
+    }
+    b.fold_scalar("blob.tpl", &pins.tpl)
         .fold_scalar("blob.bl32", pins.bl32.as_deref().unwrap_or(""))
         .fold_scalar("device", &build.device)
         .fold_scalar("description", &build.description)
@@ -408,7 +492,7 @@ pub fn output_manifest(
         .fold_scalar("arch", build.arch.as_str())
         .fold_scalar("offset.idbloader", &boot.offsets.idbloader)
         .fold_scalar("offset.uboot_itb", &boot.offsets.uboot_itb)
-        .fold_scalar("uboot.reference", &build::uboot_pin(lock)?.reference)
+        .fold_scalar("deb_version", &deb_version(lock)?)
         .fold_scalar("cross", env.cross_compile.as_deref().unwrap_or(""))
         .fold_scalar("toolchain", &env.toolchain_id)
         // The base root's identity above covers what the toolchain is; this covers what
@@ -557,9 +641,9 @@ fn compile(
     build::run_in_root(cr, tree, &argv, &vars, "make u-boot", step)
 }
 
-/// The verified rkbin payloads a u-boot build consumes, as absolute paths.
+/// The verified payloads a u-boot build consumes, as absolute paths.
 pub struct BlobPaths {
-    /// ATF/BL31 image (`BL31=`).
+    /// BL31 image (`BL31=`): the rkbin blob or TF-A's `bl31.elf`.
     pub atf: PathBuf,
     /// DDR init TPL (`ROCKCHIP_TPL=`).
     pub tpl: PathBuf,
@@ -689,6 +773,25 @@ fn pack_maskrom_loader(tree: &Path, usb471: &Path, usb472: &Path) -> Result<Path
     Ok(dest)
 }
 
+/// The warning to log when the configured u-boot's default `fdtfile` is not `esp_dtb`,
+/// the name the image places the kernel's DTB under on the EFI system partition.
+/// `None` when they agree, or when the `.config` sets no default.
+fn fdtfile_mismatch(tree: &Path, esp_dtb: &str) -> Option<String> {
+    let config = std::fs::read_to_string(tree.join(".config")).ok()?;
+    let fdtfile = config.lines().find_map(|line| {
+        line.strip_prefix("CONFIG_DEFAULT_FDT_FILE=\"")?
+            .strip_suffix('"')
+    })?;
+    (fdtfile != esp_dtb).then(|| {
+        format!(
+            "warning: u-boot's default fdtfile is {fdtfile}, and the image places the \
+             kernel's DTB at dtb/{esp_dtb} on the EFI system partition. Unless the board's \
+             u-boot sets fdtfile to that name at boot, it boots its own device tree: set \
+             the device's uboot_fdtfile to the name u-boot loads by"
+        )
+    })
+}
+
 /// The SoC's four-character code from the built u-boot `.config`, e.g. `b"3576"`
 /// from `CONFIG_ROCKCHIP_RK3576=y`. `None` if no such symbol is set.
 fn rk_chip_code(tree: &Path) -> Option<[u8; 4]> {
@@ -761,17 +864,6 @@ fn package_name(device: &str) -> String {
     format!("u-boot-{device}")
 }
 
-/// Package the staged raw payloads into the `u-boot-<device>` `.deb`.
-///
-/// The deb stages `idbloader.img` + `u-boot.itb` under `/usr/lib/u-boot/<device>/`
-/// with an `install.conf` recording their raw byte offsets, and documents the
-/// manual `dd` in `README.Debian`. It contains **no** maintainer script: the
-/// bootloader lives in a raw gap outside any filesystem, so flashing is the image
-/// build's job (or a documented manual step), never an `apt` side effect that
-/// could brick a board by writing to the wrong device.
-///
-/// The tree is staged on the host — a data-only archive resolves no dependencies, so
-/// nothing here needs a target-arch root — and archived by
 /// The two blobs a u-boot build produces, as one value.
 ///
 /// They travel together everywhere: both are written into the deb's payload directory,
@@ -792,25 +884,64 @@ struct Payloads<'a> {
 struct DebIdentity<'a> {
     /// `u-boot-<device>`.
     pkg: &'a str,
-    /// The Debian version derived from the pinned u-boot ref.
+    /// The Debian version, the lock's [`uboot_deb_version`](Lock::uboot_deb_version).
     version: &'a str,
     /// The Debian architecture the payloads are for.
     arch: &'a str,
 }
 
+/// The BL31 inside `u-boot.itb`, as the u-boot deb describes it: its `README.Debian`
+/// line and its `copyright` entry. The deb version names it too, read from the lock
+/// ([`Lock::uboot_deb_upstream`]).
+enum DebBl31<'a> {
+    /// Rockchip's prebuilt BL31.
+    Rkbin {
+        /// The vendored file's name.
+        file: &'a str,
+    },
+    /// Trusted Firmware-A built from source.
+    Tfa {
+        /// The lock's `[tfa]` pin.
+        pin: &'a TfaPin,
+        /// TF-A's license text, from the built tree's `docs/license.rst`.
+        license: String,
+    },
+}
+
+/// The file name of a `"<file>@sha256:<hex>"` blob pin.
+fn pin_file(pin: &str) -> &str {
+    pin.rsplit_once("@sha256:").map_or(pin, |(file, _)| file)
+}
+
+/// Package the staged raw payloads into the `u-boot-<device>` `.deb`.
+///
+/// The deb stages `idbloader.img` + `u-boot.itb` under `/usr/lib/u-boot/<device>/`
+/// with an `install.conf` recording their raw byte offsets and BL31 provider,
+/// documents the manual `dd` in `README.Debian`, and names every component the two
+/// payloads contain, with its license, in `copyright`. It contains **no** maintainer
+/// script: the bootloader lives in a raw gap outside any filesystem, so flashing is
+/// the image build's job (or a documented manual step), never an `apt` side effect
+/// that could brick a board by writing to the wrong device.
+///
+/// The tree is staged on the host, since a data-only archive resolves no
+/// dependencies, so nothing here needs a target-arch root. It is archived by
 /// [`build::archive_deb`] in the build's host-arch packaging root, which is what
 /// makes the `.deb` a function of the lock rather than of the build host's `dpkg`.
+// One argument per thing the deb is made of; each is its own type, so a swap does
+// not compile.
+#[allow(clippy::too_many_arguments)]
 fn package_deb(
     build: &ResolvedBuild,
     boot: &ResolvedRkbinBoot,
-    uboot_ref: &str,
+    lock: &Lock,
     opts: &UbootOptions,
     source_date_epoch: Option<u64>,
     payloads: Payloads,
+    bl31: &DebBl31,
     step: &Step,
 ) -> Result<PathBuf, EngineError> {
     let pkg = package_name(&build.device);
-    let version = deb_version(uboot_ref);
+    let version = deb_version(lock)?;
     let arch = build.arch.debian_arch();
 
     // Assemble under a clean pkg-stage (a stale tree would ship leftover files).
@@ -826,6 +957,8 @@ fn package_deb(
             arch,
         },
         payloads,
+        &copyright_text(&pkg, lock, bl31)?,
+        bl31,
     )?;
     // Force uniform data modes (dirs 0755, files 0644) so the host umask does not leak
     // into the packaged tree — the u-boot deb is data-only, so this is byte-safe and
@@ -854,8 +987,8 @@ fn package_deb(
 
 /// Lay out the u-boot deb's file tree under `pkg_stage`: the two payloads and
 /// their `install.conf` under `/usr/lib/u-boot/<device>/`, the `README.Debian`
-/// under `/usr/share/doc/<pkg>/`, and the `DEBIAN/control`. Split from
-/// [`package_deb`] so the layout is testable without `dpkg-deb`. The offsets are
+/// and `copyright` under `/usr/share/doc/<pkg>/`, and the `DEBIAN/control`. Split
+/// from [`package_deb`] so the layout is testable without `dpkg-deb`. The offsets are
 /// parsed from the build's authored strings, so a malformed offset is a
 /// typed [`ConfigError`](boot2deb_core::ConfigError) here rather than a bad deb.
 fn stage_tree(
@@ -864,6 +997,8 @@ fn stage_tree(
     boot: &ResolvedRkbinBoot,
     id: &DebIdentity,
     payloads: Payloads,
+    copyright: &str,
+    bl31: &DebBl31,
 ) -> Result<(), EngineError> {
     let &DebIdentity { pkg, version, arch } = id;
     let Payloads {
@@ -877,7 +1012,13 @@ fn stage_tree(
     std::fs::create_dir_all(&lib_dir).map_err(|s| EngineError::io(&lib_dir, s))?;
     copy_into(idbloader, &lib_dir.join("idbloader.img"))?;
     copy_into(uboot_itb, &lib_dir.join("u-boot.itb"))?;
-    let conf = install_conf_text(&build.device, build.boot_method.as_str(), idb_off, itb_off);
+    let conf = install_conf_text(
+        &build.device,
+        build.boot_method.as_str(),
+        boot.bl31.provider().as_str(),
+        idb_off,
+        itb_off,
+    );
     write_file(&lib_dir.join("install.conf"), &conf)?;
 
     let doc_dir = pkg_stage.join(format!("usr/share/doc/{pkg}"));
@@ -889,8 +1030,10 @@ fn stage_tree(
         idb_off,
         &boot.offsets.uboot_itb,
         itb_off,
+        &bl31_line(bl31),
     );
     write_file(&doc_dir.join("README.Debian"), &readme)?;
+    write_file(&doc_dir.join("copyright"), copyright)?;
 
     let debian = pkg_stage.join("DEBIAN");
     std::fs::create_dir_all(&debian).map_err(|s| EngineError::io(&debian, s))?;
@@ -911,10 +1054,102 @@ fn write_file(path: &Path, contents: &str) -> Result<(), EngineError> {
     std::fs::write(path, contents).map_err(|s| EngineError::io(path, s))
 }
 
-/// Debian version from the u-boot ref: drop a leading `v` (`v2026.04` →
-/// `2026.04`), then sanitize ([`build::sanitize_deb_version`]).
-fn deb_version(reference: &str) -> String {
-    build::sanitize_deb_version(reference.strip_prefix('v').unwrap_or(reference))
+/// The `u-boot-<device>` package's Debian version, the lock's
+/// [`uboot_deb_version`](Lock::uboot_deb_version): `<upstream>-<revision>`, as in
+/// `2026.10+rkbin1.56-1`.
+///
+/// The lock rather than the resolved build is what it is read from, so `update`, which
+/// moves the revision, and this stage, which writes it into the package, read one
+/// version. A lock that reaches here pins its u-boot and its BL31, both of which the
+/// stage has already read. The BL31 pin is the one the error names, since a lock with
+/// no u-boot pin fails on that first.
+fn deb_version(lock: &Lock) -> Result<String, EngineError> {
+    build::uboot_pin(lock)?;
+    lock.uboot_deb_version().ok_or(EngineError::MissingPin {
+        what: "blobs.atf",
+        stage: NODE,
+    })
+}
+
+/// The `README.Debian` sentence naming the BL31 inside `u-boot.itb`.
+fn bl31_line(bl31: &DebBl31) -> String {
+    match bl31 {
+        DebBl31::Rkbin { file } => {
+            format!("The BL31 inside u-boot.itb is Rockchip's prebuilt {file} from rkbin.")
+        }
+        DebBl31::Tfa { pin, .. } => format!(
+            "The BL31 inside u-boot.itb is Trusted Firmware-A {} ({}), built from source.",
+            pin.reference, pin.commit
+        ),
+    }
+}
+
+/// Rockchip's terms for the rkbin binaries, as `THIRD-PARTY-NOTICES.md` states them,
+/// wrapped for a terminal.
+const RKBIN_TERMS: &str =
+    "Rockchip's license grants a non-exclusive right to use, copy, and distribute
+the binaries and to distribute modifications, on the condition that copyright,
+patent, and trademark notices are preserved. The binaries are provided as-is
+with no warranty.";
+
+/// The deb's `copyright`: one entry per component the payloads contain, each with its
+/// source, its exact version and its license, and TF-A's full license text where the
+/// BL31 is TF-A, since its BSD-3-Clause terms require the notice to travel with the
+/// binary. Pure, so it is testable.
+fn copyright_text(pkg: &str, lock: &Lock, bl31: &DebBl31) -> Result<String, EngineError> {
+    let uboot = build::uboot_pin(lock)?;
+    let blobs = build::blob_pins(lock)?;
+    let mut s = format!(
+        "{pkg}\n{}\n\n\
+         The payloads in this package contain the components below. Each keeps its\n\
+         upstream license.\n\n\
+         U-Boot\n\
+        \x20 Source:  {}\n\
+        \x20 Version: {} ({})\n\
+        \x20 License: GPL-2.0+\n\n\
+         DDR init TPL, in idbloader.img\n\
+        \x20 File:    {}\n\
+        \x20 Source:  Rockchip rkbin, https://github.com/rockchip-linux/rkbin\n\
+        \x20 License: rkbin (below)\n\n",
+        "=".repeat(pkg.len()),
+        uboot.source,
+        uboot.reference,
+        uboot.commit,
+        pin_file(&blobs.tpl),
+    );
+    if let Some(bl32) = &blobs.bl32 {
+        s.push_str(&format!(
+            "OP-TEE BL32, in u-boot.itb\n\
+            \x20 File:    {}\n\
+            \x20 Source:  Rockchip rkbin, https://github.com/rockchip-linux/rkbin\n\
+            \x20 License: rkbin (below)\n\n",
+            pin_file(bl32)
+        ));
+    }
+    match bl31 {
+        DebBl31::Rkbin { file } => s.push_str(&format!(
+            "BL31, in u-boot.itb\n\
+            \x20 File:    {file}\n\
+            \x20 Source:  Rockchip rkbin, https://github.com/rockchip-linux/rkbin\n\
+            \x20 License: rkbin (below)\n\n"
+        )),
+        DebBl31::Tfa { pin, .. } => s.push_str(&format!(
+            "BL31, in u-boot.itb: Trusted Firmware-A\n\
+            \x20 Source:    {}\n\
+            \x20 Version:   {} ({})\n\
+            \x20 Copyright: Arm Limited and Contributors, Rockchip Electronics Co., Ltd.,\n\
+            \x20            and the further holders each source file names\n\
+            \x20 License:   BSD-3-Clause (below), with the bundled code it lists\n\n",
+            pin.source, pin.reference, pin.commit
+        )),
+    }
+    s.push_str(&format!("License: rkbin\n\n{RKBIN_TERMS}\n"));
+    if let DebBl31::Tfa { license, .. } = bl31 {
+        s.push_str("\nLicense: BSD-3-Clause (Trusted Firmware-A, docs/license.rst)\n\n");
+        s.push_str(license.trim_end());
+        s.push('\n');
+    }
+    Ok(s)
 }
 
 /// The `DEBIAN/control` stanza. Pure, so it is testable. No `Depends:` — the
@@ -936,14 +1171,22 @@ fn control_text(pkg: &str, version: &str, arch: &str, description: &str, soc: &s
     )
 }
 
-/// The `install.conf` recording the payloads' raw byte offsets, so a future
-/// on-device updater (Phase D+) can read where each is written. Pure/testable.
-fn install_conf_text(device: &str, boot_method: &str, idb_off: u64, itb_off: u64) -> String {
+/// The `install.conf` recording the payloads' raw byte offsets and the BL31
+/// provider, so an on-device updater can read where each payload is written and
+/// which firmware it carries. Pure/testable.
+fn install_conf_text(
+    device: &str,
+    boot_method: &str,
+    bl31: &str,
+    idb_off: u64,
+    itb_off: u64,
+) -> String {
     format!(
         "# boot2deb u-boot install offsets for {device}\n\
          # raw byte offsets from the start of the boot medium (outside any filesystem)\n\
          device={device}\n\
          boot_method={boot_method}\n\
+         bl31={bl31}\n\
          idbloader=/usr/lib/u-boot/{device}/idbloader.img\n\
          idbloader_offset={idb_off}\n\
          uboot_itb=/usr/lib/u-boot/{device}/u-boot.itb\n\
@@ -961,6 +1204,7 @@ fn readme_text(
     idb_off: u64,
     itb_str: &str,
     itb_off: u64,
+    bl31_line: &str,
 ) -> String {
     let title = package_name(device);
     let underline = "=".repeat(title.len());
@@ -980,7 +1224,9 @@ fn readme_text(
         \x20 sync\n\n\
          Replace /dev/DISK with the target boot medium (e.g. /dev/mmcblk0 or\n\
          /dev/sdX). Writing to the wrong device will destroy its contents --\n\
-         double-check the device name first.\n",
+         double-check the device name first.\n\n\
+         {bl31_line} The components of both payloads and their licenses are listed\n\
+         in /usr/share/doc/{title}/copyright.\n",
         dd_command(&format!("/usr/lib/u-boot/{device}/idbloader.img"), idb_off),
         dd_command(&format!("/usr/lib/u-boot/{device}/u-boot.itb"), itb_off),
     )
@@ -1075,6 +1321,8 @@ mod tests {
                 source: "ks".into(),
                 reference: "v".into(),
                 commit: "kc".into(),
+                revision: 1,
+                config_sha256: "d".repeat(64),
             }),
             patches: Some(PatchesPin {
                 series: vec!["rk3588-accel".into()],
@@ -1086,6 +1334,8 @@ mod tests {
                 source: "us".into(),
                 reference: "v2026.04".into(),
                 commit: uboot_commit.into(),
+                revision: 1,
+                config_sha256: "9".repeat(64),
             }),
             uboot_patches: Some(PatchesPin {
                 series: vec!["rk3576-util".into()],
@@ -1093,6 +1343,7 @@ mod tests {
                 reference: "main".into(),
                 commit: patches_commit.into(),
             }),
+            tfa: None,
             userspace: vec![
                 named_pin("mpp", git("m")),
                 named_pin("librga", git("r")),
@@ -1110,7 +1361,10 @@ mod tests {
                 source_date_epoch: 1_790_347_034,
             }),
             blobs: Some(BlobsPin {
-                atf: "a".into(),
+                source: "https://example.invalid/rkbin.git".into(),
+                reference: "master".into(),
+                commit: "c".repeat(40),
+                atf: Some(format!("rk3588_bl31_v1.56.elf@sha256:{}", "0".repeat(64))),
                 tpl: "t".into(),
                 bl32: None,
             }),
@@ -1237,8 +1491,12 @@ mod tests {
         );
         // A blob change → new signature (a hit must imply the same verified blobs).
         let mut lock_blob = lock_with("uc1", "pc1");
-        lock_blob.blobs.as_mut().unwrap().atf = "different-atf-hash".into();
+        lock_blob.blobs.as_mut().unwrap().atf = Some("different-atf-hash".into());
         assert_ne!(base, man(&lock_blob, &env("gcc-1"), SeriesIdentity::Pinned));
+        // A revision that moved with every other input equal is another deb version.
+        let mut lock_rev = lock_with("uc1", "pc1");
+        lock_rev.uboot.as_mut().unwrap().revision = 2;
+        assert_ne!(base, man(&lock_rev, &env("gcc-1"), SeriesIdentity::Pinned));
         // Adding/altering the BL32 blob also restamps (the OP-TEE payload is folded).
         let mut lock_bl32 = lock_with("uc1", "pc1");
         lock_bl32.blobs.as_mut().unwrap().bl32 = Some("rk3576_bl32@sha256:cd".into());
@@ -1263,12 +1521,141 @@ mod tests {
         );
     }
 
+    /// A TF-A build point and its lock: the resolved RK1 with `bl31 = tfa`, and
+    /// [`lock_with`]'s pins with the rkbin BL31 traded for a `[tfa]` table.
+    fn tfa_point(tfa_commit: &str) -> (ResolvedBuild, Lock) {
+        let build = boot2deb_core::resolve::resolve_recipe(
+            &crate::test_support::repo_root(),
+            crate::test_support::RK1_MEDIA_ACCEL,
+            &boot2deb_core::model::Overrides {
+                bl31: Some(boot2deb_core::model::Bl31Provider::Tfa),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut lock = lock_with("uc1", "pc1");
+        lock.blobs.as_mut().unwrap().atf = None;
+        lock.tfa = Some(TfaPin {
+            source: "https://example.invalid/trusted-firmware-a.git".into(),
+            reference: "v2.16.0".into(),
+            commit: tfa_commit.repeat(40),
+        });
+        (build, lock)
+    }
+
     #[test]
-    fn deb_version_strips_v_and_sanitizes() {
-        assert_eq!(deb_version("v2026.04"), "2026.04");
-        assert_eq!(deb_version("2026.04-rc1"), "2026.04-rc1");
-        assert_eq!(deb_version("v2025.10+dfsg"), "2025.10+dfsg");
-        assert_eq!(deb_version(""), "0");
+    fn the_output_signature_folds_the_bl31_provider_and_its_identity() {
+        let env = BuildEnv {
+            toolchain_id: "gcc-1".into(),
+            ..Default::default()
+        };
+        let rkbin = rk1_build();
+        let rkbin_sig = output_manifest(
+            &rkbin,
+            rkbin.rkbin_boot().unwrap(),
+            &lock_with("uc1", "pc1"),
+            &env,
+            SeriesIdentity::Pinned,
+        )
+        .unwrap()
+        .signature;
+        let tfa_sig = |commit: &str| {
+            let (build, lock) = tfa_point(commit);
+            output_manifest(
+                &build,
+                build.rkbin_boot().unwrap(),
+                &lock,
+                &env,
+                SeriesIdentity::Pinned,
+            )
+            .unwrap()
+            .signature
+        };
+        // The same u-boot with the other BL31 is a different output.
+        assert_ne!(rkbin_sig, tfa_sig("e"));
+        // A TF-A re-pin reaches u-boot's key through the TF-A node's input signature.
+        assert_eq!(tfa_sig("e"), tfa_sig("e"));
+        assert_ne!(tfa_sig("e"), tfa_sig("f"));
+        // A `tfa` point whose lock still pins the rkbin BL31 (no `[tfa]`) is refused
+        // rather than keyed as something it is not.
+        let (build, _) = tfa_point("e");
+        assert!(output_manifest(
+            &build,
+            build.rkbin_boot().unwrap(),
+            &lock_with("uc1", "pc1"),
+            &env,
+            SeriesIdentity::Pinned,
+        )
+        .is_err());
+    }
+
+    fn tfa_pin() -> TfaPin {
+        TfaPin {
+            source: "https://example.invalid/trusted-firmware-a.git".into(),
+            reference: "v2.16-rc0".into(),
+            commit: "9347b8bbd8d56da5cfbf7d9f1af3ca4f6d6e3920".into(),
+        }
+    }
+
+    /// The package is versioned by the lock, revision included. A lock with no BL31 to
+    /// name has no version, and one with no u-boot fails on that first.
+    #[test]
+    fn the_deb_version_is_the_locks() {
+        let mut lock = lock_with("uc1", "pc1");
+        assert_eq!(deb_version(&lock).unwrap(), "2026.04+rkbin1.56-1");
+        lock.uboot.as_mut().unwrap().revision = 4;
+        assert_eq!(deb_version(&lock).unwrap(), "2026.04+rkbin1.56-4");
+        lock.blobs.as_mut().unwrap().atf = None;
+        assert!(matches!(
+            deb_version(&lock),
+            Err(EngineError::MissingPin {
+                what: "blobs.atf",
+                ..
+            })
+        ));
+        lock.uboot = None;
+        assert!(matches!(
+            deb_version(&lock),
+            Err(EngineError::MissingPin { what: "uboot", .. })
+        ));
+    }
+
+    #[test]
+    fn the_copyright_names_every_component_and_carries_tfas_license() {
+        let lock = lock_with("uc1", "pc1");
+        let rkbin = copyright_text(
+            "u-boot-turing-rk1",
+            &lock,
+            &DebBl31::Rkbin {
+                file: "rk3588_bl31_v1.56.elf",
+            },
+        )
+        .unwrap();
+        assert!(rkbin.contains("Version: v2026.04 (uc1)"), "{rkbin}");
+        assert!(rkbin.contains("License: GPL-2.0+"));
+        assert!(rkbin.contains("File:    rk3588_bl31_v1.56.elf"));
+        assert!(rkbin.contains("License: rkbin"));
+        assert!(!rkbin.contains("BSD-3-Clause"));
+        let pin = tfa_pin();
+        let tfa = copyright_text(
+            "u-boot-turing-rk1",
+            &lock,
+            &DebBl31::Tfa {
+                pin: &pin,
+                license: "License\n=======\n\nBSD-3-Clause terms.\n".into(),
+            },
+        )
+        .unwrap();
+        assert!(tfa.contains("Trusted Firmware-A"));
+        assert!(tfa.contains("Version:   v2.16-rc0 (9347b8bbd8d56da5cfbf7d9f1af3ca4f6d6e3920)"));
+        assert!(tfa.contains("Copyright: Arm Limited and Contributors"));
+        assert!(tfa.contains("License:   BSD-3-Clause"));
+        // Every line a reader sees is terminal-width, the rkbin terms included.
+        assert!(tfa.lines().all(|l| l.len() <= 80), "{tfa}");
+        assert!(tfa.ends_with("BSD-3-Clause terms.\n"), "{tfa}");
+        // The DDR TPL is rkbin's under either provider.
+        assert!(tfa.contains("DDR init TPL") && tfa.contains("License: rkbin"));
+        assert!(!tfa.contains("rk3588_bl31"));
     }
 
     #[test]
@@ -1305,9 +1692,10 @@ mod tests {
 
     #[test]
     fn install_conf_records_offsets() {
-        let conf = install_conf_text("turing-rk1", "rockchip-rkbin", 32768, 8_388_608);
+        let conf = install_conf_text("turing-rk1", "rockchip-rkbin", "tfa", 32768, 8_388_608);
         assert!(conf.contains("device=turing-rk1"));
         assert!(conf.contains("boot_method=rockchip-rkbin"));
+        assert!(conf.contains("bl31=tfa"));
         assert!(conf.contains("idbloader_offset=32768"));
         assert!(conf.contains("uboot_itb_offset=8388608"));
     }
@@ -1321,7 +1709,10 @@ mod tests {
             32768,
             "8MiB",
             8_388_608,
+            "The BL31 inside u-boot.itb is X.",
         );
+        assert!(r.contains("The BL31 inside u-boot.itb is X."));
+        assert!(r.contains("/usr/share/doc/u-boot-turing-rk1/copyright"));
         assert!(r.contains("offset 32768 bytes (32KiB)"));
         assert!(r.contains("offset 8388608 bytes (8MiB)"));
         assert!(r.contains("bs=4096 seek=8"));
@@ -1355,6 +1746,10 @@ mod tests {
                 idbloader: &idb,
                 uboot_itb: &itb,
             },
+            "COPYRIGHT",
+            &DebBl31::Rkbin {
+                file: "rk3588_bl31_v1.56.elf",
+            },
         )
         .unwrap();
 
@@ -1373,6 +1768,12 @@ mod tests {
         assert!(pkg_stage
             .join("usr/share/doc/u-boot-turing-rk1/README.Debian")
             .exists());
+        assert_eq!(
+            std::fs::read_to_string(pkg_stage.join("usr/share/doc/u-boot-turing-rk1/copyright"))
+                .unwrap(),
+            "COPYRIGHT"
+        );
+        assert!(conf.contains("bl31=rkbin"));
         assert!(!pkg_stage.join("DEBIAN/postinst").exists());
     }
 
@@ -1412,7 +1813,8 @@ mod tests {
             let opts = UbootOptions {
                 source: "unused",
                 patches: None,
-                blobs_dir: &dummy,
+                tfa_source: "unused",
+                blobs: BlobSource::Dir(&dummy),
                 work_dir: &work,
                 cross: &UnusedSandbox,
                 out_dir: &work,
@@ -1424,12 +1826,15 @@ mod tests {
             package_deb(
                 &build,
                 boot,
-                "2026.04",
+                &lock_with("uc1", "pc1"),
                 &opts,
                 Some(1_600_000_000),
                 Payloads {
                     idbloader: &idb,
                     uboot_itb: &itb,
+                },
+                &DebBl31::Rkbin {
+                    file: "rk3588_bl31_v1.56.elf",
                 },
                 &step,
             )
@@ -1442,7 +1847,8 @@ mod tests {
             "two packagings at one epoch differ"
         );
         assert!(
-            a.file_name().unwrap().to_str().unwrap() == "u-boot-turing-rk1_2026.04_arm64.deb",
+            a.file_name().unwrap().to_str().unwrap()
+                == "u-boot-turing-rk1_2026.04+rkbin1.56-1_arm64.deb",
             "unexpected deb name: {}",
             a.display()
         );
@@ -1477,7 +1883,10 @@ mod tests {
             info.contains("Package: u-boot-turing-rk1"),
             "info was: {info}"
         );
-        assert!(info.contains("Version: 2026.04"), "info was: {info}");
+        assert!(
+            info.contains("Version: 2026.04+rkbin1.56-1"),
+            "info was: {info}"
+        );
         assert!(info.contains("Architecture: arm64"), "info was: {info}");
 
         let contents = inspect("-c");
@@ -1485,6 +1894,7 @@ mod tests {
             "/usr/lib/u-boot/turing-rk1/idbloader.img",
             "/usr/lib/u-boot/turing-rk1/u-boot.itb",
             "/usr/lib/u-boot/turing-rk1/install.conf",
+            "/usr/share/doc/u-boot-turing-rk1/copyright",
         ] {
             assert!(contents.contains(path), "{path} missing from: {contents}");
         }
@@ -1512,7 +1922,8 @@ mod tests {
         let opts = UbootOptions {
             source: "unused",
             patches: None,
-            blobs_dir: tmp.path(),
+            tfa_source: "unused",
+            blobs: BlobSource::Dir(tmp.path()),
             work_dir: tmp.path(),
             cross: &UnusedSandbox,
             out_dir: &out,
@@ -1573,5 +1984,24 @@ mod tests {
             collect_maskrom(&opts, &tree, &step),
             Err(EngineError::ArtifactMissing { .. })
         ));
+    }
+
+    /// The u-boot stage names a disagreement between u-boot's default fdtfile and the
+    /// DTB name the efi image uses, and says nothing when they agree.
+    #[test]
+    fn a_default_fdtfile_other_than_the_esp_dtb_is_named() {
+        let tree = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tree.path().join(".config"),
+            "CONFIG_FOO=y\nCONFIG_DEFAULT_FDT_FILE=\"rockchip/rk3576-generic.dtb\"\n",
+        )
+        .unwrap();
+        let line = fdtfile_mismatch(tree.path(), "rockchip/rk3576-h96-max-m9-npu.dtb").unwrap();
+        assert!(line.contains("rockchip/rk3576-generic.dtb"), "{line}");
+        assert!(line.contains("uboot_fdtfile"), "{line}");
+        assert_eq!(
+            fdtfile_mismatch(tree.path(), "rockchip/rk3576-generic.dtb"),
+            None
+        );
     }
 }

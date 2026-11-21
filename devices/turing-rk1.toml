@@ -16,15 +16,23 @@ default_kernel          = "rk3588-mainline-7.3"
 # else. `ums` is what puts a disk on the M.2 slot in front of that controller, so
 # an NVMe is writable with no OS on the module. `turing-rk1-util` layers the
 # recovery and bring-up commands on top and is built as a u-boot-only deliverable.
+# Both apply the RK3588 SPL clock fix ahead of the board's patches: the board boots
+# from eMMC, and without the fix an eMMC boot leaves SPLL, the clock of the SoC's
+# center interconnect, at the BootROM's rate.
 supported_uboot_series  = ["turing-rk1-recovery", "turing-rk1-util"]
 default_uboot_series    = "turing-rk1-recovery"
-# forky is the validated suite; trixie builds and ships as its own recipe. Anything
-# older predates the RK3588 support this board's kernel and firmware assume.
-supported_suites        = ["forky", "trixie"]
+# The BL31 is its own axis: rkbin's prebuilt one, or Trusted Firmware-A built from the
+# SoC layer's [tfa] source. rkbin is the default this board is validated on.
+supported_bl31          = ["rkbin", "tfa"]
+default_bl31            = "rkbin"
+# forky is the validated suite; trixie and Ubuntu's resolute each build and ship as
+# their own recipe. Anything older predates the RK3588 support this board's kernel
+# and firmware assume.
+supported_suites        = ["forky", "trixie", "resolute"]
 default_suite           = "forky"                  # validated, supported suite for this board
 default_layout          = "combined"               # combined | split
 hostname                = "turing-rk1"
 image_size              = "2G"
 
-# rkbin (ATF + DDR TPL) is inherited from socs/rk3588.toml — the RK1 uses the
+# rkbin (BL31 + DDR TPL) is inherited from socs/rk3588.toml — the RK1 uses the
 # SoC's common LPDDR configuration, so it overrides nothing here.

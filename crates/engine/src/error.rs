@@ -314,6 +314,31 @@ pub enum EngineError {
         message: String,
     },
 
+    /// A path the rootfs stage generates is taken, in the merged layer overlays, by an
+    /// entry the generated one cannot be placed through or over.
+    ///
+    /// Generated config is placed beneath the staging tree one path component at a time,
+    /// and no symlink is followed at any of them. A layer's symlink names a path on the
+    /// target. Followed on the build host, it leads anywhere the builder can write.
+    /// Replacing it rewrites that layer's tree instead.
+    ///
+    /// The stage refuses a symlink or other non-directory where the generated path needs
+    /// a directory, and a directory where the generated entry goes. A file or symlink in
+    /// that last position is replaced without being followed, because generated config
+    /// wins over the layers.
+    #[error(
+        "cannot stage the generated /{generated}: /{entry} in the layer overlays is {conflict}"
+    )]
+    StagedPathBlocked {
+        /// The generated entry, relative to the rootfs root.
+        generated: String,
+        /// The overlay entry in its way, relative to the rootfs root: one of the
+        /// generated path's ancestors, or the generated path itself.
+        entry: String,
+        /// What the overlays placed at `entry`.
+        conflict: StagedConflict,
+    },
+
     /// A [`SandboxRun`](crate::sandbox::SandboxRun) contained an empty `argv`, so there
     /// is no program to run. The field's contract states it is non-empty, and every
     /// in-tree call site honors it. This makes the invariant structural rather than
@@ -370,27 +395,33 @@ pub enum EngineError {
         stderr: String,
     },
 
-    /// A blob named by the resolved build (`rkbin.atf` / `rkbin.tpl`) does not
-    /// exist in the blob directory, so there is nothing to hash into a lock pin.
-    /// Blobs are vendored files, never fetched, so the remedy is to vendor the
-    /// file — named here rather than surfacing as a bare I/O error.
-    #[error("blob {filename} not found under {dir} — vendor it there (see blobs/README.md)")]
-    BlobMissing {
-        /// The blob filename the resolved build names.
-        filename: String,
-        /// The blob directory that was searched (`blobs/<soc>/` by default).
+    /// The rkbin commit being pinned or fetched has no file a layer names. Either the
+    /// layer names a file rkbin has since replaced with a newer version (`outdated`
+    /// lists what the repository has now), or the name is misspelled.
+    #[error(
+        "rkbin blob {file} is not in {dir}/ of {repo} at {commit} — name a file that \
+         commit has in the SoC or device [rkbin] (`boot2deb outdated` lists newer ones)"
+    )]
+    RkbinFileMissing {
+        /// The filename the resolved build names.
+        file: String,
+        /// The `[rkbin.upstream].dir` it was looked for in.
         dir: String,
+        /// The repository's clone URL.
+        repo: String,
+        /// The commit that lacks it.
+        commit: String,
     },
 
-    /// A vendored blob's sha256 did not match the lock pin — the u-boot build
-    /// refuses to consume it.
+    /// A blob's sha256 did not match the lock pin, whether fetched from rkbin or read
+    /// from a `--blobs-dir`. The u-boot build refuses to consume it.
     #[error("blob {filename} hash mismatch: lock has {expected}, found {actual}")]
     BlobMismatch {
         /// Blob filename from the pin.
         filename: String,
         /// Hash recorded in the lock.
         expected: String,
-        /// Hash of the vendored file.
+        /// Hash of the bytes found.
         actual: String,
     },
 
@@ -646,9 +677,31 @@ pub enum EngineError {
         modules: Vec<String>,
     },
 
-    /// The initrd report program's output could not be read, so the initramfs module
-    /// check did not run. Refused rather than passed, since a check that did not run
-    /// has established nothing.
+    /// The built initramfs lacks firmware a driver built into the kernel declares and the
+    /// image holds.
+    ///
+    /// The driver probes while the initrd is the root filesystem, so its firmware
+    /// request fails and the device never appears. Both generators install such a file:
+    /// `initramfs-tools` through `add_builtin_firmware`, dracut through the module
+    /// boot2deb installs for it. A missing one is a generator that skipped it. The
+    /// decision is
+    /// [`missing_builtin_firmware`](boot2deb_core::initramfs::missing_builtin_firmware).
+    #[error(
+        "the initramfs built for kernel {kernel} lacks firmware that built-in drivers \
+         declare and the image contains: {}. The generator did not install it, so each \
+         driver's probe from the initrd fails",
+        .missing.join("; ")
+    )]
+    InitrdBuiltinFirmwareMissing {
+        /// The kernel release the initrd was built for.
+        kernel: String,
+        /// Each driver with its missing files, as `<module> (<file>, ...)`.
+        missing: Vec<String>,
+    },
+
+    /// The initrd report program's output could not be read, so the initrd checks did
+    /// not run. Refused rather than passed, since a check that did not run has
+    /// established nothing.
     #[error("the initrd report could not be read: {message}")]
     InitrdReport {
         /// What was wrong with the output.
@@ -1036,6 +1089,28 @@ pub enum PinRelation {
     /// of the commits is absent from the local checkout). Remedy: both options,
     /// spelled out.
     Unknown,
+}
+
+/// What a layer overlay placed in a generated rootfs path's way, for
+/// [`EngineError::StagedPathBlocked`]. Its `Display` completes that error's message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StagedConflict {
+    /// A symlink at an ancestor of the generated path.
+    SymlinkAncestor,
+    /// A file or other non-directory at an ancestor of the generated path.
+    NonDirectoryAncestor,
+    /// A directory at the generated path itself.
+    Directory,
+}
+
+impl std::fmt::Display for StagedConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::SymlinkAncestor => "a symlink, which a generated path is never resolved through",
+            Self::NonDirectoryAncestor => "not a directory, and the generated path needs one there",
+            Self::Directory => "a directory, which a generated entry never replaces",
+        })
+    }
 }
 
 impl EngineError {

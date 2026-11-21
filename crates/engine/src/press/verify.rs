@@ -17,10 +17,8 @@ use crate::blobs::hex;
 use crate::error::EngineError;
 use crate::event::Step;
 use crate::press::write::{decompressed_prefix, WrittenImage};
-use gpt::disk::LogicalBlockSize;
-use gpt::GptConfig;
 use sha2::{Digest, Sha256};
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 /// Sectors the primary GPT occupies (protective MBR + header + entry array), and
@@ -130,22 +128,24 @@ pub fn planned_table(artifact: &Path) -> Result<Vec<TableEntry>, EngineError> {
 /// table — a `-boot.img`, which states no size.
 pub fn planned_image_bytes(artifact: &Path) -> Result<u64, EngineError> {
     let prefix = decompressed_prefix(artifact, GPT_PREFIX_BYTES)?;
-    let name = artifact.display().to_string();
-    let disk = GptConfig::new()
-        .writable(false)
-        .logical_block_size(LogicalBlockSize::Lb512)
-        .open_from_device(std::io::Cursor::new(prefix))
-        .map_err(|e| EngineError::ImageVerifyGpt {
-            target: name.clone(),
-            detail: format!("no readable primary GPT: {e}"),
+    let len = prefix.len() as u64;
+    let table = crate::image::gptread::read_primary(&mut std::io::Cursor::new(prefix), len)
+        .map_err(|detail| EngineError::ImageVerifyGpt {
+            target: artifact.display().to_string(),
+            detail,
         })?;
-    let header = disk
-        .primary_header()
-        .map_err(|e| EngineError::ImageVerifyGpt {
-            target: name,
-            detail: format!("the primary GPT header did not validate: {e}"),
-        })?;
-    Ok((header.backup_lba + 1) * 512)
+    table
+        .header
+        .other_lba
+        .checked_add(1)
+        .and_then(|sectors| sectors.checked_mul(512))
+        .ok_or_else(|| EngineError::ImageVerifyGpt {
+            target: artifact.display().to_string(),
+            detail: format!(
+                "the primary GPT header places its backup at LBA {}, past any disk",
+                table.header.other_lba
+            ),
+        })
 }
 
 /// The partition table `target` actually contains, read back from the medium.
@@ -198,39 +198,22 @@ pub fn compare_tables(
     })
 }
 
-/// Parse the primary GPT out of any readable source. The backup header is
-/// expected to be absent or misplaced (see the module doc) and is not judged.
-fn read_table_from<D: gpt::DiskDevice>(
-    device: D,
+/// Parse the primary GPT out of any readable source, with the strict reader the image
+/// gates use. The backup header is expected to be absent or misplaced (see the module
+/// doc) and is not judged.
+fn read_table_from<D: Read + Seek>(
+    mut device: D,
     name: &str,
 ) -> Result<Vec<TableEntry>, EngineError> {
-    let disk = GptConfig::new()
-        .writable(false)
-        .logical_block_size(LogicalBlockSize::Lb512)
-        .open_from_device(device)
-        .map_err(|e| EngineError::ImageVerifyGpt {
+    let len = device
+        .seek(SeekFrom::End(0))
+        .map_err(|e| EngineError::io(Path::new(name), e))?;
+    crate::image::gptread::read_primary(&mut device, len)
+        .map(|table| table.entries)
+        .map_err(|detail| EngineError::ImageVerifyGpt {
             target: name.to_string(),
-            detail: format!("no readable primary GPT: {e}"),
-        })?;
-    if disk.primary_header().is_err() {
-        return Err(EngineError::ImageVerifyGpt {
-            target: name.to_string(),
-            detail: "the primary GPT header did not validate".into(),
-        });
-    }
-    Ok(disk
-        .partitions()
-        .iter()
-        .map(|(index, p)| TableEntry {
-            index: *index,
-            name: p.name.clone(),
-            first_lba: p.first_lba,
-            last_lba: p.last_lba,
-            type_guid: p.part_type_guid.guid.to_string().to_lowercase(),
-            part_guid: p.part_guid.to_string().to_lowercase(),
-            flags: p.flags,
+            detail,
         })
-        .collect())
 }
 
 #[cfg(test)]
@@ -238,6 +221,8 @@ mod tests {
     use super::*;
     use crate::event::Event;
     use crate::press::write::stream_image;
+    use gpt::disk::LogicalBlockSize;
+    use gpt::GptConfig;
     use std::io::Write as _;
 
     fn sink() -> impl Fn(Event) {

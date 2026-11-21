@@ -1,10 +1,11 @@
 //! rkbin blob hashing and verification.
 //!
-//! Blobs (the ATF/BL31 ELF and DDR TPL) are vendored under `blobs/<soc>/` and
-//! read through a `(filename, sha256)` key. `boot2deb update` records each as a lock
-//! pin `"<filename>@sha256:<hex>"` ([`pin`]). The u-boot build [`verify`]s the
-//! vendored file against that pin before consuming it. A swapped or corrupted blob
-//! is therefore a typed error rather than a silently different bootloader.
+//! Blobs (the ATF/BL31 ELF, DDR TPL and OP-TEE BL32) are read through a
+//! `(filename, sha256)` key. `boot2deb update` records each as a lock pin
+//! `"<filename>@sha256:<hex>"` ([`pin`]) from the bytes [`rkbin`](crate::rkbin)
+//! fetched. The u-boot build [`verify`]s the file it reads, fetched or from
+//! `--blobs-dir`, against that pin before consuming it. A swapped or corrupted blob is
+//! therefore a typed error rather than a silently different bootloader.
 //!
 //! Hashing is pure-Rust (`sha2`). The pure helpers ([`sha256_hex`], [`parse_pin`]) are
 //! unit-tested without I/O.
@@ -94,8 +95,8 @@ pub fn verify(dir: &Path, expected_pin: &str) -> Result<PathBuf, EngineError> {
 /// Verify the pinned blob and copy the **verified bytes** into `stage_dir`,
 /// returning the staged path. The consumer reads the staged copy, so the bytes it
 /// uses are exactly the ones that were hashed. That closes the verify-then-read
-/// TOCTOU where the vendored source could be swapped between the hash check and
-/// `make` re-reading it.
+/// TOCTOU where the source file could be swapped between the hash check and `make`
+/// re-reading it.
 pub fn verify_to(dir: &Path, expected_pin: &str, stage_dir: &Path) -> Result<PathBuf, EngineError> {
     let (filename, bytes) = read_verified(dir, expected_pin)?;
     std::fs::create_dir_all(stage_dir).map_err(|source| EngineError::io(stage_dir, source))?;

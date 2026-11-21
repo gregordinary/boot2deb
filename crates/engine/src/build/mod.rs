@@ -3,8 +3,9 @@
 //! structured [`Event`](crate::event::Event) stream.
 //!
 //! These stages build the device's kernel, bootloader, out-of-tree modules, and media
-//! stack: [`kernel`] (`git am` series + `make bindeb-pkg`), [`uboot`], [`kmod`], the
-//! [`userspace`] MPP/RGA `.deb`s, and the [`ffmpeg`] `ffmpeg-rk` `.deb`. They drive
+//! stack. They are [`kernel`] (`git am` series + `make bindeb-pkg`), [`uboot`] with the
+//! [`tfa`] BL31 it packs, and [`kmod`]. The media stack is the [`userspace`] MPP/RGA
+//! `.deb`s and the [`ffmpeg`] `ffmpeg-rk` `.deb`. They drive
 //! the compile invocations directly rather than reimplementing them. The value here is
 //! the typed orchestration, the lock-driven pins, and the event stream, not a new
 //! build system.
@@ -25,6 +26,7 @@ pub mod kernel;
 pub mod kmod;
 pub(crate) mod probe;
 pub mod rkboot;
+pub mod tfa;
 pub mod uboot;
 pub mod userspace;
 
@@ -1144,29 +1146,6 @@ fn verify_patches_pin(
         actual: head,
         dirty: !clean,
     })
-}
-
-/// Sanitize a raw upstream version into a Debian upstream-version-safe string:
-/// keep alphanumerics and `. + ~ -`, replace anything else with `+` (underscore
-/// is **not** legal in a Debian version), and guarantee the result starts with a
-/// digit (Debian requires it) by prefixing `0` otherwise — which also covers the
-/// empty input. Callers strip their own leading tag prefix first (ffmpeg's `n`,
-/// u-boot's `v`). Pure, so version derivation is testable without a repo.
-pub(crate) fn sanitize_deb_version(raw: &str) -> String {
-    let mut out: String = raw
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '.' | '+' | '~' | '-') {
-                c
-            } else {
-                '+'
-            }
-        })
-        .collect();
-    if !out.chars().next().is_some_and(|c| c.is_ascii_digit()) {
-        out.insert(0, '0');
-    }
-    out
 }
 
 /// The restored path for `role` in an [`artstore`](crate::artstore) restore result,

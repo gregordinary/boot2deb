@@ -44,7 +44,7 @@ image_size = "3G"                        # Jellyfin + media-accel over the base
 # Jellyfin 12 from its repository, where the booted one ran 10.11.
 [support]
 status = "expected"
-date   = "2026-10-19"
+date   = "2026-11-21"
 
 # What an operator gets, stated up front, because the shape of the acceleration is
 # not the shape the Jellyfin dashboard implies. The two limits underneath these ride

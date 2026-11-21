@@ -11,6 +11,9 @@
 //!
 //! The checks run where the value is authored. A bad value is therefore a
 //! press-time error naming the flag, rather than a board that silently never joins.
+//! A `seed.txt` edited by hand never passes through press, so the hook holds its
+//! values to these same rules in sh. The engine's `first_boot_hooks` test keeps that
+//! copy in agreement with this one.
 //!
 //! Pure and host-independent. Nothing here touches the filesystem.
 

@@ -87,6 +87,7 @@ pub mod pins;
 pub mod plan;
 pub mod press;
 pub mod repo;
+pub mod rkbin;
 pub mod rootcache;
 pub mod rootfs;
 pub mod sandbox;
@@ -174,7 +175,7 @@ pub(crate) mod test_support {
     /// The recipe both fixtures below are the two halves of: the resolved build and
     /// its committed pins have to describe one build point, or a test pairing them
     /// asserts against a combination no build has.
-    const RK1_MEDIA_ACCEL: &str = "turing-rk1/media-accel-forky";
+    pub(crate) const RK1_MEDIA_ACCEL: &str = "turing-rk1/media-accel-forky";
 
     /// The resolved `turing-rk1/media-accel-forky` build, for stage tests that need
     /// real device / offset / soc values *and* the media userspace + ffmpeg pins.

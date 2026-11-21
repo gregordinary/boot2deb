@@ -4,32 +4,39 @@
 [kernel]
 id = "rk3576-mainline-7.3"
 source = "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git"
-ref = "v7.3"
-commit = "c03c1a14507dfaf8b856c2608f9ac216021fc222"
+ref = "v7.3.3"
+commit = "d50d994bffa3c7c6db2d8bc4c5f0c55e3f46b0cd"
+revision = 1
+config_sha256 = "d0d16725492e20f9103ec99c4fa16260e74dbcfa3a68866b2575989adb5aa594"
 
 [patches]
 series = ["rk3576-fixes"]
 source = "https://github.com/gregordinary/patches.git"
 ref = "main"
-commit = "339beaf35d5a81f861e4a2229365fb8f07ade50c"
+commit = "0465628c7167bf4cf99d7ac8dd6368dc64968cef"
 
 [uboot]
 source = "https://git.u-boot-project.org/u-boot/u-boot.git"
 ref = "v2026.10"
 commit = "5508406582f6f7120dce0c4b3059819a41788db2"
+revision = 1
+config_sha256 = "16873345d89c9b09f122d7902059f737dad8423c8170c7f29c8031e2001bcd08"
 
 [uboot_patches]
 series = ["rk3576-loader"]
 source = "https://github.com/gregordinary/patches.git"
 ref = "main"
-commit = "339beaf35d5a81f861e4a2229365fb8f07ade50c"
+commit = "0465628c7167bf4cf99d7ac8dd6368dc64968cef"
 
 [rootfs]
 distro = "debian"
 suite = "forky"
 manifest = "forky.pkgs.lock"
-source_date_epoch = 1792427924
+source_date_epoch = 1794166505
 
 [blobs]
+source = "https://github.com/rockchip-linux/rkbin.git"
+ref = "master"
+commit = "3e288fe814e059dd06833495f845cab04ac20a5c"
 atf = "rk3576_bl31_v1.25.elf@sha256:a709eb309746a46c192405fe95b725a668c20ee05b134478838a69e723bfafb2"
 tpl = "rk3576_ddr_lp4_2112MHz_lp5_2736MHz_v1.13.bin@sha256:f697151bdd09d31bf7a1e49d63796a6a200e81bf8f9a766c2e95c840e88fc0ce"

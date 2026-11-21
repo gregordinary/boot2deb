@@ -678,6 +678,44 @@ mod tests {
     }
 
     #[test]
+    fn a_tfa_pin_follows_only_its_own_release_family() {
+        // TF-A publishes three families in one repository: feature releases
+        // (`v2.16.0`), the LTS line (`lts-v2.14.14`), and release candidates
+        // (`v2.17-rc0`). A feature-release pin is offered feature releases only.
+        let refs = vec![
+            ("refs/tags/v2.15.0".into(), sha('a')),
+            ("refs/tags/v2.16-rc0".into(), sha('b')),
+            ("refs/tags/v2.16.0".into(), sha('c')),
+            ("refs/tags/lts-v2.14.14".into(), sha('d')),
+            ("refs/tags/lts-v2.16.1".into(), sha('e')),
+            ("refs/tags/v2.17-rc0".into(), sha('f')),
+            ("refs/tags/v2.17.0".into(), sha('1')),
+            ("refs/tags/arm_cca_v0.3".into(), sha('2')),
+        ];
+        let Upgrade::Behind { line, latest } = compare("v2.16.0", &sha('c'), &advert(&refs)) else {
+            panic!("expected behind");
+        };
+        assert_eq!(line, None, "no 2.16 point release in the feature family");
+        assert_eq!(latest.tag, "v2.17.0");
+        assert_eq!(latest.count, 1, "neither lts- nor -rc tags are candidates");
+
+        // An LTS pin is never offered a feature release, the reverse of the rule
+        // above. Its `lts-` spelling names no version the survey orders, so it says
+        // so rather than guess.
+        assert!(matches!(
+            compare("lts-v2.14.14", &sha('d'), &advert(&refs)),
+            Upgrade::Unknown { .. }
+        ));
+
+        // A release-candidate pin is offered the release it leads to.
+        let Upgrade::Behind { latest, .. } = compare("v2.16-rc0", &sha('b'), &advert(&refs)) else {
+            panic!("expected behind");
+        };
+        assert_eq!(latest.tag, "v2.17.0");
+        assert!(compare("v2.16-rc0", &sha('b'), &advert(&refs[..3])).is_behind());
+    }
+
+    #[test]
     fn an_annotated_tags_peeled_target_is_the_commit_reported() {
         // The unpeeled line contains the tag object's sha, not the commit — reporting
         // it would hand an operator a value no checkout resolves to.

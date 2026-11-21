@@ -304,6 +304,7 @@ fn build_one(
             build,
             env,
             ktree: &ktree,
+            revision: crate::build::kernel_pin(lock)?.revision,
             tree: &driver_tree,
             subdir: &subdir,
             k,
@@ -445,6 +446,9 @@ struct ModuleMake<'a> {
     /// The built kernel tree, passed as `make -C`. Modules link against its
     /// `Module.symvers`, so it must be the tree whose vermagic the `.deb` claims.
     ktree: &'a Path,
+    /// The kernel's revision from the lock, passed on to [`kbuild_env`] so the module
+    /// build sees the variables the kernel's own build did.
+    revision: u32,
     /// The fetched driver tree, mapped out of the module's debug information with the
     /// kernel tree ([`kernel::kbuild_env`](crate::build::kernel::kbuild_env)).
     tree: &'a Path,
@@ -804,7 +808,8 @@ fn package_firmware_deb(
 /// driver trees' prefix maps) plus the cross toolchain to a `make` command — shared by
 /// the module compile and install steps.
 fn kbuild_env(mk: &ModuleMake, epoch: Option<u64>) -> Vec<(String, String)> {
-    let mut vars = crate::build::kernel::kbuild_env(mk.build, epoch, &[mk.ktree, mk.tree]);
+    let mut vars =
+        crate::build::kernel::kbuild_env(mk.build, epoch, mk.revision, &[mk.ktree, mk.tree]);
     vars.extend(
         mk.env
             .cross_compile
@@ -836,7 +841,7 @@ fn deb_version(pin: &KmodPin) -> String {
     } else {
         format!("0~{base}")
     };
-    build::sanitize_deb_version(&base)
+    boot2deb_core::version::sanitize_deb_version(&base)
 }
 
 /// The `DEBIAN/control` stanza. Pure, so the metadata is testable without `dpkg-deb`.

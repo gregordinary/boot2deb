@@ -24,8 +24,8 @@
 
 use super::{
     apply_series_scope, deb_names, fetch_commit, fold_patch_series, pick_deb, purge_stage_debs,
-    restore_stage_outputs, reuse_or_refresh_tree, sanitize_deb_version, stage_artifact,
-    store_stage_outputs, ApplyScope, BuildEnv, PatchScope, PatchSource, SeriesIdentity,
+    restore_stage_outputs, reuse_or_refresh_tree, stage_artifact, store_stage_outputs, ApplyScope,
+    BuildEnv, PatchScope, PatchSource, SeriesIdentity,
 };
 use crate::dotnet::{dotnet_env, read_packages_folder, DotnetCache};
 use crate::error::EngineError;
@@ -44,6 +44,18 @@ const TREE_STAGE_VERSION: u32 = 1;
 /// Recipe version of the built `.deb`, bumped when how the build runs changes, so an
 /// artifact built the old way is not restored.
 const OUTPUT_STAGE_VERSION: u32 = 1;
+
+/// MSBuild targets that make a publish independent of when and where it ran. They
+/// stamp the static web assets the SDK compresses with `SOURCE_DATE_EPOCH`, so the
+/// endpoint manifest a publish ships records the same `Last-Modified` on every build.
+/// They map the build's root directory to a fixed path for the compiler, which names
+/// a source generator's file-local types after a hash of their path. Imported into
+/// every project through `CustomAfterMicrosoftCommonTargets`. The file itself says how.
+const REPRODUCIBLE_TARGETS: &str = include_str!("app-reproducible.targets");
+
+/// What the targets file is called in the stage directory, which the build sandbox
+/// binds at the same path.
+const REPRODUCIBLE_TARGETS_FILE: &str = "boot2deb-reproducible.targets";
 
 /// The epoch every app's deb version contains. The rootfs solve and a device's
 /// `apt upgrade` both prefer the highest version across their repositories, and the
@@ -96,7 +108,10 @@ pub fn deb_version(pin: &AppPin) -> String {
     if let Some(p) = &pin.patches {
         upstream.push_str(&format!(".p{}", short(&p.commit)));
     }
-    format!("{DEB_EPOCH}:{}", sanitize_deb_version(&upstream))
+    format!(
+        "{DEB_EPOCH}:{}",
+        boot2deb_core::version::sanitize_deb_version(&upstream)
+    )
 }
 
 /// First twelve characters of a commit.
@@ -178,6 +193,8 @@ pub struct OutputKeyInputs<'a> {
 /// - The project, the deb name, and the version the changelog stamps.
 /// - The target and the suite.
 /// - The cross root the build ran in, and the packages layered over it.
+/// - The MSBuild targets the build imports, which make it independent of when and
+///   where it ran.
 pub fn output_manifest(inputs: &OutputKeyInputs) -> SignatureManifest {
     let tree = tree_manifest(
         &inputs.app.name,
@@ -211,7 +228,11 @@ pub fn output_manifest(inputs: &OutputKeyInputs) -> SignatureManifest {
         .fold_scalar("suite", inputs.suite)
         .fold_scalar("toolchain", inputs.toolchain_id)
         .fold_scalar("host_arch", inputs.host_arch)
-        .fold_set("build_deps", layer_packages());
+        .fold_set("build_deps", layer_packages())
+        .fold_scalar(
+            "msbuild_targets",
+            &crate::blobs::sha256_hex(REPRODUCIBLE_TARGETS.as_bytes()),
+        );
     b.manifest()
 }
 
@@ -518,6 +539,17 @@ pub fn build_app(
     // folder feed and nothing else, whatever sources the tree's own NuGet config names.
     build_env.push(("RestoreSources".into(), feed.display().to_string()));
     build_env.push(("SOURCE_DATE_EPOCH".into(), epoch.to_string()));
+    // Also an MSBuild property from the environment: Microsoft.Common.targets imports
+    // the file it names into every project, after the SDK's own targets.
+    let targets = stage.join(REPRODUCIBLE_TARGETS_FILE);
+    std::fs::write(&targets, REPRODUCIBLE_TARGETS).map_err(|s| EngineError::io(&targets, s))?;
+    build_env.push((
+        "CustomAfterMicrosoftCommonTargets".into(),
+        targets.display().to_string(),
+    ));
+    // The directory every path of the build is under: the tree, the NuGet scratch and
+    // the feed. The targets above map it to a fixed path.
+    build_env.push(("Boot2debBuildRoot".into(), stage.display().to_string()));
     build_env.push((
         "DEB_BUILD_OPTIONS".into(),
         format!("noddebs nocheck parallel={}", env.jobs()),

@@ -36,7 +36,7 @@ flavor           = "mainline"
 # comes from the pin, not the transport. `update` resolves the tag once and writes
 # the commit into the lock, and every build after that fetches *that commit* by
 # sha and would fail if the server answered with anything else.
-source           = { git = "git://linux-libre.fsfla.org/releases.git", ref = "sources/v7.3-gnu" }
+source           = { git = "git://linux-libre.fsfla.org/releases.git", ref = "sources/v7.3.1-gnu" }
 track            = "7.3.y"                 # the lock pins the exact tag (update --kernel-ref)
 
 base_defconfig   = "multi_v7_defconfig"    # in-tree 32-bit multiplatform base; fragments merge onto it

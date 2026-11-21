@@ -1,6 +1,7 @@
 # boot-methods/rockchip-rkbin.toml — Rockchip idbloader + u-boot.itb written to
-# the raw gap ahead of the rootfs partition, with rkbin ATF (BL31) + DDR TPL.
-description = "Rockchip idbloader + u-boot.itb in the raw gap (rkbin ATF/TPL)"
+# the raw gap ahead of the rootfs partition, with an rkbin DDR TPL and the selected
+# BL31 (rkbin's, or Trusted Firmware-A built from source).
+description = "Rockchip idbloader + u-boot.itb in the raw gap (rkbin DDR TPL, selected BL31)"
 
 # u-boot's canonical upstream, run by the project itself. `github.com/u-boot/u-boot`
 # is a mirror containing byte-identical tag objects, so `--uboot-src` reaches the same
@@ -18,16 +19,24 @@ patches_ref  = "main"                    # default constraint; the exact commit 
 # Raw-gap layout (byte offsets, outside any filesystem):
 #   idbloader   @ 32 KiB
 #   u-boot.itb  @ 8 MiB
-#   rootfs partition starts @ 16 MiB
+#   seed partition in the MiB below the partition offset
+#   partitions start @ 16 MiB: the EFI system partition under the efi loader, then the
+#   rootfs; the rootfs alone under extlinux
 idbloader_offset = "32KiB"
 uboot_itb_offset = "8MiB"
-rootfs_offset    = "16MiB"
+partition_offset = "16MiB"
 
-# What this method's kernel-install hooks must have left on /boot for u-boot's
-# distro-boot to find. Boards on this method have booted with all of it missing
-# and said nothing until the bootloader shrugged, so the selftest asserts each
-# piece. The DTB check is emitted by the build (it knows the resolved
-# kernel_dtb), so it is not restated here.
+# u-boot reads an extlinux menu and is a UEFI implementation, so a board on this method
+# boots either way (loaders/<loader>.toml). extlinux is the default: u-boot reads the
+# menu straight off the rootfs, with no partition of its own.
+loaders        = ["extlinux", "efi"]
+default_loader = "extlinux"
+
+# The kernel and initrd either loader starts, which the kernel package and the
+# initramfs generator leave on /boot. Boards on this method have booted with them
+# missing and said nothing until the bootloader shrugged, so the selftest asserts each.
+# What each loader adds (its menu, the DTB where its firmware reads it) is checked by
+# the loader's own layer and by the build.
 [[expect]]
 check = "file"
 path  = "/boot/vmlinuz-*"
@@ -35,7 +44,3 @@ path  = "/boot/vmlinuz-*"
 [[expect]]
 check = "file"
 path  = "/boot/initrd.img-*"
-
-[[expect]]
-check = "file"
-path  = "/boot/extlinux/extlinux.conf"

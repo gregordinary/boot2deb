@@ -375,12 +375,18 @@ mod tests {
             "boot-methods/rockchip-rkbin.toml",
             "base.toml",
             "distros/debian.toml",
-            "blobs/rk3588",
             "blobs/keyrings/debian-archive-keyring.gpg",
             "base/overlay",
         ] {
             assert!(p.inputs.contains(&rel(wanted)), "{wanted} is an input");
         }
+        // The rkbin blobs are fetched at the locked commit, so no config-tree path
+        // stands for them: a change to them is a lock change.
+        assert!(
+            !p.inputs.iter().any(|i| i.contains("blobs/rk35")),
+            "{:?}",
+            p.inputs
+        );
         // Another distro layer is read to prove the suite is not claimed twice, which
         // decides whether the point resolves and never what it builds.
         assert!(!p.inputs.contains(&rel("distros/ubuntu.toml")));

@@ -11,10 +11,12 @@ A build is a single point across the axes a user selects:
   A device declares which kernels it supports and a default. Override with `--kernel`
   (values from `list-kernels`). Some kernels are [not built at
   all](#kernels-are-compiled-or-installed).
-- **`suite`** — the Debian suite (e.g. `forky`, `trixie`). Override with `--suite`. The
-  image's `sources.list` contains the pockets that suite actually publishes, so a
-  released suite gets `-security` and `-updates` alongside its base and `sid` gets
-  neither.
+- **`suite`** — the release the userland comes from (e.g. `forky`, `trixie`, Ubuntu's
+  `resolute`). The suite decides the distribution, as
+  [A suite names its distribution](#a-suite-names-its-distribution) describes. Override
+  with `--suite`. The image's apt sources contain the pockets that suite publishes. A
+  released Debian suite gets `-updates` and `-security` alongside its base, an Ubuntu
+  release gets `-backports` as well, and `sid` gets none.
 
   Like the kernel, the suite is a **closed set per board**. A device declares
   `supported_suites` and a `default_suite`, and anything else is a resolve-time error
@@ -34,11 +36,19 @@ A build is a single point across the axes a user selects:
   than a whole kernel definition. See
   [The bootloader is its own axis](#the-bootloader-is-its-own-axis). Empty on a board
   whose u-boot ships pristine, or whose firmware boot2deb does not build.
+- **`bl31`**: where the BL31 inside `u-boot.itb` comes from. That is `rkbin`, Rockchip's
+  prebuilt blob, or `tfa`, Trusted Firmware-A built from source. A device declares
+  `supported_bl31` and a default, and a recipe or `--bl31` picks one. See
+  [The BL31 is its own axis](#the-bl31-is-its-own-axis).
 - **`layout`** — how the disk image is packaged: `combined` (one whole-disk image, boot
   payload and rootfs on a single medium) or `split` (separate bootloader and rootfs
   images for a two-medium install). Override with `--layout`. Only a boot method that
   *has* a bootloader can split it off, and the combination is rejected at resolve for
   one that does not.
+- **`loader`**: what finds the kernel on the image and starts it, either `extlinux` (u-boot
+  reads a menu on the rootfs) or `efi` (the firmware starts GRUB from an EFI system
+  partition). The boot method lists the loaders it supports and a default, and a recipe
+  or `--loader` picks one. See [The loader is its own axis](#the-loader-is-its-own-axis).
 - **`features`** — a *list* of composable add-ins stacked onto the base image. A
   **capability** feature provides a hardware stack (`media-accel-rockchip`, the RK35xx
   HW-transcode userspace). An **application** feature installs an app (`jellyfin`). A
@@ -61,6 +71,49 @@ split across two layers for a reason: see
 [Locale, timezone, and keyboard](../localization.md). The NTP servers an image prefers
 resolve alongside them, from `base.toml` — see
 [The clock and time sync](../clock.md).
+
+## A suite names its distribution
+
+A recipe names a suite and never a distribution. Resolution finds the one
+`distros/<name>.toml` layer whose `suites` list contains it. `distros/debian.toml` serves
+`forky`, `trixie` and `sid`, and `distros/ubuntu.toml` serves `resolute`. A suite that two
+layers claim is refused, so the lookup has one answer.
+
+The layer holds everything the distribution decides:
+
+- **The archive.** The mirror and snapshot of each pocket, the components, and the
+  keyring that verifies every `Release` file during the build. The image's apt sources
+  are one deb822 file in `/etc/apt/sources.list.d/`, naming the keyring the
+  distribution's own keyring package installs. A Linux-libre kernel needs the layer's
+  free-only components, and only Debian's layer offers them.
+- **The default account.** `debian` on Debian, `ubuntu` on Ubuntu.
+- **The initramfs generator.** `initramfs-tools` on Debian, `dracut` on Ubuntu. A recipe
+  can set `initramfs_generator` to the other one. It is a recipe field and not a flag,
+  because the generator also decides what the image's own kernel upgrades run. A
+  depthcharge board builds with initramfs-tools only.
+- **The time client.** `systemd-timesyncd` on Debian, and on Ubuntu `chrony`, which
+  `ubuntu-minimal` depends on. See [The clock and time sync](../clock.md).
+- **Packages.** What an image of the distribution adds to the shared base set, and what
+  it excludes. Debian adds `dhcpcd`. Ubuntu adds nothing, since its important set
+  already includes `ubuntu-minimal` and netplan.
+- **An overlay tree.** `distros/<name>/overlay/` is merged right after the base overlay.
+  Debian's holds the `resolv.conf` placeholder dhcpcd writes into. Ubuntu's holds the
+  netplan file that brings up the wired interfaces through systemd-networkd.
+- **The `try` kernel.** `virt_kernels` names, per architecture, the generic kernel a
+  QEMU `virt` guest boots. See [Trying an image before flashing](try.md).
+
+Where the two archives split a package differently, a SoC or device layer names one
+entry per distribution:
+
+```toml
+packages = [
+    { name = "firmware-misc-nonfree", distros = ["debian"] },
+    { name = "linux-firmware-misc", distros = ["ubuntu"] },
+]
+```
+
+The lock records the distribution beside the suite, as `[rootfs] distro`. The build
+roots follow it, so an Ubuntu image's kernel compiles in an Ubuntu build root.
 
 ## Kernels are compiled, or installed
 
@@ -137,20 +190,35 @@ nowhere to put it.
 The two shipped methods:
 
 - **`rockchip-rkbin`** — boot2deb compiles the bootloader. The layer contains the u-boot
-  source and ref, and the raw-gap offsets (`idbloader_offset`, `uboot_itb_offset`,
-  `rootfs_offset`). The device contains `uboot_defconfig` and inherits an rkbin blob set
-  (ATF + DDR TPL) from its SoC. The payloads are written *outside* any partition, in the gap
-  ahead of the rootfs.
+  source and ref, and the raw-gap offsets (`idbloader_offset`, `uboot_itb_offset`). It
+  also contains the `partition_offset` the partitions start at, and the
+  [loaders](#the-loader-is-its-own-axis) u-boot can boot through. The device contains
+  `uboot_defconfig` and inherits an rkbin blob set from its SoC: the DDR TPL, and the
+  BL31 when the board packs rkbin's. The payloads are written *outside* any partition, in
+  the gap ahead of the partitions.
 
-  The blobs are vendored under `blobs/<soc>/` and pinned by sha256, so a build reads
-  nothing upstream. The SoC layer also records where they are published, which only
-  [`outdated`](cli.md#what-has-moved-upstream) reads, to list newer releases:
+  The build fetches the blobs from Rockchip's `rkbin` repository, which the SoC layer
+  names:
 
   ```toml
   [rkbin.upstream]
   git = "https://github.com/rockchip-linux/rkbin.git"
+  ref = "master"
   dir = "bin/rk35"
   ```
+
+  The lock pins a commit of that repository and each file's sha256. The u-boot stage
+  fetches only the named files at that commit, without the rest of the repository, into
+  `cache/rkbin/<commit>/`, and refuses one whose hash differs.
+
+  `update` keeps the locked commit while it contains every named file. When a layer
+  names a file it lacks, `update` moves to the head of `ref`. rkbin deletes a blob's
+  older versions when it publishes a newer one. Following the branch on every update
+  would therefore break every recipe still on the old file.
+
+  [`outdated`](cli.md#what-has-moved-upstream) lists `dir` at the head of `ref` for a
+  newer release of each pinned file. `build --blobs-dir <dir>` reads the files from a
+  local directory instead, held to the same hashes, for an offline build.
 
 - **`depthcharge`** — boot2deb compiles no bootloader at all. The firmware is the
   board's own (coreboot in an SPI chip), and what it loads is the **kernel itself**,
@@ -171,11 +239,13 @@ The two shipped methods:
   fallback, and a bad upgrade needs external media to recover. See
   [Upgrading the kernel](../kernel-upgrades.md).
 
-Both shapes lay the same GPT: the 1 MiB `b2d-seed` partition first, then the rootfs,
-which has the **legacy-BIOS-bootable attribute**. That attribute is what points
-u-boot's `bootflow scan` at the rootfs. It narrows to the partitions marked bootable,
-and with none marked it looks at partition 1 alone, which is the seed. Depthcharge
-ignores it and selects a kernel slot by type GUID instead.
+Both shapes lay the 1 MiB `b2d-seed` partition first and the rootfs last. Under the
+`extlinux` loader the rootfs has the **legacy-BIOS-bootable attribute**, which is what
+points u-boot's `bootflow scan` at it. The scan narrows to the partitions marked
+bootable, and with none marked it looks at partition 1 alone, which is the seed. Under
+the `efi` loader an EFI system partition sits between the two. It holds what the scan
+has to find, so it is the partition marked bootable instead. Depthcharge ignores the
+attribute and selects a kernel slot by type GUID instead.
 
 Because the requirements are method-scoped, a board is only ever asked for fields its
 own boot method reads. The C201 declares no `uboot_defconfig` and no rkbin blobs, and
@@ -341,11 +411,11 @@ against the pinned u-boot, and `patch import` names the recipes an import into i
 invalidates. The series' `applies_to_uboot` envelope gates the build the way
 `applies_to_kernel` gates the kernel one.
 
-A board whose u-boot ships pristine simply declares no series, as the RK1 does. If it
-lists some and wants none for this build, it selects `"none"`, the same sentinel the
-kernel axis spells as `patch_series = "none"`. Either way the build fetches nothing and
-the lock omits `[uboot_patches]` entirely. Declaring series but no default, with none
-selected, is a config error rather than a silent fallback to pristine.
+A board whose u-boot ships pristine simply declares no series. If it lists some and
+wants none for this build, it selects `"none"`, the same sentinel the kernel axis spells
+as `patch_series = "none"`. Either way the build fetches nothing and the lock omits
+`[uboot_patches]` entirely. Declaring series but no default, with none selected, is a
+config error rather than a silent fallback to pristine.
 
 ### A recipe whose deliverable is the bootloader
 
@@ -374,6 +444,148 @@ A device can exist purely to home such recipes. `rk3576-generic` is not a board.
 SoC-generic u-boot images build from a control DTB that is identical on every RK3576
 board. They therefore live on a tool host rather than being duplicated per board. See
 [RK3576 u-boot images](rk3576-uboot-images.md) for the worked example.
+
+## The BL31 is its own axis
+
+`u-boot.itb` packs a BL31, the EL3 firmware that starts the secondary cores, answers
+PSCI, and serves the clocks Linux asks for over SCMI. It comes from one of two
+providers:
+
+- **`rkbin`**: Rockchip's prebuilt BL31, fetched from the rkbin repository and pinned
+  by sha256 like the DDR TPL. The SoC layer names it as `[rkbin].atf`.
+- **`tfa`**: Trusted Firmware-A, built from source at a pinned commit. The SoC layer
+  names the source:
+
+  ```toml
+  # socs/rk3588.toml
+  [tfa]
+  git        = "https://git.trustedfirmware.org/TF-A/trusted-firmware-a.git"
+  ref        = "v2.16-rc0"       # the constraint; the lock pins the commit
+  plat       = "rk3588"          # TF-A's PLAT=
+  submodules = ["contrib/dtc"]   # libfdt; fetched at the commit the tree records
+  ```
+
+  TF-A declares more submodules than a BL31 build reads, so `submodules` names the
+  ones to fetch. The pinned TF-A commit records each one's commit, so the lock pins
+  them through it.
+
+The SoC states which providers exist, because TF-A's platform port is per SoC. The
+device states which ones it supports. The BL31 runs the board's power, clock and reset
+paths, so that is validated one board at a time:
+
+```toml
+# devices/<board>.toml
+supported_bl31 = ["rkbin", "tfa"]
+default_bl31   = "rkbin"
+```
+
+A recipe selects one with `bl31 = "tfa"`, and `resolve` takes `--bl31`. Resolution holds
+the selection to four rules:
+
+1. The provider must be in the device's `supported_bl31`. A device that lists none
+   supports `rkbin` alone, and one that lists some must name a `default_bl31`.
+2. `rkbin` needs the merged `[rkbin].atf`. `tfa` needs the SoC's `[tfa]` with a `git`,
+   a `ref` and a `plat`. Nothing reads the provider not selected, so it can be absent.
+3. The DDR TPL is required under either provider. Neither SoC has an open DRAM init,
+   so the TPL is always rkbin's.
+4. A board whose boot method builds no u-boot refuses a `bl31` selection rather than
+   ignoring it.
+
+The lock pins exactly one BL31. The `rkbin` provider's is `[blobs].atf`, and the `tfa`
+provider's is a `[tfa]` table with the source, ref and commit. A lock with both, or
+with neither beside a `[blobs]` table, fails to load. Moving a recipe between providers
+is drift, so `build` refuses the old lock until `update` re-pins it.
+
+`build` compiles TF-A in the cross root u-boot uses, with `make PLAT=<plat> bl31`, and
+u-boot packs the resulting `bl31.elf`. The u-boot `.deb` names its BL31 in its version
+(`2026.10+rkbin1.56-1`, `2026.10+tfa2.16.0-1`) and in `install.conf` (`bl31=`). The
+version ends in the lock's
+[revision](reproducibility.md#the-u-boot-packages-revision-and-configuration), which
+moves on when a new TF-A commit or DDR TPL changes the package under the same refs. Its
+`copyright` names the BL31 too, and reproduces TF-A's BSD-3-Clause license where TF-A is
+the provider.
+
+## The loader is its own axis
+
+The loader is what finds the kernel on the image and starts it. It is a property of the
+image, not of the board. One u-boot reads an extlinux menu and is a UEFI implementation
+too, so the same board boots either way. The boot method lists the loaders its firmware
+can start a kernel through, and a default:
+
+```toml
+# boot-methods/rockchip-rkbin.toml
+partition_offset = "16MiB"
+loaders          = ["extlinux", "efi"]
+default_loader   = "extlinux"
+```
+
+A recipe selects one with `loader = "efi"`, and `resolve` takes `--loader`. A loader the
+boot method does not list is a resolve error naming the list. `depthcharge` lists none,
+since its firmware loads the signed kernel itself, and refuses a selection rather than
+ignoring it. A `deliverable = "uboot"` recipe has no image to put a loader in, and
+refuses one too.
+
+Each loader is a layer of its own, `loaders/<loader>.toml`, with an overlay tree beside
+it that the rootfs merges after the boot method's. The overlay installs the loader's
+kernel hooks, which keep its configuration current when a kernel is installed on the
+running board. The two loaders:
+
+- **`extlinux`**: u-boot's distro boot reads `/boot/extlinux/extlinux.conf` off the
+  rootfs and starts the kernel it names, with the board DTB beside it on `/boot`. The
+  hooks copy the DTB there and regenerate the menu with `/boot/mk_extlinux`. The rootfs
+  starts at the partition offset and is the partition marked bootable.
+- **`efi`**: UEFI. The image lays an **EFI system partition** at the partition offset,
+  FAT32 and `esp_size` long (128 MiB in the shipped layer), and the rootfs follows it.
+  The partition is the one marked bootable, and the board mounts it at `/boot/efi`.
+  GRUB reads `/boot/grub/grub.cfg` off the rootfs.
+
+The EFI system partition holds three files:
+
+- GRUB's EFI binary at the removable-media path, `\EFI\BOOT\BOOTAA64.EFI` on arm64. A
+  firmware with no boot entry of its own loads that file. Every firmware these boards
+  run is one, since none keeps a variable a running Linux writes.
+- The same binary under `\EFI\debian\`, where `grub-install` keeps it.
+- The board DTB under `\dtb\`, where u-boot's UEFI boot reads the device tree it hands
+  the kernel. The name is u-boot's `fdtfile`: the device's `uboot_fdtfile` where it sets
+  one, and its `kernel_dtb` otherwise. The board therefore boots the device tree its
+  kernel was built with, not the firmware's own.
+
+GRUB's core image finds `/boot/grub` as the rootfs partition *of the disk it was loaded
+from*. It therefore names no identifier. On a board with several disks, it boots the
+rootfs beside its own partition.
+
+### What runs on the board
+
+Under `efi` the rest is Debian's own machinery, configured rather than replaced:
+
+- A kernel install or removal runs `update-grub`, through the hook `grub2-common` ships,
+  and boot2deb's hook copies the newest kernel's DTB onto the partition. The menu takes
+  the board's kernel arguments from `/etc/default/grub.d/boot2deb.cfg`, which reads them
+  from `/etc/boot2deb/board.conf` as the extlinux menu does, and roots on the PARTUUID.
+- A GRUB upgrade reinstalls the loader into both paths. The image presets the debconf
+  answers that make the package's postinst do so (`grub2/force_efi_extra_removable`) and
+  leave firmware variables alone (`grub2/update_nvram`).
+- The hook refuses to write the DTB when `/boot/efi` is not mounted. The firmware would
+  never read a copy left in the empty mount point.
+- The partition is mounted `nofail`. A board whose partition will not mount still boots
+  to the network. The failed mount, the self-test and the next kernel install each
+  report it there.
+
+### How the image is built
+
+The rootfs stage installs GRUB as `grub-install --force-extra-removable --no-nvram`
+would, step by step, because that command probes block devices the build has none of.
+It copies the modules, builds the core image with `grub-mkimage`, and writes both copies
+into `/boot/efi`. It then runs `update-grub` itself, so the image ships the menu the
+board will regenerate. `grub-probe` is answered for that one run with what the board's
+own will find: the rootfs partition's PARTUUID and filesystem UUID, ext4 on GPT. An
+unknown question fails the build rather than being guessed at.
+
+The image node then moves `/boot/efi` out of the tree into the FAT32 volume, formatted
+in-process like the seed. The build fails when the tree lacks the loader at the
+removable path or the DTB, rather than a board failing at power-on. A
+[fresh-identity press](../press.md) rewrites `grub.cfg` and the partition's fstab entry
+along with the root's, and gives the partition a fresh GUID and serial.
 
 ## Out-of-tree modules are their own layer
 
@@ -447,10 +659,10 @@ to the hardware.
 The config layers are the top-level directories:
 
 ```
-arches/  socs/  boot-methods/  devices/  kernels/  kmods/  features/  recipes/
+arches/  socs/  boot-methods/  loaders/  devices/  kernels/  kmods/  features/  recipes/
 ```
 
-with vendored bootloader blobs under `blobs/<soc>/`, kernel `.config` fragments under
+with apt keyrings under `blobs/keyrings/`, kernel `.config` fragments under
 `fragments/`, each kmod's own patches under `kmods/<name>/patches/`, and the resolved
 exact pins in `recipes/<device>/<leaf>.lock`.
 
@@ -478,7 +690,7 @@ An absent tree is a statement about the hardware rather than an omission:
 | `mpp` | yes | no — no vendor `mpp_service` in a mainline kernel |
 | `librga` | yes | yes |
 | `libmali` | yes — CSF GPU, no mainline driver | no — panfrost, so Mesa from the mirror |
-| `[ffmpeg.rockchip]` | yes — the rkmpp/rkrga graft | no — the base tree builds unmodified |
+| `[ffmpeg.rockchip]` | yes — the rkmpp/rkrga graft | no — the `rk3576-media` series patches the base, with no graft |
 
 Each entry says what the tree *is* and how the rest of the build relates to it, rather
 than leaving those as rules in code:
@@ -719,10 +931,10 @@ declares them once at the device layer:
 kernel_cmdline = "drm_kms_helper.fbdev_emulation=0 video=HDMI-A-1:d cpuidle.off=1"
 ```
 
-The value is appended to the boot path's generated command line. The extlinux path
-ships it in `/etc/boot2deb/board.conf` (as `EXTL_CMD_LINE`, which `mk_extlinux` reads on
-every kernel install). The depthcharge path appends it to the boot method's signing
-cmdline.
+The value is appended to the boot path's generated command line. Both loaders read it
+from `/etc/boot2deb/board.conf` (as `KERNEL_CMDLINE`): `mk_extlinux` on every kernel
+install under `extlinux`, and `update-grub` under `efi`. The depthcharge path appends it
+to the boot method's signing cmdline.
 
 Base arguments stay generated. `root=` in particular is derived from `/etc/fstab` on the
 device and is rejected here, as is anything the shell would interpret when sourcing
@@ -802,6 +1014,22 @@ A board that names no module leaves the choice to its generator. On a `rockchip-
 board initramfs-tools uses `MODULES=most`, and dracut builds a generic initramfs, not one
 sized to the build host. A depthcharge board builds with initramfs-tools and
 `MODULES=list`, where its list is the whole of what reaches the root device.
+
+**Built-in drivers' firmware is checked on every image, list or not.** A driver built into
+the kernel probes while the initramfs is still the root filesystem, so the firmware it
+requests has to be there. Both generators install every firmware file a built-in driver
+declares and the image contains. The rootfs stage checks that each such file is in the
+initramfs it built, and a missing one fails the build:
+
+```console
+error: the initramfs built for kernel 7.3.3-1-arm64 lacks firmware that built-in drivers
+declare and the image contains: panthor (arm/mali/arch10.8/mali_csffw.bin). The generator
+did not install it, so each driver's probe from the initrd fails
+```
+
+On the RK1 that file is the GPU's firmware, and without it the GPU never appears. A
+declared file the image does not contain is not checked, since a driver declares one file
+per chip it supports.
 
 ### A variant board extends another
 
@@ -1076,14 +1304,14 @@ decoder.
 [[apps]]
 name         = "jellyfin"
 git          = "https://github.com/jellyfin/jellyfin.git"
-ref          = "v12.2"
+ref          = "v12.4"
 deb          = "jellyfin-server"
 patch_series = ["jellyfin"]
 patches_url  = "https://github.com/gregordinary/patches.git"
 
 [apps.build]
 kind       = "dotnet-deb"
-packaging  = { git = "https://github.com/jellyfin/jellyfin-packaging.git", ref = "v12.2-202610051851" }
+packaging  = { git = "https://github.com/jellyfin/jellyfin-packaging.git", ref = "v12.4-202610261649" }
 source_dir = "jellyfin-server"
 project    = "Jellyfin.Server"
 
@@ -1121,7 +1349,7 @@ against the app's `ref`, since an application is its own axis as u-boot is:
 
 ```toml
 # series/jellyfin.toml, in the patches repo
-applies_to_app = ">=12.2, <12.3"
+applies_to_app = ">=12.4, <12.5"
 app            = ["jellyfin/0001-….patch", "jellyfin/0002-….patch"]
 app_packaging  = ["jellyfin/packaging/0001-….patch"]
 ```
@@ -1157,7 +1385,8 @@ has.
 
 **A lock records what the build depends on, and nothing else.** Each table is present
 only when the build actually has that dependency. `[kernel]` appears when a kernel is
-compiled, and `[uboot]` and `[blobs]` when a bootloader is. `[patches]` appears when a
+compiled, and `[uboot]` and `[blobs]` when a bootloader is. `[tfa]` appears when
+Trusted Firmware-A is the source of the bootloader's BL31. `[patches]` appears when a
 series is applied, `[[userspace]]`/`[ffmpeg]` when the media-accel stack is, and
 `[[apps]]` when a feature compiles an application.
 
@@ -1191,7 +1420,7 @@ The split between the two is what makes a build reproducible:
   always produces the same inputs.
 
   Before building, it checks the lock against a fresh resolution on every axis the lock
-  records from config. Those are the source repos, blob file names, kernel id, suite,
+  records from config. Those are the source repos, the BL31 provider, blob file names, kernel id, suite,
   patch series, extra debs, and each app's refs and SDK. It refuses on drift, so a config edit after `update`
   (say a boot-method flip to a different u-boot repo) is a named error rather than a
   build against stale pins.

@@ -53,7 +53,7 @@ pub enum ComponentKind {
     /// A pinned source tree the build compiled from. Not *in* the image. The image
     /// was generated from it.
     Source,
-    /// A vendored boot blob consumed by the boot chain (rkbin ATF / TPL / BL32),
+    /// A boot blob consumed by the boot chain (rkbin ATF / TPL / BL32),
     /// identified by its sha256 rather than by a version.
     Blob,
     /// A pre-built `.deb` pulled from outside the Debian mirror and content-pinned by
@@ -211,7 +211,7 @@ impl Sbom {
             });
         }
         if let Some(blobs) = &manifest.blobs {
-            let pins = [Some(&blobs.atf), Some(&blobs.tpl), blobs.bl32.as_ref()];
+            let pins = [blobs.atf.as_ref(), Some(&blobs.tpl), blobs.bl32.as_ref()];
             for (i, pin) in pins.into_iter().flatten().enumerate() {
                 // A blob pin is `"<file>@sha256:<hex>"`; a malformed one would be a
                 // hand-edited manifest, and the whole pin is then the name so nothing
@@ -228,8 +228,11 @@ impl Sbom {
                     purl: None,
                     sha256: digest,
                     sha512: None,
-                    download: None,
-                    description: Some("vendored Rockchip boot blob".into()),
+                    download: Some(format!("git+{}@{}", blobs.source, blobs.commit)),
+                    description: Some(format!(
+                        "Rockchip boot blob, fetched from rkbin at {}",
+                        blobs.commit
+                    )),
                     relation: Relation::Contains,
                 });
             }
@@ -428,6 +431,12 @@ fn source_pins(manifest: &ProvenanceManifest) -> Vec<SourcePin> {
         "u-boot",
         sources.uboot_ref.as_ref(),
         sources.uboot_commit.as_ref(),
+    ));
+    // Present only when the BL31 is built from source; the rkbin BL31 is a blob below.
+    pins.extend(pin(
+        "trusted-firmware-a",
+        sources.tfa_ref.as_ref(),
+        sources.tfa_commit.as_ref(),
     ));
     // The patch series has a commit and no ref of its own in this document, so the
     // series names stand in for one — which is also what a reader is looking for here.

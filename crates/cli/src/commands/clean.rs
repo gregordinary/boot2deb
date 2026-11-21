@@ -19,7 +19,8 @@
 //! shares:
 //!
 //! - `--artifacts`, the Tier-2 artifact store, pruned to what some lock reaches.
-//! - `--verify-trees`, the auto-fetched source checkouts, pruned to what some lock pins.
+//! - `--verify-trees`, the auto-fetched source checkouts and rkbin blobs, pruned to
+//!   what some lock pins.
 //! - `--kconfig`, `verify-config`'s scratch tree.
 //! - `--all-caches`, the whole durable cache tree.
 //!
@@ -50,8 +51,9 @@
 //! `--verify-trees` and `--artifacts` prune *within* a store rather than removing it,
 //! because both stores are addressed by something a lock decides:
 //!
-//! - The two auto-fetch caches are commit-addressed. A checkout whose commit no lock in
-//!   the config tree names can only be re-fetched, never read back from, and is dead.
+//! - The three fetch caches (verify trees, `patches` checkouts, rkbin blobs) are
+//!   commit-addressed. An entry whose commit no lock in the config tree names can only
+//!   be re-fetched, never read back from, and is dead.
 //! - The artifact store is addressed by each node's output signature. An entry whose
 //!   key no lock's build predicts ([`live_artifacts`]) is never restored, and is dead.
 //!
@@ -65,7 +67,8 @@
 use super::why_rebuild::{predict, PredictOptions};
 use crate::args::CleanArgs;
 use crate::config::{
-    artifact_cache, cache_dir, kconfig_cache, lock_files, patches_cache, verify_trees_cache,
+    artifact_cache, cache_dir, kconfig_cache, lock_files, patches_cache, rkbin_cache,
+    verify_trees_cache,
 };
 use crate::fsutil::dir_size;
 use crate::render::human_size;
@@ -335,7 +338,11 @@ pub(crate) fn run(
             pinned.len(),
             root.search_paths().len()
         );
-        for store in [verify_trees_cache(root), patches_cache(root)] {
+        for store in [
+            verify_trees_cache(root),
+            patches_cache(root),
+            rkbin_cache(root),
+        ] {
             targets.extend(
                 unpinned_checkouts(&store, &pinned)
                     .into_iter()
@@ -526,7 +533,9 @@ mod tests {
                  id = \"k\"\n\
                  source = \"https://k.example/k.git\"\n\
                  ref = \"v1\"\n\
-                 commit = \"{pinned}\"\n"
+                 commit = \"{pinned}\"\n\
+                 revision = 1\n\
+                 config_sha256 = \"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"\n"
             ),
         )
         .unwrap();
@@ -630,6 +639,10 @@ mod tests {
         // The sibling patches cache is swept by the same rule, off the same pinned set.
         let patches = tmp.path().join("cache/patches");
         std::fs::create_dir_all(patches.join(&dead)).unwrap();
+        // And the rkbin blob cache, keyed on the lock's `[blobs] commit`.
+        let rkbin = tmp.path().join("cache/rkbin");
+        std::fs::create_dir_all(rkbin.join(&dead)).unwrap();
+        std::fs::create_dir_all(rkbin.join(&pinned)).unwrap();
 
         run(
             &ConfigRoot::new(tmp.path()),
@@ -641,6 +654,11 @@ mod tests {
         assert!(trees.join(&pinned).exists(), "a pinned checkout is live");
         assert!(!trees.join(&dead).exists(), "an unpinned checkout is dead");
         assert!(!patches.join(&dead).exists(), "and so is its patches twin");
+        assert!(!rkbin.join(&dead).exists(), "and its rkbin twin");
+        assert!(
+            rkbin.join(&pinned).exists(),
+            "while a pinned rkbin commit is live"
+        );
         assert!(trees.join(".fetch-abc123").exists());
         assert!(trees.join("NOTES").exists());
     }
@@ -658,12 +676,20 @@ mod tests {
         std::fs::create_dir_all(overlay.path().join("recipes/h96-max-m9")).unwrap();
         std::fs::write(
             overlay.path().join("recipes/h96-max-m9/forky.lock"),
-            format!("[uboot]\nsource = \"u://s\"\nref = \"v2\"\ncommit = \"{overlay_pin}\"\n"),
+            format!(
+                "[uboot]\nsource = \"u://s\"\nref = \"v2\"\ncommit = \"{overlay_pin}\"\n\
+                 revision = 1\nconfig_sha256 = \"{}\"\n",
+                "9".repeat(64)
+            ),
         )
         .unwrap();
         std::fs::write(
             tmp.path().join("recipes/stray.lock"),
-            format!("[uboot]\nsource = \"u://s\"\nref = \"v2\"\ncommit = \"{toplevel_pin}\"\n"),
+            format!(
+                "[uboot]\nsource = \"u://s\"\nref = \"v2\"\ncommit = \"{toplevel_pin}\"\n\
+                 revision = 1\nconfig_sha256 = \"{}\"\n",
+                "9".repeat(64)
+            ),
         )
         .unwrap();
         let trees = tmp.path().join("cache/verify-trees");

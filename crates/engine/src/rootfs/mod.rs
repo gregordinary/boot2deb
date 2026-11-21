@@ -41,7 +41,7 @@ pub(crate) use provisioner::{feature_repositories, provisioned_dir, ProvisionedR
 
 use crate::error::EngineError;
 use crate::event::Step;
-use boot2deb_core::distro::InitramfsGenerator;
+use boot2deb_core::distro::{InitramfsGenerator, TimeClient};
 use boot2deb_core::model::{AptSource, ImageBuild, InitramfsCompress, ResolvedImage};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -85,15 +85,16 @@ pub struct RootfsOptions<'a> {
     /// every other generated file ([`crate::rootcache::dir_fingerprints`]). A cached
     /// tree can never be reused under an identity that disagrees with it.
     pub image_identity: &'a boot2deb_core::provenance::SystemIdentity,
-    /// The rootfs partition's PARTUUID, as the image node will write it.
+    /// The partitions the image node will write, as the rootfs names them
+    /// ([`Partitions`]).
     ///
-    /// Under `depthcharge` this is an *input* to the rootfs, not an output of the
-    /// partition table. `depthchargectl` derives the signed kernel's `root=` from the
-    /// image's own `/etc/fstab`, so the fstab has to name the partition before the
-    /// filesystem containing it exists. The value is folded into the rootfs cache key
-    /// with the rest of the staged overlay. A cached tree can therefore never contain an
-    /// fstab pointing somewhere the table does not.
-    pub rootfs_partuuid: uuid::Uuid,
+    /// They are *inputs* to the rootfs, not outputs of the partition table.
+    /// `depthchargectl` derives the signed kernel's `root=` from the image's own
+    /// `/etc/fstab`. Under the `efi` loader, update-grub's menu and GRUB's core image are
+    /// written before the partitions exist. Each has to name them first. Every value
+    /// reaches the rootfs cache key, through the staged fstab or explicitly. A cached
+    /// tree can therefore never name a partition the table does not.
+    pub partitions: Partitions,
     /// Directory the rootfs tarball is written to.
     pub out_dir: &'a Path,
     /// The build point's
@@ -196,6 +197,25 @@ pub struct RootfsOptions<'a> {
     pub source_date_epoch: u64,
 }
 
+/// What the rootfs names of the partitions the image node will write, before they
+/// exist. The caller derives every value from the image's identity and geometry
+/// ([`crate::image::partitions`]), the same ones the image node then writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Partitions {
+    /// The rootfs partition's PARTUUID, which `/etc/fstab` mounts root by and every
+    /// loader's menu roots on.
+    pub rootfs_partuuid: uuid::Uuid,
+    /// The rootfs filesystem's UUID, which update-grub's menu searches for under the
+    /// `efi` loader.
+    pub rootfs_fs_uuid: uuid::Uuid,
+    /// The rootfs partition's GPT entry number. GRUB's core image finds the rootfs as
+    /// this partition of the disk the firmware loaded it from.
+    pub rootfs_index: u32,
+    /// The EFI system partition's PARTUUID, which `/etc/fstab` mounts it by, under the
+    /// `efi` loader. `None` under a loader with no partition.
+    pub esp_partuuid: Option<uuid::Uuid>,
+}
+
 /// The boot-method configuration the rootfs generates, for a method that needs the
 /// *rootfs itself* to participate in booting.
 ///
@@ -271,6 +291,14 @@ pub struct RootfsArtifacts {
 /// overriding a file an earlier layer shipped without the owner-write bit — a key, a
 /// `sudoers.d` drop-in — would fail with `Permission denied` instead of replacing it;
 /// unlinking first sidesteps the destination's mode entirely.
+///
+/// A layer's symlink is copied as a symlink and never resolved: its target is a path on
+/// the target system, and the build host is not that system. Unlinking first also means
+/// a later layer's file replaces an earlier layer's link rather than writing through
+/// it, and `cp` refuses to merge a later layer's directory into an earlier layer's link
+/// (`cannot overwrite non-directory`), so the merge itself never leaves the staging
+/// tree. Everything the rootfs stage then generates into the merged tree goes through
+/// [`place_staged`], which holds the same line.
 fn copy_overlay_trees(
     staging: &Path,
     overlay_dirs: &[PathBuf],
@@ -306,8 +334,8 @@ fn copy_overlay_trees(
 /// `/etc`, `/usr`, and `/boot` into every image. Under `077` it would stamp `0700`
 /// `/etc` and the image would not work at all.
 ///
-/// It also covers the generated config: [`write_staged`] sets each file's own mode but
-/// creates parent directories through `create_dir_all`, which applies the umask.
+/// It also covers the generated config: [`place_staged`] sets each file's own mode but
+/// creates missing parent directories with `mkdirat`, which applies the umask.
 ///
 /// An overlay that needs a mode outside git's two — a `0440` sudoers drop-in, a `0700`
 /// home — cannot express it in a git tree in the first place, and so belongs in the
@@ -338,6 +366,49 @@ fn normalize_overlay_modes(root: &Path) -> Result<(), EngineError> {
         // hook). Everything else is `100644`.
         let exec = meta.permissions().mode() & 0o111 != 0;
         set_mode(root, if exec { 0o755 } else { 0o644 })?;
+    }
+    Ok(())
+}
+
+/// Staged directories whose files the image keeps readable by root alone, which no mode
+/// git records can express. netplan warns on every run about a configuration file
+/// anyone else can read, since one may contain a Wi-Fi passphrase.
+const ROOT_ONLY_DIRS: &[&str] = &["etc/netplan"];
+
+/// Narrow every regular file under a [`ROOT_ONLY_DIRS`] entry of `staging` to `0600`.
+/// Run after [`normalize_overlay_modes`], which gives every file the mode git recorded
+/// for it.
+///
+/// Only files the staging tree itself contains are narrowed. The walk starts only when
+/// every component of the entry is a real directory in the tree, and descends only into
+/// real directories. A layer's symlink there names a directory on the target, so
+/// following it on the build host would re-mode host files with the builder's
+/// permissions.
+fn restrict_root_only_files(staging: &Path) -> Result<(), EngineError> {
+    fn walk(dir: &Path) -> Result<(), EngineError> {
+        let entries = std::fs::read_dir(dir).map_err(|s| EngineError::io(dir, s))?;
+        for entry in entries {
+            let path = entry.map_err(|s| EngineError::io(dir, s))?.path();
+            let meta = std::fs::symlink_metadata(&path).map_err(|s| EngineError::io(&path, s))?;
+            if meta.is_dir() {
+                walk(&path)?;
+            } else if meta.is_file() {
+                set_mode(&path, 0o600)?;
+            }
+        }
+        Ok(())
+    }
+    for rel in ROOT_ONLY_DIRS {
+        let mut dir = staging.to_path_buf();
+        // `symlink_metadata` describes a link itself, which is never `is_dir`. A missing
+        // component means no layer staged this directory, which is the common case.
+        let real = Path::new(rel).components().all(|component| {
+            dir.push(component);
+            std::fs::symlink_metadata(&dir).is_ok_and(|meta| meta.is_dir())
+        });
+        if real {
+            walk(&dir)?;
+        }
     }
     Ok(())
 }
@@ -475,13 +546,13 @@ fn stage_preinstall_overlay(
         write_staged(staging, "etc/default/keyboard", &config::keyboard(keymap))?;
     }
     // Same rule as the keymap: configure nothing when nothing is configured. An empty
-    // list is not "no time source" — it is Debian's compiled-in pool, and writing an
-    // empty `NTP=` would say the opposite.
+    // list is not "no time source" — it is the distribution's own servers, and writing
+    // an empty `NTP=` would say the opposite.
     if !image.ntp_servers.is_empty() {
         write_staged(
             staging,
-            "etc/systemd/timesyncd.conf.d/10-boot2deb.conf",
-            &config::timesyncd_conf(&image.ntp_servers),
+            ntp_conf_path(image.time_client),
+            &config::ntp_conf(image.time_client, &image.ntp_servers),
         )?;
     }
 
@@ -508,6 +579,7 @@ fn stage_preinstall_overlay(
     }
 
     normalize_overlay_modes(staging)?;
+    restrict_root_only_files(staging)?;
     normalize_overlay_times(staging, source_date_epoch)?;
     step.log(format!(
         "staged pre-install overlay at {} (laid in before any package)",
@@ -526,7 +598,7 @@ fn stage_overlay(
     staging: &Path,
     overlay_dirs: &[PathBuf],
     ib: ImageBuild,
-    rootfs_partuuid: uuid::Uuid,
+    partitions: Partitions,
     image_identity: &boot2deb_core::provenance::SystemIdentity,
     source_date_epoch: u64,
     step: &Step,
@@ -534,7 +606,7 @@ fn stage_overlay(
     let ImageBuild { build, image } = ib;
     copy_overlay_trees(staging, overlay_dirs, step)?;
     // Generated config, mirroring rootfs paths.
-    write_staged(staging, "etc/fstab", &config::fstab(ib, rootfs_partuuid))?;
+    write_staged(staging, "etc/fstab", &config::fstab(ib, &partitions))?;
     // Only written when the build declares volumes: an image with none should not
     // ship a config file suggesting the mechanism is live.
     if !image.data_volumes.is_empty() {
@@ -552,11 +624,10 @@ fn stage_overlay(
         &config::apt_sources(&build.distro, &image.components),
     )?;
     write_staged(staging, "etc/kernel-img.conf", &config::kernel_img_conf())?;
-    // Two files that exist because the build host is not the board. `dhcpcd` cannot
-    // start without a `/etc/resolv.conf` to bind, and the initramfs generator — running
-    // here, against a disk that does not exist yet — otherwise sizes the initrd to this
-    // host by probing it. See each generator for what goes wrong.
-    write_staged(staging, "etc/resolv.conf", &config::resolv_conf())?;
+    // A file that exists because the build host is not the board. The initramfs
+    // generator — running here, against a disk that does not exist yet — otherwise
+    // sizes the initrd to this host by probing it. See each generator for what goes
+    // wrong.
     write_staged(
         staging,
         initramfs_conf_path(image.initramfs_generator),
@@ -564,13 +635,30 @@ fn stage_overlay(
         // initramfs contains is the one the filesystem the image node writes needs.
         &config::initramfs_conf(image.initramfs_generator, crate::image::ROOTFS_FS_KIND),
     )?;
+    // initramfs-tools installs the firmware of built-in drivers on its own. dracut needs
+    // the module, or a built-in driver that probes from the initrd finds none.
+    if image.initramfs_generator == InitramfsGenerator::Dracut {
+        write_staged_exec(
+            staging,
+            DRACUT_BUILTIN_FIRMWARE_MODULE,
+            DRACUT_BUILTIN_FIRMWARE,
+        )?;
+    }
     // Board boot params the kernel postinst.d/postrm.d hooks + mk_extlinux source,
     // so the boot-method overlay scripts stay board-agnostic (driven by the
     // device's kernel_dtb) rather than hardcoding one board's dtb name.
     write_staged(
         staging,
         "etc/boot2deb/board.conf",
-        &config::board_conf(&build.kernel_dtb, &build.kernel_cmdline),
+        &config::board_conf(
+            &build.kernel_dtb,
+            &build.kernel_cmdline,
+            image
+                .loader
+                .as_ref()
+                .and_then(|l| l.efi())
+                .map(|e| e.dtb.as_str()),
+        ),
     )?;
     // The image's own account of what it is, beside the board config, for a tool that
     // reads this disk from outside — from other media, without mounting it, on a machine
@@ -616,12 +704,21 @@ fn stage_overlay(
             "../boot2deb-selftest.service",
         )?;
     }
+    // The bounded wait for the first clock synchronization. The customize step enables
+    // the unit, once the package that ships it is installed.
+    let wait = clock_wait(image.time_client);
+    write_staged(
+        staging,
+        &format!("etc/systemd/system/{}.d/bounded.conf", wait.unit),
+        &config::clock_wait_drop_in(&wait),
+    )?;
     // Empty machine-id → systemd regenerates it on first boot.
     write_staged(staging, "etc/machine-id", "")?;
     // The sudoers drop-in is written by the customize-hook directly into the chroot,
     // not staged here: at mode 0440 it would be unreadable to the hook's mapped uid
     // when it copies the overlay in.
     normalize_overlay_modes(staging)?;
+    restrict_root_only_files(staging)?;
     normalize_overlay_times(staging, source_date_epoch)?;
     step.log(format!(
         "staged overlay + generated config at {}",
@@ -630,42 +727,180 @@ fn stage_overlay(
     Ok(())
 }
 
-/// Write `content` to `staging/<rel>` at mode `0644`, creating parent dirs. The
-/// explicit mode keeps generated `/etc` config reproducible regardless of the
-/// build host's umask (a `002` umask would otherwise leave it group-writable);
-/// the parent directories `create_dir_all` makes are covered by the staging
-/// tree's closing [`normalize_overlay_modes`] pass, which the umask reaches the
-/// same way.
+/// Write `content` to `staging/<rel>` at mode `0644`, replacing a file or symlink a
+/// layer placed there ([`place_staged`] states how the path is resolved). The explicit
+/// mode keeps generated `/etc` config reproducible regardless of the build host's
+/// umask (a `002` umask would otherwise leave it group-writable); the parent
+/// directories it creates are covered by the staging tree's closing
+/// [`normalize_overlay_modes`] pass, which the umask reaches the same way.
 fn write_staged(staging: &Path, rel: &str, content: &str) -> Result<(), EngineError> {
-    let path = staging.join(rel);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|s| EngineError::io(parent, s))?;
-    }
-    std::fs::write(&path, content).map_err(|s| EngineError::io(&path, s))?;
-    set_mode(&path, 0o644)
+    place_staged(
+        staging,
+        rel,
+        StagedEntry::File {
+            content,
+            mode: 0o644,
+        },
+    )
 }
 
 /// [`write_staged`] for a file that must be executable — a hook or, in the
 /// pre-install overlay, an [`initramfs_stubs`] placeholder. Mode `0755` rather
 /// than `0644`, which `normalize_overlay_modes` then preserves.
 fn write_staged_exec(staging: &Path, rel: &str, content: &str) -> Result<(), EngineError> {
-    write_staged(staging, rel, content)?;
-    set_mode(&staging.join(rel), 0o755)
+    place_staged(
+        staging,
+        rel,
+        StagedEntry::File {
+            content,
+            mode: 0o755,
+        },
+    )
 }
 
-/// Create `staging/<rel>` as a symlink to `target`, replacing whatever is there.
+/// Create `staging/<rel>` as a symlink to `target`, replacing a file or symlink a layer
+/// placed there ([`place_staged`] states how the path is resolved).
 ///
-/// The overlay copy preserves symlinks (`cp -dR`), so the link — not a copy of what it
+/// The overlay copy preserves symlinks (`cp -a`), so the link — not a copy of what it
 /// points at — is what goes into the rootfs; the cache key fingerprints it by its target
 /// ([`crate::rootcache::dir_fingerprints`]), so re-pointing it rebuilds.
 fn symlink_staged(staging: &Path, rel: &str, target: &str) -> Result<(), EngineError> {
-    let path = staging.join(rel);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|s| EngineError::io(parent, s))?;
+    place_staged(staging, rel, StagedEntry::Symlink { target })
+}
+
+/// What [`place_staged`] creates at a generated path.
+enum StagedEntry<'a> {
+    /// A regular file containing `content`, at `mode`.
+    File {
+        /// The file's bytes.
+        content: &'a str,
+        /// The file's permission bits, applied whatever the umask.
+        mode: u32,
+    },
+    /// A symlink to `target`, a path on the target system. It is stored, never
+    /// resolved on the build host.
+    Symlink {
+        /// The link's target.
+        target: &'a str,
+    },
+}
+
+/// Place a generated entry at `staging/<rel>`, resolving `rel` beneath `staging` one
+/// component at a time without following a symlink at any of them.
+///
+/// The merged layer overlays keep their symlinks as symlinks ([`copy_overlay_trees`]),
+/// and each one names a path on the *target*. Resolved on the build host instead, a
+/// legitimate absolute link (`etc/hostname -> /run/hostname`, or a whole `etc`) leads
+/// out of the staging tree, and writing through it would overwrite or re-mode a host
+/// file with the builder's permissions. So:
+///
+///  - Each ancestor of `rel` is opened relative to its parent's descriptor with
+///    `O_DIRECTORY | O_NOFOLLOW`, so no path is ever re-resolved from the top. A
+///    missing one is created as a real directory. A symlink or any other non-directory
+///    there is [`StagedPathBlocked`](EngineError::StagedPathBlocked). Following it is
+///    what this exists to prevent, and replacing it would silently rewrite the layer's
+///    tree under every other path that goes through it.
+///  - The entry itself is replaced, since generated config wins over the layers. An
+///    existing file or symlink is unlinked, which removes the name and never follows
+///    it, and the new entry is created in its place. A file is opened `O_CREAT |
+///    O_EXCL`, which refuses to open anything already at that name. A directory there
+///    is [`StagedPathBlocked`](EngineError::StagedPathBlocked) too, since replacing it
+///    would discard what the layers placed beneath it.
+///
+/// A file's mode is requested at creation and restated with `fchmod` on the new
+/// descriptor, so the umask cannot narrow it and no path is resolved again to apply it.
+///
+/// `rel` is a relative path of plain components. One with a root, `.`, or `..`
+/// component is refused before anything is touched.
+fn place_staged(staging: &Path, rel: &str, entry: StagedEntry) -> Result<(), EngineError> {
+    use crate::error::StagedConflict;
+    use rustix::fd::OwnedFd;
+    use rustix::fs::{AtFlags, FileType, Mode, OFlags};
+    use rustix::io::Errno;
+    use std::ffi::OsStr;
+    use std::path::Component;
+
+    let names: Option<Vec<&OsStr>> = Path::new(rel)
+        .components()
+        .map(|component| match component {
+            Component::Normal(name) => Some(name),
+            _ => None,
+        })
+        .collect();
+    let Some((name, ancestors)) = names.as_deref().and_then(<[_]>::split_last) else {
+        return Err(EngineError::io(
+            &staging.join(rel),
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "a generated path is relative and has no root, `.`, or `..` component",
+            ),
+        ));
+    };
+
+    let failed = |prefix: &Path, errno: Errno| EngineError::io(&staging.join(prefix), errno.into());
+    let blocked = |prefix: &Path, conflict| EngineError::StagedPathBlocked {
+        generated: rel.to_string(),
+        entry: prefix.display().to_string(),
+        conflict,
+    };
+    // What is at `name` in `dir`, without following it; `None` when nothing is.
+    let kind = |dir: &OwnedFd, name: &OsStr, prefix: &Path| match rustix::fs::statat(
+        dir,
+        name,
+        AtFlags::SYMLINK_NOFOLLOW,
+    ) {
+        Ok(stat) => Ok(Some(FileType::from_raw_mode(stat.st_mode))),
+        Err(Errno::NOENT) => Ok(None),
+        Err(errno) => Err(failed(prefix, errno)),
+    };
+
+    // The staging root is the builder's own directory; only what lies beneath it came
+    // from the layers.
+    let root_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC;
+    let dir_flags = root_flags | OFlags::NOFOLLOW;
+    let mut dir = rustix::fs::open(staging, root_flags, Mode::empty())
+        .map_err(|errno| EngineError::io(staging, errno.into()))?;
+    let mut prefix = PathBuf::new();
+    for ancestor in ancestors {
+        prefix.push(ancestor);
+        match kind(&dir, ancestor, &prefix)? {
+            Some(FileType::Directory) => {}
+            Some(FileType::Symlink) => {
+                return Err(blocked(&prefix, StagedConflict::SymlinkAncestor));
+            }
+            Some(_) => return Err(blocked(&prefix, StagedConflict::NonDirectoryAncestor)),
+            None => rustix::fs::mkdirat(&dir, *ancestor, Mode::from_raw_mode(0o755))
+                .map_err(|errno| failed(&prefix, errno))?,
+        }
+        // `O_NOFOLLOW` is what holds the line; the check above names the conflict.
+        dir = rustix::fs::openat(&dir, *ancestor, dir_flags, Mode::empty())
+            .map_err(|errno| failed(&prefix, errno))?;
     }
-    // A staged tree is rebuilt each run, but an overlay may have shipped a file here.
-    let _ = std::fs::remove_file(&path);
-    std::os::unix::fs::symlink(target, &path).map_err(|s| EngineError::io(&path, s))
+
+    prefix.push(name);
+    match kind(&dir, name, &prefix)? {
+        Some(FileType::Directory) => return Err(blocked(&prefix, StagedConflict::Directory)),
+        Some(_) => rustix::fs::unlinkat(&dir, *name, AtFlags::empty())
+            .map_err(|errno| failed(&prefix, errno))?,
+        None => {}
+    }
+    match entry {
+        StagedEntry::File { content, mode } => {
+            use std::io::Write;
+            let mode = Mode::from_raw_mode(mode);
+            let create =
+                OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+            let fd = rustix::fs::openat(&dir, *name, create, mode)
+                .map_err(|errno| failed(&prefix, errno))?;
+            rustix::fs::fchmod(&fd, mode).map_err(|errno| failed(&prefix, errno))?;
+            std::fs::File::from(fd)
+                .write_all(content.as_bytes())
+                .map_err(|s| EngineError::io(&staging.join(&prefix), s))
+        }
+        StagedEntry::Symlink { target } => {
+            rustix::fs::symlinkat(target, &dir, *name).map_err(|errno| failed(&prefix, errno))
+        }
+    }
 }
 
 /// Set the unix mode of `path`.
@@ -751,6 +986,105 @@ pub(crate) fn initramfs_conf_path(generator: InitramfsGenerator) -> &'static str
     }
 }
 
+/// Where a dracut image's overlay installs [`DRACUT_BUILTIN_FIRMWARE`], the dracut
+/// module that puts the firmware of the kernel's built-in drivers into the initrd.
+///
+/// dracut installs a driver's firmware with the driver's module, and a built-in driver
+/// has no module, so an initrd would contain no firmware for one. A built-in driver
+/// probes from the initrd once what it waits on is there, and reads its firmware from
+/// it: the RK3588's panthor does, after the PMIC modules the initrd loads bring up its
+/// regulator. `initramfs-tools` installs these files itself (`add_builtin_firmware`),
+/// so an image it builds the initrd for needs nothing.
+///
+/// In the distribution's `modules.d` beside dracut's own modules. No package owns the
+/// file, and it ships in the image, so an on-device kernel upgrade builds the next
+/// initrd with it.
+pub(crate) const DRACUT_BUILTIN_FIRMWARE_MODULE: &str =
+    "usr/lib/dracut/modules.d/90boot2deb-builtin-firmware/module-setup.sh";
+
+/// The dracut module [`DRACUT_BUILTIN_FIRMWARE_MODULE`] names: one committed bash file,
+/// byte-identical for every build, which dracut sources. It reads the kernel's
+/// `modules.builtin.modinfo` and installs each listed file in the first spelling the
+/// kernel's loader opens.
+const DRACUT_BUILTIN_FIRMWARE: &str = include_str!("dracut/builtin-firmware.sh");
+
+/// Where the pre-install overlay writes the image's configured NTP servers
+/// ([`ResolvedImage::ntp_servers`]) for `client`, in the form [`config::ntp_conf`]
+/// renders.
+///
+/// A file beside the distribution's own configuration either way, never an edit of it:
+///
+///  - `systemd-timesyncd`: a `timesyncd.conf.d` drop-in. `timesyncd.conf` is a
+///    `systemd` conffile, and rewriting it would make every later systemd upgrade
+///    prompt about a modified conffile on a running board.
+///  - `chrony`: a file in `/etc/chrony/sources.d`, which `chrony.conf` reads through
+///    `sourcedir` beside the distribution's own sources. `chronyc reload sources`
+///    applies an edit to it without a restart.
+pub(crate) fn ntp_conf_path(client: TimeClient) -> &'static str {
+    match client {
+        TimeClient::SystemdTimesyncd => "etc/systemd/timesyncd.conf.d/10-boot2deb.conf",
+        TimeClient::Chrony => "etc/chrony/sources.d/boot2deb.sources",
+    }
+}
+
+/// The unit that holds `time-sync.target` until the time client has synchronized the
+/// clock, and the bounded command the image runs it with. See [`clock_wait`].
+pub(crate) struct ClockWait {
+    /// The unit's name, which is also the stem of its drop-in directory.
+    pub unit: &'static str,
+    /// The target whose `.wants` directory enabling the unit links it into, as the
+    /// unit's own `[Install]` section names it.
+    pub wanted_by: &'static str,
+    /// The command the drop-in runs in place of the unit's own. Its leading `-` makes
+    /// systemd record a failure without failing the unit.
+    pub exec_start: &'static str,
+    /// The program [`exec_start`](Self::exec_start) runs. The customize step refuses an
+    /// image without it, since the drop-in would replace the unit's command with one
+    /// that cannot run.
+    pub program: &'static str,
+}
+
+/// The [`ClockWait`] for `client`.
+///
+/// The maintenance jobs of both distributions (apt-daily, logrotate, man-db, fstrim,
+/// e2scrub_all, dpkg-db-backup) order themselves `After=time-sync.target`. Nothing
+/// reaches that target until one of these units is enabled, and neither distribution
+/// enables one, so on a stock image the ordering is inert and the jobs check dates
+/// against whatever the clock says at boot. A board with no RTC boots with a stale clock,
+/// and apt then rejects Release files and TLS certificates as not valid yet.
+///
+/// The image enables the unit, and bounds it. Stock, `systemd-time-wait-sync` ships
+/// `TimeoutStartSec=infinity`, and `chrony-wait` waits three minutes and then fails. On
+/// a board that never reaches a time server that holds back everything ordered after
+/// the target, and Debian's `anacron.service` is both `After=time-sync.target` and
+/// `Before=multi-user.target`, so it holds back `multi-user.target` too. Logins still
+/// work, which makes the failure quiet. The bounded command releases the target after
+/// 45 seconds and succeeds either way: ordering is satisfied when a job finishes rather
+/// than when it succeeds, and a failed unit would leave `systemctl is-system-running` at
+/// `degraded` on every offline boot.
+///
+///  - `systemd-timesyncd`: `systemd-time-wait-sync` under `timeout(1)`.
+///  - `chrony`: `chronyc waitsync` with its own bound, 45 tries one second apart and the
+///    stock unit's correction limit. The stock unit runs `chronyc` under a system-call
+///    filter written for it, so the bounded command keeps that program and changes only
+///    its try count.
+pub(crate) fn clock_wait(client: TimeClient) -> ClockWait {
+    match client {
+        TimeClient::SystemdTimesyncd => ClockWait {
+            unit: "systemd-time-wait-sync.service",
+            wanted_by: "sysinit.target",
+            exec_start: "-/usr/bin/timeout 45 /usr/lib/systemd/systemd-time-wait-sync",
+            program: "/usr/bin/timeout",
+        },
+        TimeClient::Chrony => ClockWait {
+            unit: "chrony-wait.service",
+            wanted_by: "multi-user.target",
+            exec_start: "-/usr/bin/chronyc -h 127.0.0.1,::1 waitsync 45 0.1 0.0 1",
+            program: "/usr/bin/chronyc",
+        },
+    }
+}
+
 /// Members every finished rootfs tarball must contain, checked by [`validate_tar`].
 /// `etc/shadow` is written late (the account is created there), so its presence
 /// proves the archive is readable through to its end (not truncated);
@@ -807,29 +1141,38 @@ pub fn validate_tar(tarball: &Path) -> Result<(), EngineError> {
 /// Generated rootfs config files, rendered from resolved values. Pure —
 /// each returns the exact file content — so the config is unit-testable.
 mod config {
-    use boot2deb_core::distro::{InitramfsGenerator, ResolvedDistro};
+    use boot2deb_core::distro::{InitramfsGenerator, ResolvedDistro, TimeClient};
     use boot2deb_core::model::{
-        ImageBuild, InitramfsCompress, Keymap, ResolvedBoot, CONSOLE_LOGLEVEL_ARG,
+        ImageBuild, InitramfsCompress, Keymap, Loader, ResolvedBoot, ResolvedLoader,
+        CONSOLE_LOGLEVEL_ARG,
     };
     use std::fmt::Write;
-    use uuid::Uuid;
 
-    /// `/etc/fstab`. Both boot methods root on the **PARTUUID** the image node stamps
+    /// `/etc/fstab`. Every image roots on the **PARTUUID** the image node stamps
     /// into the GPT ([`ImageIdentity::rootfs_partuuid`](crate::image::ImageIdentity)),
     /// derived up front and threaded through both nodes so this entry always names the
     /// partition the image will actually write. The value is the device's boot
     /// identity for its whole life: nothing on the device rewrites it (first-boot
     /// grows the partition but keeps its PARTUUID), so the references that contain it —
-    /// this file, the extlinux cmdline, the signed depthcharge kernel — never go
-    /// stale. A press that draws a fresh identity rewrites all three in the image file,
-    /// before any medium contains it ([`press::identity`](crate::press::identity)). The
-    /// ext4 label and filesystem UUID still exist (the label is handy for rescue mounts)
-    /// but nothing boots by them.
+    /// this file, the loader's menu, the signed depthcharge kernel — never go
+    /// stale. A press that draws a fresh identity rewrites each of them in the image
+    /// file, before any medium contains it ([`press::identity`](crate::press::identity)).
+    /// The ext4 label still exists (it is handy for rescue mounts) but nothing boots by
+    /// it.
     ///
-    /// Per-method notes:
+    /// Per-boot notes:
     ///
-    ///  - `rockchip-rkbin`: the `mk_extlinux` hook reads root back out of here to
-    ///    build the bootloader's cmdline on every kernel install.
+    ///  - `extlinux`: the `mk_extlinux` hook reads root back out of here to build the
+    ///    bootloader's cmdline on every kernel install.
+    ///
+    ///  - `efi`: a second entry mounts the EFI system partition at
+    ///    [`ESP_MOUNT_POINT`](boot2deb_core::model::ESP_MOUNT_POINT), by its PARTUUID,
+    ///    where `grub-install` and the DTB hook write. `umask=0077` keeps the loader
+    ///    root's alone, as Debian's installer mounts it, and pass 2 checks it at boot
+    ///    with the `fsck.vfat` the loader's layer installs. `nofail`, because the running
+    ///    system does not need the partition: a board whose ESP will not mount still
+    ///    boots to the network, where the failed mount, the selftest and the next
+    ///    kernel install each report it, rather than stopping in emergency mode.
     ///
     ///  - `depthcharge`: the boot itself depends on this file —
     ///    `depthchargectl` reads it to derive the `root=` it bakes into the kernel's
@@ -837,20 +1180,33 @@ mod config {
     ///    label would work for the kernel but not for the tool: it resolves root from
     ///    fstab and strips any `root=` that disagrees, so whatever is here is what
     ///    gets signed.
-    pub fn fstab(ib: ImageBuild, rootfs_partuuid: Uuid) -> String {
-        // One root entry for both methods, because both root by PARTUUID. Only the
-        // note differs: it tells an editor what else has to be regenerated, and the
-        // two methods keep that value in different places.
-        let source = format!("PARTUUID={}", rootfs_partuuid.hyphenated());
-        let note = match &ib.build.boot {
-            ResolvedBoot::RockchipRkbin(_) => {
-                "# regenerate extlinux.conf via /boot/mk_extlinux after editing the root entry"
-            }
-            ResolvedBoot::Depthcharge(_) => {
+    pub fn fstab(ib: ImageBuild, partitions: &super::Partitions) -> String {
+        // One root entry everywhere, because every image roots by PARTUUID. Only the
+        // note differs: it tells an editor what else has to be regenerated, and each
+        // boot keeps that value in a different place.
+        let source = format!("PARTUUID={}", partitions.rootfs_partuuid.hyphenated());
+        let loader = ib.image.loader.as_ref().map(|l| l.loader());
+        let note = match (&ib.build.boot, loader) {
+            (ResolvedBoot::Depthcharge(_), _) => {
                 "# depthchargectl derives the signed kernel's root= from this line; after\n\
                  # editing it, re-sign with `depthchargectl write --allow-current`"
             }
+            (_, Some(Loader::Efi)) => {
+                "# update-grub writes the root= of /boot/grub/grub.cfg from the mounted root;\n\
+                 # run it after moving root"
+            }
+            _ => "# regenerate extlinux.conf via /boot/mk_extlinux after editing the root entry",
         };
+        let esp: String = partitions
+            .esp_partuuid
+            .map(|esp| {
+                format!(
+                    "PARTUUID={}\t{}\tvfat\tumask=0077,nofail\t0      2\n",
+                    esp.hyphenated(),
+                    boot2deb_core::model::ESP_MOUNT_POINT
+                )
+            })
+            .unwrap_or_default();
         // Data volumes follow root, mounted by LABEL and with `nofail`, so a board
         // whose data disk is absent or slow to enumerate still boots. The
         // first-boot hook creates or adopts the volume these lines name; the lines
@@ -866,6 +1222,7 @@ mod config {
             "{note}\n\
              # <device>\t<mount>\t<type>\t<options>\t\t<dump> <pass>\n\
              {source}\t/\text4\terrors=remount-ro\t0      1\n\
+             {esp}\
              {data}"
         )
     }
@@ -915,15 +1272,24 @@ mod config {
     ///    flavor (`linux-image-armmp` → `armmp`). The runner rejects an `-rt-`
     ///    variant of the same flavor — the check that catches an accidental
     ///    PREEMPT_RT kernel.
-    ///  - `dtb` — the resolved `kernel_dtb`, on the boot method that installs
-    ///    DTBs into the filesystem (`rockchip-rkbin`). A depthcharge board's DTB
-    ///    is inside the signed FIT, where no file check can see it.
+    ///  - `dtb` — the resolved `kernel_dtb`, under the `extlinux` loader, which reads
+    ///    the DTB from `/boot`. A depthcharge board's DTB is inside the signed FIT,
+    ///    where no file check can see it.
+    ///  - `esp-file` — under the `efi` loader, the two things the firmware reads from
+    ///    the EFI system partition: the architecture's loader at the removable-media
+    ///    path, and the kernel's DTB under `dtb/`, at the name u-boot loads by. The build has already
+    ///    refused an image missing either; on the board the lines re-check them after
+    ///    every GRUB upgrade and kernel install has rewritten the partition.
     ///  - `single-kernel` — unconditional, and the one line here that restates
     ///    nothing: every image installs one solved plan with one `linux-image`
     ///    in it and never dist-upgrades mid-build, so a second version on `/boot`
     ///    means a feature or a `--deb` addition pulled one in. It is a check
     ///    rather than a sweep because losing a kernel is worse than shipping two,
     ///    so the build fails and says which versions it found.
+    ///  - `unique-partuuid` — unconditional, and also restating nothing: every
+    ///    PARTUUID the running system mounts by names one attached partition. It
+    ///    fails when a second disk written from the same image is attached, which
+    ///    `boot2deb-partuuid-check.service` also reports on every boot.
     ///  - `initramfs-module` — one per name in the resolved
     ///    [`initramfs_modules`](boot2deb_core::model::ResolvedImage::initramfs_modules).
     ///    The build already checked each against the initrd it built. The line is
@@ -957,18 +1323,31 @@ mod config {
                 boot2deb_core::expect::render_line("kernel-flavor", &flavor)
             );
         }
-        if build.rkbin_boot().is_some() {
-            let _ = writeln!(
-                out,
-                "{}",
-                boot2deb_core::expect::render_line("dtb", &build.kernel_dtb)
-            );
+        match &image.loader {
+            Some(ResolvedLoader::Extlinux) => {
+                let _ = writeln!(
+                    out,
+                    "{}",
+                    boot2deb_core::expect::render_line("dtb", &build.kernel_dtb)
+                );
+            }
+            Some(ResolvedLoader::Efi(efi)) => {
+                for path in [
+                    format!("/EFI/BOOT/{}", efi.arch.removable_file),
+                    format!("/dtb/{}", efi.dtb),
+                ] {
+                    let _ = writeln!(
+                        out,
+                        "{}",
+                        boot2deb_core::expect::render_line("esp-file", &path)
+                    );
+                }
+            }
+            None => {}
         }
-        let _ = writeln!(
-            out,
-            "{}",
-            boot2deb_core::expect::render_line("single-kernel", "")
-        );
+        for kind in ["single-kernel", "unique-partuuid"] {
+            let _ = writeln!(out, "{}", boot2deb_core::expect::render_line(kind, ""));
+        }
         for module in &image.initramfs_modules {
             let _ = writeln!(
                 out,
@@ -1215,31 +1594,76 @@ mod config {
         format!("/usr/share/zoneinfo/{timezone}")
     }
 
-    /// `/etc/systemd/timesyncd.conf.d/10-boot2deb.conf` — the NTP servers the image
-    /// reaches for first.
+    /// The [`ntp_conf_path`](super::ntp_conf_path) content: the NTP servers the image
+    /// reaches for first, in the form `client` reads.
     ///
-    /// Sets `NTP=` and deliberately leaves `FallbackNTP=` alone. Debian compiles its
-    /// pool into that fallback, and `timesyncd` consults it whenever the primary list
-    /// yields nothing — so writing only the primary makes a configured server a
-    /// preference that degrades to the pool, where replacing the fallback would strand
-    /// an image the moment it booted anywhere else.
+    /// Neither form replaces the distribution's own servers, so a configured server is
+    /// a preference that still degrades to them, where replacing them would strand an
+    /// image the moment it booted anywhere else:
     ///
-    /// A drop-in rather than an edit of `timesyncd.conf`: that file is a `systemd`
-    /// conffile, and rewriting it would make every future systemd upgrade prompt about
-    /// a modified conffile on a running board.
+    ///  - `systemd-timesyncd`: `NTP=`, leaving `FallbackNTP=` alone. Debian compiles its
+    ///    pool into that fallback, and `timesyncd` consults it whenever the primary list
+    ///    yields nothing.
+    ///  - `chrony`: one `server` line per entry, beside the distribution's sources. Each
+    ///    is `prefer`, as Ubuntu's own pools are, and `require trust`. Ubuntu's pools use
+    ///    NTS, and in chrony's default `authselectmode mix` an authenticated source makes
+    ///    every unauthenticated one usable only while an authenticated one is selectable
+    ///    and agrees with it. A server named here without `require trust` would then
+    ///    never set the clock on a network that cannot reach those pools, which is the
+    ///    network it is most often named for. With them, chrony takes the operator's word
+    ///    for it.
     ///
     /// Resolution guarantees each entry is whitespace-free, which is what makes the
-    /// space-separated join unambiguous.
-    pub fn timesyncd_conf(servers: &[String]) -> String {
+    /// space-separated join and the one-server-per-line form unambiguous.
+    pub fn ntp_conf(client: TimeClient, servers: &[String]) -> String {
+        match client {
+            TimeClient::SystemdTimesyncd => format!(
+                "# Generated by boot2deb. Consult the timesyncd.conf(5) manual page.\n\
+                 #\n\
+                 # FallbackNTP is deliberately not set here: Debian compiles its pool in as\n\
+                 # the fallback, so the servers below are tried first and the pool still\n\
+                 # covers this image on a network where they cannot be reached.\n\
+                 [Time]\n\
+                 NTP={servers}\n",
+                servers = servers.join(" ")
+            ),
+            TimeClient::Chrony => {
+                let mut out = String::from(
+                    "# Generated by boot2deb. Consult the chrony.conf(5) manual page.\n\
+                     #\n\
+                     # The distribution's own sources stay configured beside these. Each\n\
+                     # server here is preferred, as those are, and is also required and\n\
+                     # trusted, so it sets the clock on a network where they cannot be\n\
+                     # reached. Apply an edit with `chronyc reload sources`.\n",
+                );
+                for server in servers {
+                    let _ = writeln!(out, "server {server} iburst prefer require trust");
+                }
+                out
+            }
+        }
+    }
+
+    /// The bounded drop-in for `wait`, written to
+    /// `/etc/systemd/system/<unit>.d/bounded.conf`. See
+    /// [`clock_wait`](super::clock_wait) for why the image bounds the wait.
+    ///
+    /// The empty `ExecStart=` clears the unit's own command, which a drop-in otherwise
+    /// adds to rather than replaces.
+    pub fn clock_wait_drop_in(wait: &super::ClockWait) -> String {
         format!(
-            "# Generated by boot2deb. Consult the timesyncd.conf(5) manual page.\n\
+            "# Generated by boot2deb.\n\
              #\n\
-             # FallbackNTP is deliberately not set here: Debian compiles its pool in as\n\
-             # the fallback, so the servers below are tried first and the pool still\n\
-             # covers this image on a network where they cannot be reached.\n\
-             [Time]\n\
-             NTP={servers}\n",
-            servers = servers.join(" ")
+             # Hold time-sync.target until the clock is synchronized, but give up after\n\
+             # 45 seconds. A board with no RTC boots with a stale clock, and the jobs\n\
+             # ordered after time-sync.target check dates against it. The stock unit\n\
+             # waits far longer, which on a board that never reaches a time server holds\n\
+             # back every unit ordered after the target. The `-` prefix keeps a wait that\n\
+             # runs out from failing the unit, so an offline boot is not `degraded`.\n\
+             [Service]\n\
+             ExecStart=\n\
+             ExecStart={exec_start}\n",
+            exec_start = wait.exec_start,
         )
     }
 
@@ -1247,28 +1671,6 @@ mod config {
     /// the extlinux boot flow expects.
     pub fn kernel_img_conf() -> String {
         "link_in_boot = 1\ndo_symlinks = 0\n".to_string()
-    }
-
-    /// `/etc/resolv.conf` — the file `dhcpcd` rewrites once it holds a lease.
-    ///
-    /// It contains no nameserver, because the network the board will join is not a thing
-    /// the build host knows. What the image needs is that the **path exists**: Debian's
-    /// `dhcpcd.service` runs under `ProtectSystem=strict` and names `/etc/resolv.conf`
-    /// among its `ReadWritePaths=`, and systemd refuses to set up a mount namespace for
-    /// a path that is not there. Without this file DHCP fails at `226/NAMESPACE` before
-    /// `dhcpcd` runs at all, and the board comes up with no network.
-    ///
-    /// Nothing else in the image would create it: no Debian package ships
-    /// `/etc/resolv.conf`, and the image installs neither `resolvconf` nor
-    /// `systemd-resolved`, so `dhcpcd`'s own hook is the sole writer. That hook
-    /// truncates and rewrites this path in place, which is what makes a file staged
-    /// here — rather than a symlink into `/run` — the shape that works under the unit's
-    /// read-write bind.
-    pub fn resolv_conf() -> String {
-        "# Rewritten by dhcpcd from the DHCP lease.\n\
-         # Fixed entries belong in /etc/resolv.conf.head or /etc/resolv.conf.tail,\n\
-         # which dhcpcd preserves across that rewrite.\n"
-            .to_string()
     }
 
     /// The [`initramfs_conf_path`](super::initramfs_conf_path) content: the initramfs
@@ -1312,34 +1714,41 @@ mod config {
         }
     }
 
-    /// `/etc/boot2deb/board.conf` — board boot parameters the boot-method overlay
-    /// scripts (`/etc/kernel/postinst.d` + `postrm.d` hooks and `/boot/mk_extlinux`)
-    /// source, so those stay board-agnostic instead of hardcoding one board's dtb.
-    /// Derived from the device's resolved `kernel_dtb`: `DTB_PATH` (relative to the
-    /// DT output dir) locates the dtb inside the installed `linux-image` package,
-    /// and `DTB_NAME` (its basename) names the copy placed in `/boot`.
+    /// `/etc/boot2deb/board.conf` — board boot parameters the loader's overlay
+    /// scripts source, so those stay board-agnostic instead of hardcoding one board's
+    /// dtb: the `/etc/kernel/postinst.d` + `postrm.d` hooks and `/boot/mk_extlinux`
+    /// under `extlinux`, the DTB hook and `/etc/default/grub.d/boot2deb.cfg` under
+    /// `efi`. Derived from the device's resolved `kernel_dtb`: `DTB_PATH` (relative to
+    /// the DT output dir) locates the dtb inside the installed `linux-image` package,
+    /// names its copy under the EFI system partition's `dtb/`, and `DTB_NAME` (its
+    /// basename) names the copy placed in `/boot`. Under the `efi` loader `ESP_DTB_PATH`
+    /// names the copy on the EFI system partition, under its `dtb/`: the name the
+    /// board's u-boot loads by ([`ResolvedEfi::dtb`](boot2deb_core::model::ResolvedEfi::dtb)).
     ///
-    /// `EXTL_CMD_LINE` contains the arguments `mk_extlinux` writes into the boot
-    /// entry: `rootwait`, then the base console gate
+    /// `KERNEL_CMDLINE` contains the arguments either loader boots the kernel with
+    /// after `root=`: `rootwait`, then the base console gate
     /// ([`CONSOLE_LOGLEVEL_ARG`]), then any extra arguments the board asked for
-    /// ([`ResolvedImage::kernel_cmdline`]). It overrides `mk_extlinux`'s own
-    /// `rootwait` default — board.conf is sourced after that default, so the
-    /// assignment must contain `rootwait` itself. The board's arguments come last so a
-    /// board can override the gate. Resolution guarantees the value is safe to embed
-    /// in this double-quoted, shell-sourced assignment.
-    pub fn board_conf(kernel_dtb: &str, kernel_cmdline: &str) -> String {
+    /// ([`ResolvedImage::kernel_cmdline`]). It replaces `mk_extlinux`'s own
+    /// `rootwait` default, so the assignment contains `rootwait` itself. The board's
+    /// arguments come last so a board can override the gate. Resolution guarantees the
+    /// value is safe to embed in this double-quoted, shell-sourced assignment.
+    pub fn board_conf(kernel_dtb: &str, kernel_cmdline: &str, esp_dtb: Option<&str>) -> String {
         let name = kernel_dtb.rsplit('/').next().unwrap_or(kernel_dtb);
         let mut args = format!("rootwait {CONSOLE_LOGLEVEL_ARG}");
         if !kernel_cmdline.is_empty() {
             args.push(' ');
             args.push_str(kernel_cmdline);
         }
+        let esp = esp_dtb
+            .map(|dtb| format!("ESP_DTB_PATH=\"{dtb}\"\n"))
+            .unwrap_or_default();
         format!(
             "# Generated by boot2deb -- board boot parameters. Do not edit.\n\
-             # Sourced by /etc/kernel/{{postinst,postrm}}.d hooks and /boot/mk_extlinux.\n\
+             # Sourced by the loader's kernel hooks and its configuration.\n\
              DTB_PATH=\"{kernel_dtb}\"\n\
              DTB_NAME=\"{name}\"\n\
-             EXTL_CMD_LINE=\"{args}\"\n"
+             {esp}\
+             KERNEL_CMDLINE=\"{args}\"\n"
         )
     }
 }
@@ -1392,6 +1801,7 @@ mod tests {
             patches: None,
             uboot: None,
             uboot_patches: None,
+            tfa: None,
             userspace: Vec::new(),
             ffmpeg: None,
             rootfs: Some(boot2deb_core::lock::RootfsPin {
@@ -1560,20 +1970,28 @@ mod tests {
             .to_path_buf();
         let mut checked: Vec<std::path::PathBuf> = Vec::new();
         // Every layer kind that can contain an overlay tree, which is every kind the
-        // rootfs stage merges: base, then soc, boot method, device, feature. This list
-        // must stay in step with the CLI's `overlay_dirs` — a kind missing here is not a
-        // failing test but a *vacuous* one, silently exempting whatever it holds.
+        // rootfs stage merges: base, then distro, soc, boot method, loader, device,
+        // feature. This list must stay in step with the CLI's `overlay_dirs` — a kind
+        // missing here is not a failing test but a *vacuous* one, silently exempting
+        // whatever it holds.
         let layer_dirs = std::iter::once(root.join("base")).chain(
-            ["socs", "boot-methods", "devices", "features"]
-                .iter()
-                .flat_map(|kind| {
-                    std::fs::read_dir(root.join(kind))
-                        .into_iter()
-                        .flatten()
-                        .flatten()
-                        .map(|e| e.path())
-                        .filter(|p| p.is_dir())
-                }),
+            [
+                "distros",
+                "socs",
+                "boot-methods",
+                "loaders",
+                "devices",
+                "features",
+            ]
+            .iter()
+            .flat_map(|kind| {
+                std::fs::read_dir(root.join(kind))
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.is_dir())
+            }),
         );
 
         for layer in layer_dirs {
@@ -1619,35 +2037,65 @@ mod tests {
 
     #[test]
     fn board_conf_derives_dtb_path_and_name() {
-        let c = config::board_conf("rockchip/rk3576-h96-max-m9.dtb", "");
+        let c = config::board_conf("rockchip/rk3576-h96-max-m9.dtb", "", None);
         assert!(c.contains("DTB_PATH=\"rockchip/rk3576-h96-max-m9.dtb\""));
         assert!(c.contains("DTB_NAME=\"rk3576-h96-max-m9.dtb\""));
         // A bare filename (no dir) uses itself as the name.
-        assert!(config::board_conf("board.dtb", "").contains("DTB_NAME=\"board.dtb\""));
+        assert!(config::board_conf("board.dtb", "", None).contains("DTB_NAME=\"board.dtb\""));
+    }
+
+    #[test]
+    fn board_conf_names_the_esp_dtb_under_the_efi_loader_alone() {
+        let efi = config::board_conf(
+            "rockchip/rk3576-h96-max-m9.dtb",
+            "",
+            Some("rockchip/rk3576-generic.dtb"),
+        );
+        assert!(
+            efi.contains("ESP_DTB_PATH=\"rockchip/rk3576-generic.dtb\"\n"),
+            "{efi}"
+        );
+        assert!(
+            efi.contains("DTB_PATH=\"rockchip/rk3576-h96-max-m9.dtb\"\n"),
+            "{efi}"
+        );
+        let plain = config::board_conf("rockchip/rk3576-h96-max-m9.dtb", "", None);
+        assert!(!plain.contains("ESP_DTB_PATH"), "{plain}");
     }
 
     #[test]
     fn board_conf_gates_the_console_on_every_board_and_lets_one_override_it() {
         // Every board gets the assignment, because every board gets the console gate.
-        // It re-states the script's `rootwait` default, which it replaces (board.conf
-        // is sourced after it).
-        let plain = config::board_conf("rockchip/rk3588-turing-rk1.dtb", "");
-        assert!(plain.contains("EXTL_CMD_LINE=\"rootwait loglevel=4\"\n"));
+        // It re-states `mk_extlinux`'s `rootwait` default, which it replaces.
+        let plain = config::board_conf("rockchip/rk3588-turing-rk1.dtb", "", None);
+        assert!(plain.contains("KERNEL_CMDLINE=\"rootwait loglevel=4\"\n"));
 
         // A board's own arguments are appended *after* the gate, so a board that wants
         // a louder console can say so and the kernel takes its last `loglevel=`.
         let extra = config::board_conf(
             "rockchip/rk3576-h96-max-m9.dtb",
             "video=HDMI-A-1:d cpuidle.off=1",
+            None,
         );
         assert!(extra
-            .contains("EXTL_CMD_LINE=\"rootwait loglevel=4 video=HDMI-A-1:d cpuidle.off=1\"\n"));
-        let louder = config::board_conf("rockchip/rk3576-h96-max-m9.dtb", "loglevel=7");
-        assert!(louder.contains("EXTL_CMD_LINE=\"rootwait loglevel=4 loglevel=7\"\n"));
+            .contains("KERNEL_CMDLINE=\"rootwait loglevel=4 video=HDMI-A-1:d cpuidle.off=1\"\n"));
+        let louder = config::board_conf("rockchip/rk3576-h96-max-m9.dtb", "loglevel=7", None);
+        assert!(louder.contains("KERNEL_CMDLINE=\"rootwait loglevel=4 loglevel=7\"\n"));
     }
 
     /// The rootfs PARTUUID the image node will write — a fixed value for the tests.
     const PARTUUID: uuid::Uuid = uuid::Uuid::from_bytes([0xb2; 16]);
+
+    /// The ESP PARTUUID the image node will write under the efi loader.
+    const ESP_PARTUUID: uuid::Uuid = uuid::Uuid::from_bytes([0xe5; 16]);
+
+    /// The partitions a raw-gap or depthcharge image names: root alone.
+    const PARTITIONS: Partitions = Partitions {
+        rootfs_partuuid: PARTUUID,
+        rootfs_fs_uuid: uuid::Uuid::from_bytes([0xe4; 16]),
+        rootfs_index: 2,
+        esp_partuuid: None,
+    };
 
     #[test]
     fn a_raw_gap_boot_mounts_root_by_the_partuuid_the_image_will_write() {
@@ -1657,7 +2105,7 @@ mod tests {
         // rewrites its PARTUUID — so no label and no filesystem UUID appears here.
         let f = {
             let b = rk1();
-            config::fstab(pair_of(&b), PARTUUID)
+            config::fstab(pair_of(&b), &PARTITIONS)
         };
         let expected = format!("PARTUUID={}\t/\text4", PARTUUID.hyphenated());
         assert!(
@@ -1670,13 +2118,47 @@ mod tests {
     }
 
     #[test]
+    fn an_efi_boot_mounts_the_esp_beside_root_by_its_partuuid() {
+        // grub-install and the DTB hook write to the ESP's mount point, so fstab must
+        // mount the partition the image node writes there, by the PARTUUID it stamps.
+        let b = resolve_recipe(
+            &repo_root(),
+            "turing-rk1/forky",
+            &Overrides {
+                loader: Some(boot2deb_core::model::Loader::Efi),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let f = config::fstab(
+            pair_of(&b),
+            &Partitions {
+                rootfs_index: 3,
+                esp_partuuid: Some(ESP_PARTUUID),
+                ..PARTITIONS
+            },
+        );
+        let lines: Vec<&str> = f.lines().filter(|l| !l.starts_with('#')).collect();
+        assert!(lines[0].starts_with(&format!("PARTUUID={}\t/\t", PARTUUID.hyphenated())));
+        assert_eq!(
+            lines[1],
+            format!(
+                "PARTUUID={}\t/boot/efi\tvfat\tumask=0077,nofail\t0      2",
+                ESP_PARTUUID.hyphenated()
+            )
+        );
+        assert!(f.contains("update-grub"), "{f}");
+        assert!(!f.contains("mk_extlinux"), "{f}");
+    }
+
+    #[test]
     fn a_depthcharge_boot_mounts_root_by_the_partuuid_the_image_will_write() {
         // This line is what depthchargectl signs into the kernel, so it must name the
         // partition the image node is about to create — not a label, which the tool
         // would not resolve, and not a filesystem UUID, which does not exist yet.
         let f = {
             let b = c201();
-            config::fstab(pair_of(&b), PARTUUID)
+            config::fstab(pair_of(&b), &PARTITIONS)
         };
         let expected = format!("PARTUUID={}\t/\text4", PARTUUID.hyphenated());
         assert!(
@@ -1702,7 +2184,7 @@ mod tests {
             mount: "/srv".into(),
             create: CreatePolicy::IfBlank,
         }];
-        let f = config::fstab(pair_of(&b), PARTUUID);
+        let f = config::fstab(pair_of(&b), &PARTITIONS);
         let lines: Vec<&str> = f.lines().filter(|l| !l.starts_with('#')).collect();
 
         // Root still comes first and still roots on the PARTUUID.
@@ -1723,7 +2205,7 @@ mod tests {
         // a blank, or a comment about an axis it does not use.
         let f = {
             let b = rk1();
-            config::fstab(pair_of(&b), PARTUUID)
+            config::fstab(pair_of(&b), &PARTITIONS)
         };
         assert_eq!(f.lines().filter(|l| !l.starts_with('#')).count(), 1);
         assert!(!f.contains("LABEL="));
@@ -2002,7 +2484,7 @@ mod tests {
             tmp.path(),
             &[],
             pair_of(&build),
-            uuid::Uuid::nil(),
+            PARTITIONS,
             &identity,
             1_790_347_034,
             &step,
@@ -2040,7 +2522,7 @@ mod tests {
             tmp2.path(),
             &[],
             pair_of(&rk),
-            uuid::Uuid::nil(),
+            PARTITIONS,
             &ident(&rk),
             1_790_347_034,
             &step,
@@ -2124,7 +2606,7 @@ mod tests {
             tmp.path(),
             &[],
             pair_of(&rk),
-            uuid::Uuid::nil(),
+            PARTITIONS,
             &ident(&rk),
             1_790_347_034,
             &step,
@@ -2137,10 +2619,11 @@ mod tests {
             identity.contains("dtb               rockchip/rk3588-turing-rk1.dtb\n"),
             "{identity}"
         );
-        // The one unconditional line, and the one that takes no argument — so it
-        // must render as the bare word rather than a word and the padding of an
-        // argument that is not there.
+        // The two unconditional lines, which take no argument — so each must render
+        // as the bare word rather than a word and the padding of an argument that is
+        // not there.
         assert!(identity.contains("\nsingle-kernel\n"), "{identity}");
+        assert!(identity.contains("\nunique-partuuid\n"), "{identity}");
         // Every group the build resolved is a file in the directory, named for
         // its declaring layer.
         for group in &image_of(&rk).expectations {
@@ -2157,7 +2640,7 @@ mod tests {
             tmp2.path(),
             &[],
             pair_of(&c2),
-            uuid::Uuid::nil(),
+            PARTITIONS,
             &ident(&c2),
             1_790_347_034,
             &step,
@@ -2279,7 +2762,7 @@ mod tests {
             tmp.path(),
             &[],
             pair_of(&build),
-            uuid::Uuid::nil(),
+            PARTITIONS,
             &ident(&build),
             1_790_347_034,
             &step,
@@ -2296,7 +2779,7 @@ mod tests {
             tmp2.path(),
             &[],
             pair_of(&build),
-            uuid::Uuid::nil(),
+            PARTITIONS,
             &ident(&build),
             1_790_347_034,
             &step,
@@ -2316,6 +2799,8 @@ mod tests {
             source: "https://git.example/linux.git".into(),
             reference: "v7.1.6".into(),
             commit: "0".repeat(40),
+            revision: 1,
+            config_sha256: "d".repeat(64),
         });
         let identity = boot2deb_core::provenance::system_identity(pair_of(&build), &lock);
         let checks = config::selftest_identity(pair_of(&build), &identity);
@@ -2335,10 +2820,10 @@ mod tests {
         assert!(config::selftest_identity(pair_of(&build), &identity).contains("dtb "));
     }
 
-    /// The two files the image needs because it is built on a machine that is not the
-    /// board. Both failures are silent at build time and only surface on hardware: a
-    /// `dhcpcd` that cannot start, and an initramfs that waits for the *builder's* swap
-    /// and then skips the root filesystem check.
+    /// The settings the image needs because it is built on a machine that is not the
+    /// board. The failure is silent at build time and only surfaces on hardware: an
+    /// initramfs that waits for the *builder's* swap and then skips the root filesystem
+    /// check.
     #[test]
     fn the_staged_overlay_states_what_the_build_host_would_otherwise_answer() {
         let build = rk1();
@@ -2349,18 +2834,12 @@ mod tests {
             tmp.path(),
             &[],
             pair_of(&build),
-            uuid::Uuid::nil(),
+            PARTITIONS,
             &ident(&build),
             1_790_347_034,
             &step,
         )
         .unwrap();
-
-        // `dhcpcd.service` lists /etc/resolv.conf in its ReadWritePaths under
-        // ProtectSystem=strict, and systemd refuses the namespace if the path is absent
-        // — so the file existing is the whole requirement. No package ships one.
-        let resolv = tmp.path().join("etc/resolv.conf");
-        assert!(resolv.is_file(), "dhcpcd cannot start without this path");
 
         let conf =
             std::fs::read_to_string(tmp.path().join("etc/initramfs-tools/conf.d/boot2deb.conf"))
@@ -2378,6 +2857,7 @@ mod tests {
             .path()
             .join(initramfs_conf_path(InitramfsGenerator::Dracut))
             .exists());
+        assert!(!tmp.path().join(DRACUT_BUILTIN_FIRMWARE_MODULE).exists());
     }
 
     /// The dracut counterpart of the settings above: a generic initrd, which is what
@@ -2394,7 +2874,7 @@ mod tests {
             tmp.path(),
             &[],
             pair_of(&build),
-            uuid::Uuid::nil(),
+            PARTITIONS,
             &ident(&build),
             1_790_347_034,
             &step,
@@ -2410,6 +2890,182 @@ mod tests {
             .path()
             .join(initramfs_conf_path(InitramfsGenerator::InitramfsTools))
             .exists());
+        // The built-in drivers' firmware module, executable like dracut's own.
+        let module = tmp.path().join(DRACUT_BUILTIN_FIRMWARE_MODULE);
+        assert_eq!(
+            std::fs::read_to_string(&module).expect("the firmware module is staged"),
+            DRACUT_BUILTIN_FIRMWARE
+        );
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&module).unwrap().permissions().mode() & 0o7777,
+            0o755
+        );
+    }
+
+    /// The dracut module installs each firmware file a built-in driver lists, in the
+    /// first spelling the kernel's loader opens. The loader tries the bare name in every
+    /// directory before any `.zst`, so a bare file under `/lib/firmware` wins over a
+    /// `.zst` under `updates/`. A listed file the root does not have is a warning, and a
+    /// failed install fails the module. dracut's two helpers are stand-ins that print
+    /// their arguments.
+    #[test]
+    fn the_dracut_module_installs_the_firmware_built_in_drivers_list() {
+        if !crate::hosttool::require(&["bash"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let sysroot = tmp.path().join("root");
+        let kver = "7.3.1-1-arm64";
+        let srcmods = sysroot.join("lib/modules").join(kver);
+        std::fs::create_dir_all(&srcmods).unwrap();
+        std::fs::write(
+            srcmods.join("modules.builtin.modinfo"),
+            "panthor.description=Panthor DRM driver\0\
+             panthor.firmware=arm/mali/arch14.8/mali_csffw.bin\0\
+             panthor.firmware=arm/mali/arch10.8/mali_csffw.bin\0\
+             realtek.firmware=rtl_nic/rtl8261c.bin\0",
+        )
+        .unwrap();
+        for file in [
+            "lib/firmware/arm/mali/arch10.8/mali_csffw.bin.zst",
+            "lib/firmware/arm/mali/arch10.8/mali_csffw.bin.xz",
+            "lib/firmware/updates/rtl_nic/rtl8261c.bin.zst",
+            "lib/firmware/rtl_nic/rtl8261c.bin",
+        ] {
+            let path = sysroot.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
+        }
+        let module = tmp.path().join("module-setup.sh");
+        std::fs::write(&module, DRACUT_BUILTIN_FIRMWARE).unwrap();
+        let run = |inst_status: u8| {
+            let script = format!(
+                "inst_simple() {{ echo \"inst $*\"; return {inst_status}; }}\n\
+                 dwarn() {{ echo \"warn $*\"; }}\n\
+                 . \"$1\"\n\
+                 check || exit 9\n\
+                 installkernel\n"
+            );
+            let out = Command::new("bash")
+                .args(["-c", &script, "bash"])
+                .arg(&module)
+                .env("srcmods", &srcmods)
+                .env("kernel", kver)
+                .env("dracutsysrootdir", &sysroot)
+                .output()
+                .unwrap();
+            (
+                out.status.code(),
+                String::from_utf8_lossy(&out.stdout).into_owned(),
+            )
+        };
+
+        let (code, out) = run(0);
+        assert_eq!(code, Some(0), "{out}");
+        assert_eq!(
+            out,
+            "warn no firmware arm/mali/arch14.8/mali_csffw.bin for the built-in driver panthor\n\
+             inst /lib/firmware/arm/mali/arch10.8/mali_csffw.bin.zst\n\
+             inst /lib/firmware/rtl_nic/rtl8261c.bin\n"
+        );
+
+        let (code, out) = run(1);
+        assert_eq!(code, Some(1), "{out}");
+        assert!(!out.contains("rtl8261c"), "{out}");
+
+        // A kernel without the list installs nothing and says so.
+        std::fs::remove_file(srcmods.join("modules.builtin.modinfo")).unwrap();
+        let (code, out) = run(0);
+        assert_eq!(code, Some(0), "{out}");
+        assert!(
+            out.starts_with("warn no ") && out.contains("modules.builtin.modinfo"),
+            "{out}"
+        );
+        assert!(!out.contains("inst "), "{out}");
+    }
+
+    /// Each time client's wait unit gets its bounded command, in the drop-in directory
+    /// systemd reads for that unit. A drop-in for the other client's unit would
+    /// configure a unit the image does not have and leave its own one unbounded.
+    #[test]
+    fn the_clock_wait_drop_in_bounds_the_time_clients_own_unit() {
+        let sink = |_e: crate::event::Event| {};
+        for (client, unit, command) in [
+            (
+                TimeClient::SystemdTimesyncd,
+                "systemd-time-wait-sync.service",
+                "ExecStart=-/usr/bin/timeout 45 /usr/lib/systemd/systemd-time-wait-sync\n",
+            ),
+            (
+                TimeClient::Chrony,
+                "chrony-wait.service",
+                "ExecStart=-/usr/bin/chronyc -h 127.0.0.1,::1 waitsync 45 0.1 0.0 1\n",
+            ),
+        ] {
+            let mut build = rk1();
+            build.image.as_mut().unwrap().time_client = client;
+            let tmp = tempfile::tempdir().unwrap();
+            let step = Step::start(&sink, "test");
+            stage_overlay(
+                tmp.path(),
+                &[],
+                pair_of(&build),
+                PARTITIONS,
+                &ident(&build),
+                1_790_347_034,
+                &step,
+            )
+            .unwrap();
+            let dropin = std::fs::read_to_string(
+                tmp.path()
+                    .join(format!("etc/systemd/system/{unit}.d/bounded.conf")),
+            )
+            .unwrap_or_else(|e| panic!("{client}: no drop-in for {unit}: {e}"));
+            // The empty line clears the unit's own command; without it the drop-in's
+            // would run after it rather than instead of it.
+            assert!(dropin.contains("[Service]\nExecStart=\n"), "{dropin}");
+            assert!(dropin.ends_with(command), "{client}: {dropin}");
+            assert_eq!(clock_wait(client).unit, unit);
+            assert!(command.contains(clock_wait(client).program), "{client}");
+        }
+    }
+
+    /// netplan warns on every run about a configuration file anyone else can read, and
+    /// git records no mode narrower than `0644`.
+    #[test]
+    fn netplan_files_are_staged_readable_by_root_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let layer = tempfile::tempdir().unwrap();
+        let netplan = layer.path().join("etc/netplan");
+        std::fs::create_dir_all(&netplan).unwrap();
+        std::fs::write(netplan.join("50-wired.yaml"), "network: {version: 2}\n").unwrap();
+        std::fs::write(layer.path().join("etc/issue"), "x\n").unwrap();
+        let staging = tempfile::tempdir().unwrap();
+        let sink = |_e: crate::event::Event| {};
+        let step = Step::start(&sink, "test");
+        let build = rk1();
+        stage_overlay(
+            staging.path(),
+            &[layer.path().to_path_buf()],
+            pair_of(&build),
+            PARTITIONS,
+            &ident(&build),
+            1_790_347_034,
+            &step,
+        )
+        .unwrap();
+        let mode = |rel: &str| {
+            std::fs::metadata(staging.path().join(rel))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777
+        };
+        assert_eq!(mode("etc/netplan/50-wired.yaml"), 0o600);
+        // The directory stays traversable, and nothing outside it is narrowed.
+        assert_eq!(mode("etc/netplan"), 0o755);
+        assert_eq!(mode("etc/issue"), 0o644);
     }
 
     #[test]
@@ -2451,7 +3107,10 @@ mod tests {
         // network its configured server is not on. Debian compiles its pool into that
         // fallback, and timesyncd consults it whenever the primary yields nothing — so
         // writing only NTP= makes a configured server a preference that degrades.
-        let conf = config::timesyncd_conf(&["ntp.lan".to_string(), "192.168.1.1".to_string()]);
+        let conf = config::ntp_conf(
+            TimeClient::SystemdTimesyncd,
+            &["ntp.lan".to_string(), "192.168.1.1".to_string()],
+        );
         assert!(
             conf.contains("NTP=ntp.lan 192.168.1.1\n"),
             "servers join with the space timesyncd splits on: {conf}"
@@ -2474,11 +3133,40 @@ mod tests {
     }
 
     #[test]
+    fn configured_ntp_servers_join_the_chrony_sources_as_trusted_preferences() {
+        // Ubuntu's own pools use NTS, and in chrony's default `authselectmode mix` that
+        // gives them `require trust`: an unauthenticated server then moves the clock only
+        // while one of them is selectable. `require trust` on the configured server lets
+        // it set the clock on its own, which is what a LAN server is named for.
+        let conf = config::ntp_conf(
+            TimeClient::Chrony,
+            &["ntp.lan".to_string(), "fd00::1".to_string()],
+        );
+        let directives: Vec<&str> = conf
+            .lines()
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .collect();
+        assert_eq!(
+            directives,
+            [
+                "server ntp.lan iburst prefer require trust",
+                "server fd00::1 iburst prefer require trust",
+            ]
+        );
+        // A sources.d file may contain only source directives, each line ended.
+        assert!(conf.ends_with('\n'), "{conf:?}");
+        assert!(
+            !directives.iter().any(|l| l.starts_with("authselectmode")),
+            "the distribution's policy for its own sources stays as shipped"
+        );
+    }
+
+    #[test]
     fn an_image_with_no_configured_ntp_server_stages_no_drop_in() {
         let sink = |_e: crate::event::Event| {};
 
-        // Empty is not "no time source" — it is Debian's compiled-in pool. Writing an
-        // empty `NTP=` would say the opposite, so the file is absent instead.
+        // Empty is not "no time source" — it is the distribution's own servers. Writing
+        // an empty `NTP=` would say the opposite, so the file is absent instead.
         let bare = tempfile::tempdir().unwrap();
         let step = Step::start(&sink, "test");
         stage_preinstall_overlay(
@@ -2631,5 +3319,316 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o644);
+    }
+
+    /// A directory beside the staging tree that a layer's symlink can point into,
+    /// holding one file at a mode no staged file is given. A write or `chmod` that
+    /// followed a link out of the tree shows up as a changed sentinel or a new entry.
+    struct Outside {
+        dir: PathBuf,
+    }
+
+    impl Outside {
+        const CONTENT: &'static str = "outside\n";
+        const MODE: u32 = 0o600;
+
+        fn new(tmp: &Path) -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = tmp.join("outside");
+            std::fs::create_dir(&dir).unwrap();
+            let sentinel = dir.join("sentinel");
+            std::fs::write(&sentinel, Self::CONTENT).unwrap();
+            std::fs::set_permissions(&sentinel, std::fs::Permissions::from_mode(Self::MODE))
+                .unwrap();
+            Outside { dir }
+        }
+
+        fn sentinel(&self) -> PathBuf {
+            self.dir.join("sentinel")
+        }
+
+        fn assert_untouched(&self) {
+            let names: Vec<_> = std::fs::read_dir(&self.dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name())
+                .collect();
+            assert_eq!(names, ["sentinel"], "nothing new appears outside the tree");
+            let sentinel = self.sentinel();
+            assert_eq!(std::fs::read_to_string(&sentinel).unwrap(), Self::CONTENT);
+            assert_eq!(
+                staged_mode(&sentinel),
+                Self::MODE,
+                "the sentinel's mode is its own"
+            );
+        }
+    }
+
+    fn staged_mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        path.symlink_metadata().unwrap().permissions().mode() & 0o7777
+    }
+
+    /// A layer that ships `etc` as a symlink — to a directory outside the tree, as a
+    /// legitimate target-side absolute link would resolve on the build host — makes every
+    /// generated path beneath it an error. Nothing is written, linked, or re-moded through
+    /// the link, and the layer's link itself stays as the layer shipped it.
+    #[test]
+    fn a_generated_path_never_resolves_through_a_layer_s_symlink() {
+        use crate::error::StagedConflict;
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = Outside::new(tmp.path());
+        let staging = tmp.path().join("staging");
+        std::fs::create_dir(&staging).unwrap();
+        std::os::unix::fs::symlink(&outside.dir, staging.join("etc")).unwrap();
+
+        let attempts: [(&str, Result<(), EngineError>); 4] = [
+            (
+                "etc/sentinel",
+                write_staged(&staging, "etc/sentinel", "generated\n"),
+            ),
+            (
+                "etc/boot2deb/board.conf",
+                write_staged(&staging, "etc/boot2deb/board.conf", "generated\n"),
+            ),
+            (
+                "etc/sentinel",
+                write_staged_exec(&staging, "etc/sentinel", "#!/bin/sh\n"),
+            ),
+            (
+                "etc/localtime",
+                symlink_staged(&staging, "etc/localtime", "/usr/share/zoneinfo/UTC"),
+            ),
+        ];
+        for (rel, result) in attempts {
+            match result {
+                Err(EngineError::StagedPathBlocked {
+                    generated,
+                    entry,
+                    conflict: StagedConflict::SymlinkAncestor,
+                }) => {
+                    assert_eq!(generated, rel);
+                    assert_eq!(entry, "etc", "the error names the layer's link");
+                }
+                other => panic!("{rel}: expected a blocked path, got {other:?}"),
+            }
+        }
+        outside.assert_untouched();
+        assert_eq!(
+            std::fs::read_link(staging.join("etc")).unwrap(),
+            outside.dir
+        );
+
+        let message = write_staged(&staging, "etc/hostname", "board\n")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            message,
+            "cannot stage the generated /etc/hostname: /etc in the layer overlays is a \
+             symlink, which a generated path is never resolved through"
+        );
+    }
+
+    /// Generated config wins over the layers, so a layer's symlink at the generated path
+    /// itself is replaced — by a regular file at the generated mode, inside the tree —
+    /// rather than written through. A dangling link is the sharpest case: a write that
+    /// followed it would create its target outside the tree.
+    #[test]
+    fn a_generated_file_replaces_a_layer_s_symlink_without_following_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = Outside::new(tmp.path());
+        let staging = tmp.path().join("staging");
+        std::fs::create_dir_all(staging.join("etc")).unwrap();
+        std::fs::create_dir_all(staging.join("usr/local/sbin")).unwrap();
+        std::os::unix::fs::symlink(outside.sentinel(), staging.join("etc/hostname")).unwrap();
+        std::os::unix::fs::symlink(
+            outside.dir.join("dangling"),
+            staging.join("etc/kernel-img.conf"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            outside.sentinel(),
+            staging.join("usr/local/sbin/update-initramfs"),
+        )
+        .unwrap();
+
+        write_staged(&staging, "etc/hostname", "board\n").unwrap();
+        write_staged(&staging, "etc/kernel-img.conf", "do_symlinks = no\n").unwrap();
+        write_staged_exec(&staging, "usr/local/sbin/update-initramfs", "#!/bin/sh\n").unwrap();
+
+        for (rel, content, mode) in [
+            ("etc/hostname", "board\n", 0o644),
+            ("etc/kernel-img.conf", "do_symlinks = no\n", 0o644),
+            ("usr/local/sbin/update-initramfs", "#!/bin/sh\n", 0o755),
+        ] {
+            let path = staging.join(rel);
+            assert!(
+                path.symlink_metadata().unwrap().is_file(),
+                "{rel} is a file"
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), content, "{rel}");
+            assert_eq!(staged_mode(&path), mode, "{rel}");
+        }
+        outside.assert_untouched();
+    }
+
+    /// The same rule for a generated symlink: a layer's symlink or file at its path is
+    /// replaced by the generated link, and the old link's target is never touched.
+    #[test]
+    fn a_generated_symlink_replaces_a_layer_s_entry_without_following_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = Outside::new(tmp.path());
+        let staging = tmp.path().join("staging");
+        let wants = staging.join("etc/systemd/system/multi-user.target.wants");
+        std::fs::create_dir_all(&wants).unwrap();
+        std::os::unix::fs::symlink(outside.sentinel(), staging.join("etc/localtime")).unwrap();
+        std::fs::write(wants.join("boot2deb-selftest.service"), "a layer's file\n").unwrap();
+
+        symlink_staged(&staging, "etc/localtime", "/usr/share/zoneinfo/UTC").unwrap();
+        symlink_staged(
+            &staging,
+            "etc/systemd/system/multi-user.target.wants/boot2deb-selftest.service",
+            "../boot2deb-selftest.service",
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_link(staging.join("etc/localtime")).unwrap(),
+            Path::new("/usr/share/zoneinfo/UTC")
+        );
+        assert_eq!(
+            std::fs::read_link(wants.join("boot2deb-selftest.service")).unwrap(),
+            Path::new("../boot2deb-selftest.service")
+        );
+        outside.assert_untouched();
+    }
+
+    /// What a generated entry cannot win over is refused, naming the overlay entry in its
+    /// way: a directory at the generated path (replacing it would discard what the layers
+    /// placed beneath it), a file where the path needs a directory, and a path that would
+    /// leave the tree on its own.
+    #[test]
+    fn a_generated_path_blocked_by_the_layers_is_refused() {
+        use crate::error::StagedConflict;
+        let tmp = tempfile::tempdir().unwrap();
+        let staging = tmp.path().join("staging");
+        std::fs::create_dir_all(staging.join("etc/hostname")).unwrap();
+        std::fs::write(staging.join("etc/hostname/kept"), "a layer's file\n").unwrap();
+        std::fs::write(staging.join("etc/boot2deb"), "a layer's file\n").unwrap();
+
+        let blocked = |result: Result<(), EngineError>| match result {
+            Err(EngineError::StagedPathBlocked {
+                entry, conflict, ..
+            }) => (entry, conflict),
+            other => panic!("expected a blocked path, got {other:?}"),
+        };
+        assert_eq!(
+            blocked(write_staged(&staging, "etc/hostname", "board\n")),
+            ("etc/hostname".to_string(), StagedConflict::Directory)
+        );
+        assert_eq!(
+            blocked(symlink_staged(&staging, "etc/hostname", "/run/hostname")),
+            ("etc/hostname".to_string(), StagedConflict::Directory)
+        );
+        assert_eq!(
+            blocked(write_staged(&staging, "etc/boot2deb/board.conf", "x\n")),
+            (
+                "etc/boot2deb".to_string(),
+                StagedConflict::NonDirectoryAncestor
+            )
+        );
+        assert_eq!(
+            std::fs::read_to_string(staging.join("etc/hostname/kept")).unwrap(),
+            "a layer's file\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(staging.join("etc/boot2deb")).unwrap(),
+            "a layer's file\n"
+        );
+
+        for rel in ["../escape", "/etc/escape", "etc/../escape", ""] {
+            assert!(
+                matches!(
+                    write_staged(&staging, rel, "x\n"),
+                    Err(EngineError::Io { .. })
+                ),
+                "{rel:?} is refused"
+            );
+        }
+        assert!(!tmp.path().join("escape").exists());
+        assert!(!staging.join("escape").exists());
+    }
+
+    /// Narrowing `/etc/netplan` to root-only touches only files the staging tree
+    /// contains. A layer's symlink at the directory, or at an ancestor of it, names a
+    /// directory on the target, so the files it reaches on the build host keep their mode.
+    #[test]
+    fn root_only_narrowing_never_follows_a_layer_s_symlink() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = Outside::new(tmp.path());
+        let open = std::fs::Permissions::from_mode(0o644);
+        let narrowed = |link: &str| {
+            let staging = tmp.path().join(link.replace('/', "-"));
+            std::fs::create_dir_all(staging.join("etc")).unwrap();
+            std::os::unix::fs::symlink(&outside.dir, staging.join(link)).unwrap();
+            restrict_root_only_files(&staging).unwrap();
+        };
+
+        std::fs::set_permissions(outside.sentinel(), open.clone()).unwrap();
+        narrowed("etc/netplan");
+        assert_eq!(staged_mode(&outside.sentinel()), 0o644);
+
+        std::fs::create_dir(outside.dir.join("netplan")).unwrap();
+        let reached = outside.dir.join("netplan/10-board.yaml");
+        std::fs::write(&reached, "network: {}\n").unwrap();
+        std::fs::set_permissions(&reached, open).unwrap();
+        let staging = tmp.path().join("linked-etc");
+        std::fs::create_dir(&staging).unwrap();
+        std::os::unix::fs::symlink(&outside.dir, staging.join("etc")).unwrap();
+        restrict_root_only_files(&staging).unwrap();
+        assert_eq!(staged_mode(&reached), 0o644);
+
+        // The staged file itself is still narrowed.
+        let staging = tmp.path().join("real");
+        std::fs::create_dir_all(staging.join("etc/netplan")).unwrap();
+        let staged = staging.join("etc/netplan/10-board.yaml");
+        std::fs::write(&staged, "network: {}\n").unwrap();
+        restrict_root_only_files(&staging).unwrap();
+        assert_eq!(staged_mode(&staged), 0o600);
+    }
+
+    /// The overlay merge never writes through an earlier layer's symlink. A later layer's
+    /// file replaces the link (`--remove-destination` unlinks it first), and a later
+    /// layer's directory over the link makes `cp` refuse, so the merge fails rather than
+    /// writing into whatever the link reaches on the build host.
+    #[test]
+    fn the_overlay_merge_never_writes_through_an_earlier_layer_s_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = Outside::new(tmp.path());
+        let sink = |_: crate::event::Event| {};
+        let step = Step::start(&sink, "overlay");
+        let layer = |name: &str| {
+            let dir = tmp.path().join(name);
+            std::fs::create_dir_all(dir.join("etc")).unwrap();
+            dir
+        };
+
+        let (base, device) = (layer("file-base"), layer("file-device"));
+        std::os::unix::fs::symlink(outside.sentinel(), base.join("etc/hostname")).unwrap();
+        std::fs::write(device.join("etc/hostname"), "device\n").unwrap();
+        let staging = tmp.path().join("file-staging");
+        copy_overlay_trees(&staging, &[base, device], &step).unwrap();
+        let merged = staging.join("etc/hostname");
+        assert!(merged.symlink_metadata().unwrap().is_file());
+        assert_eq!(std::fs::read_to_string(&merged).unwrap(), "device\n");
+        outside.assert_untouched();
+
+        let (base, device) = (tmp.path().join("dir-base"), layer("dir-device"));
+        std::fs::create_dir(&base).unwrap();
+        std::os::unix::fs::symlink(&outside.dir, base.join("etc")).unwrap();
+        std::fs::write(device.join("etc/sentinel"), "device\n").unwrap();
+        let staging = tmp.path().join("dir-staging");
+        assert!(copy_overlay_trees(&staging, &[base, device], &step).is_err());
+        outside.assert_untouched();
     }
 }

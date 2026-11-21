@@ -5,13 +5,41 @@
 # edit it from any laptop before first boot.
 #
 # Every failure here logs and exits 0: a board that does not come up is worse
-# than a board with the wrong name, so a missing partition, an unmountable
-# filesystem, and a malformed line all degrade to "personalize nothing".
+# than a board with the wrong name. A missing partition or an unmountable
+# filesystem personalizes nothing. A hand-edited seed.txt reaches this hook
+# without passing through `press`, so each value is held here to the rules press
+# checks it against (core's hostname, authkeys, wifi and staticip modules). A
+# value that fails is skipped whole and logged, and the other keys still apply.
+# A network profile is installed only once it is known good: netplan generates it
+# first, and the NetworkManager and dhcpcd renderings take only checked values. A
+# netplan or dhcpcd configuration its service then fails on is taken out again, so
+# the image's own DHCP configuration stays in effect and the log says the address
+# was not applied.
+#
 # Idempotent: the parent runs first-boot hooks once, but re-running would only
 # re-apply the same hostname and skip already-present keys.
 
-dev=/dev/disk/by-partlabel/b2d-seed
-[ -e "$dev" ] || exit 0
+# Prefix of every path this hook reads or writes on the system it personalizes.
+# Empty on the board, where that system is the running root; base/test-seed.sh
+# points it at a scratch tree.
+root=''
+
+# Byte semantics: bracket ranges and classes are ASCII, and ${#var} counts bytes,
+# the unit every length limit below is stated in.
+LC_ALL=C
+export LC_ALL
+
+# The seed is the b2d-seed partition on the root's own disk. Every boot2deb
+# disk contains one, so with a second boot2deb disk attached the by-partlabel
+# link names whichever of the two udev saw last, and this unit would take the
+# other one's hostname and keys. `lsblk -s` walks from the root up through
+# any device-mapper layer to the disk that holds it. `findmnt -v` names the
+# device alone, without the `[/subvolume]` suffix a btrfs root adds to it.
+rootdev=$(findmnt -nvo SOURCE /) || exit 0
+disk=$(lsblk -lnspo path,type "$rootdev" | awk '$2 == "disk" { print $1; exit }')
+[ -n "$disk" ] || exit 0
+dev=$(lsblk -lnpo path,partlabel "$disk" | awk '$2 == "b2d-seed" { print $1; exit }')
+[ -n "$dev" ] || exit 0
 
 mnt=$(mktemp -d) || exit 0
 if ! mount -t vfat -o ro "$dev" "$mnt" 2>/dev/null; then
@@ -19,6 +47,22 @@ if ! mount -t vfat -o ro "$dev" "$mnt" 2>/dev/null; then
     rmdir "$mnt"
     exit 0
 fi
+
+cr=$(printf '\r')
+
+# The seed grammar trims the spaces and tabs around every line and every value.
+trim() {
+    v=$1
+    while :; do
+        case "$v" in
+            [[:blank:]]*) v=${v#?} ;;
+            *[[:blank:]]) v=${v%?} ;;
+            *) break ;;
+        esac
+    done
+    printf '%s' "$v"
+}
+
 # The seed is read whole before anything is applied, so the unmount cannot be
 # missed on an early exit.
 seed_hostname=''
@@ -27,29 +71,33 @@ seed_wifi_ssid=''
 seed_wifi_psk=''
 seed_static_ip=''
 if [ -f "$mnt/seed.txt" ]; then
-    cr=$(printf '\r')
-    # `read` with default IFS trims surrounding whitespace; the last value of a
-    # single-valued key wins, and unknown keys are ignored (a newer boot2deb may
-    # know more).
+    # `read` with default IFS trims surrounding whitespace, and `trim` the value's
+    # own; an empty value sets nothing. The last value of a single-valued key wins,
+    # and unknown keys are ignored (a newer boot2deb may know more).
     while IFS=' 	' read -r line || [ -n "$line" ]; do
         line=${line%"$cr"}
         case "$line" in
             ''|\#*) ;;
             hostname=*)
-                seed_hostname=${line#hostname=}
+                v=$(trim "${line#hostname=}")
+                [ -z "$v" ] || seed_hostname=$v
                 ;;
             authorized_key=*)
-                seed_keys="$seed_keys${line#authorized_key=}
+                v=$(trim "${line#authorized_key=}")
+                [ -z "$v" ] || seed_keys="$seed_keys$v
 "
                 ;;
             wifi_ssid=*)
-                seed_wifi_ssid=${line#wifi_ssid=}
+                v=$(trim "${line#wifi_ssid=}")
+                [ -z "$v" ] || seed_wifi_ssid=$v
                 ;;
             wifi_psk=*)
-                seed_wifi_psk=${line#wifi_psk=}
+                v=$(trim "${line#wifi_psk=}")
+                [ -z "$v" ] || seed_wifi_psk=$v
                 ;;
             static_ip=*)
-                seed_static_ip=${line#static_ip=}
+                v=$(trim "${line#static_ip=}")
+                [ -z "$v" ] || seed_static_ip=$v
                 ;;
         esac
     done < "$mnt/seed.txt"
@@ -57,25 +105,380 @@ fi
 umount "$mnt" 2>/dev/null || true
 rmdir "$mnt" 2>/dev/null || true
 
-# static_ip is address/prefix[,gateway[,dns...]], IPv4 throughout. The grammar
-# has no whitespace, so any that hand-editing left is shed here rather than
-# smuggled into a config file another parser reads; the three parts are split
-# once and rendered per stack below.
+# --- The press-time checks, in sh ---------------------------------------------
+#
+# Each check returns non-zero with `why` set to a clause naming what is wrong. The
+# acceptance rules are the Rust checks', so a value press would refuse is refused
+# here, and one it accepts is applied. This section depends on nothing above it but
+# LC_ALL=C: the engine's first_boot_hooks test runs it alone and holds every check
+# to its Rust counterpart's verdict on a shared set of values.
+
+# A value as it can be shown in a log line: anything but printable ASCII becomes
+# '?', so a refused value cannot put a control sequence into the journal.
+shown() { printf '%s' "$1" | tr -c '[:print:]' '?'; }
+
+# Succeed when $1 is UTF-8, which a press-time check receives as a given: a Rust
+# string is UTF-8 by construction.
+check_utf8() {
+    if ! command -v iconv >/dev/null 2>&1; then
+        why="cannot be checked without iconv"
+        return 1
+    fi
+    if ! printf '%s' "$1" | iconv -f UTF-8 -t UTF-32BE >/dev/null 2>&1; then
+        why="is not valid UTF-8"
+        return 1
+    fi
+}
+
+# The Unicode code points of $1, which check_utf8 has passed, one per line as eight
+# lowercase hex digits.
+codepoints() {
+    printf '%s' "$1" | iconv -f UTF-8 -t UTF-32BE | od -An -v -tx1 \
+        | awk '{ for (i = 1; i <= NF; i++) { h = h $i; if (length(h) == 8) { print h; h = "" } } }'
+}
+
+# What Rust's char::is_control and char::is_whitespace accept, as codepoints prints
+# code points: the C0 and C1 controls with DEL, and Unicode's White_Space set.
+cp_control='^0000(00[01][0-9a-f]|007f|00[89][0-9a-f])$'
+cp_space='^0000(000[9a-d]|0020|0085|00a0|1680|200[0-9a]|2028|2029|202f|205f|3000)$'
+
+# core::hostname::check: labels of [A-Za-z0-9-], each 1-63 bytes and neither
+# starting nor ending with '-', joined by '.' into at most 64 bytes.
+check_hostname() {
+    case "$1" in
+        '') why="is empty"; return 1 ;;
+        *[!A-Za-z0-9.-]*) why="has a character outside [A-Za-z0-9.-]"; return 1 ;;
+        .*|*.|*..*) why="has an empty label"; return 1 ;;
+        -*|*-|*.-*|*-.*) why="has a label starting or ending with '-'"; return 1 ;;
+    esac
+    if [ "${#1}" -gt 64 ]; then
+        why="is longer than 64 characters"
+        return 1
+    fi
+    old_ifs=$IFS
+    IFS=.
+    set -- $1
+    IFS=$old_ifs
+    for label do
+        if [ "${#label}" -gt 63 ]; then
+            why="has a label longer than 63 characters"
+            return 1
+        fi
+    done
+}
+
+# A dotted quad as Rust's Ipv4Addr parser reads one: exactly four decimal octets,
+# each 0 or 1-3 digits with no leading zero, none above 255.
+is_ipv4() {
+    case "$1" in *[!0-9.]*|.*|*.|*..*) return 1 ;; esac
+    old_ifs=$IFS
+    IFS=.
+    set -- $1
+    IFS=$old_ifs
+    [ $# -eq 4 ] || return 1
+    for octet do
+        case "$octet" in
+            0|[1-9]|[1-9][0-9]) ;;
+            [1-9][0-9][0-9]) [ "$octet" -le 255 ] || return 1 ;;
+            *) return 1 ;;
+        esac
+    done
+}
+
+# core::staticip::check: address/prefix[,gateway[,dns...]], IPv4 throughout, no
+# empty field, and a prefix of digits only, 1-32. On success static_addr holds the
+# address with its prefix written without leading zeros (press accepts /024, and
+# not every stack's parser does), and static_gw and static_dns the gateway and the
+# comma-separated DNS servers, either possibly empty.
+check_static_ip() {
+    case "$1" in
+        '') why="is empty"; return 1 ;;
+        *[!0-9./,]*) why="has a character outside address/prefix[,gateway[,dns...]]"; return 1 ;;
+        *,|*,,*) why="has an empty field (a doubled or trailing comma)"; return 1 ;;
+    esac
+    address=${1%%,*}
+    case "$address" in
+        */*) ;;
+        *) why="has no /prefix on its address"; return 1 ;;
+    esac
+    if ! is_ipv4 "${address%%/*}"; then
+        why="has an address that is not an IPv4 dotted quad"
+        return 1
+    fi
+    prefix=${address#*/}
+    case "$prefix" in
+        ''|*[!0-9]*) why="has a prefix length that is not 1-32"; return 1 ;;
+    esac
+    while :; do
+        case "$prefix" in
+            0?*) prefix=${prefix#0} ;;
+            *) break ;;
+        esac
+    done
+    case "$prefix" in
+        [1-9]|[12][0-9]|3[0-2]) ;;
+        *) why="has a prefix length that is not 1-32"; return 1 ;;
+    esac
+    static_addr="${address%%/*}/$prefix"
+    static_gw=''
+    static_dns=''
+    case "$1" in
+        *,*) rest=${1#*,} ;;
+        *) return 0 ;;
+    esac
+    static_gw=${rest%%,*}
+    if ! is_ipv4 "$static_gw"; then
+        why="has a gateway that is not an IPv4 dotted quad"
+        return 1
+    fi
+    case "$rest" in
+        *,*) static_dns=${rest#*,} ;;
+        *) return 0 ;;
+    esac
+    old_ifs=$IFS
+    IFS=,
+    set -- $static_dns
+    IFS=$old_ifs
+    for dns do
+        if ! is_ipv4 "$dns"; then
+            why="has a DNS server that is not an IPv4 dotted quad"
+            return 1
+        fi
+    done
+}
+
+# core::wifi::check_ssid: at most 32 bytes of UTF-8, with no control character and
+# no whitespace at either end.
+check_ssid() {
+    if [ -z "$1" ]; then
+        why="is empty"
+        return 1
+    fi
+    if [ "${#1}" -gt 32 ]; then
+        why="is longer than 32 bytes"
+        return 1
+    fi
+    check_utf8 "$1" || return 1
+    cps=$(codepoints "$1")
+    if printf '%s\n' "$cps" | grep -Eq "$cp_control"; then
+        why="contains a control character"
+        return 1
+    fi
+    if printf '%s\n' "$cps" | sed -n '1p;$p' | grep -Eq "$cp_space"; then
+        why="starts or ends with whitespace"
+        return 1
+    fi
+}
+
+# core::wifi::check_psk: 8-63 printable ASCII characters with no space at either
+# end, or exactly 64 hex digits naming the raw key.
+check_psk() {
+    if [ "${#1}" -eq 64 ]; then
+        case "$1" in
+            *[!0-9A-Fa-f]*) why="is 64 characters, the raw-key form, but not all hex digits"; return 1 ;;
+        esac
+        return 0
+    fi
+    if [ "${#1}" -lt 8 ]; then
+        why="is shorter than 8 characters"
+        return 1
+    fi
+    if [ "${#1}" -gt 63 ]; then
+        why="is longer than 63 characters"
+        return 1
+    fi
+    case "$1" in
+        *[![:print:]]*) why="has a character outside printable ASCII"; return 1 ;;
+        ' '*|*' ') why="starts or ends with whitespace"; return 1 ;;
+    esac
+}
+
+# core::authkeys::check_authorized_key: a bare `<type> <base64> [comment]` line. The
+# type is one sshd accepts, the blob is padded standard base64 whose own first
+# field names that same type, and the comment has no control character. Private key
+# material and options prefixes are refused.
+check_authorized_key() {
+    case "$1" in
+        *'PRIVATE KEY'*)
+            why="is private key material; authorize the public key (the .pub file) instead"
+            return 1 ;;
+    esac
+    check_utf8 "$1" || return 1
+    cps=$(codepoints "$1")
+    if printf '%s\n' "$cps" | grep -Eq '^0000000[ad]$'; then
+        why="contains a line break; one entry is one line"
+        return 1
+    fi
+    if [ -z "$cps" ]; then
+        why="is empty"
+        return 1
+    fi
+    if printf '%s\n' "$cps" | sed -n '1p;$p' | grep -Eq "$cp_space"; then
+        why="has leading or trailing whitespace"
+        return 1
+    fi
+    key_type=${1%% *}
+    rest=''
+    case "$1" in *' '*) rest=${1#* } ;; esac
+    blob=${rest%% *}
+    comment=''
+    case "$rest" in *' '*) comment=${rest#* } ;; esac
+    if [ -z "$blob" ]; then
+        case "$key_type" in
+            *=*|*,*) why="looks like an options prefix; write a bare '<type> <base64> [comment]' entry" ;;
+            *) why="is not '<type> <base64-key> [comment]'" ;;
+        esac
+        return 1
+    fi
+    case "$key_type" in
+        ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521) ;;
+        sk-ssh-ed25519@openssh.com|sk-ecdsa-sha2-nistp256@openssh.com) ;;
+        *) why="has a key type this image does not authorize (an options prefix is not accepted)"
+           return 1 ;;
+    esac
+    # Whole 4-character groups of the standard alphabet, with '=' only as the last
+    # one or two characters.
+    body=${blob%%=*}
+    case "$body" in
+        *[!A-Za-z0-9+/]*) why="has a key blob that is not valid base64"; return 1 ;;
+    esac
+    case "${blob#"$body"}" in
+        ''|=|==) ;;
+        *) why="has a key blob that is not valid base64"; return 1 ;;
+    esac
+    if [ $((${#blob} % 4)) -ne 0 ]; then
+        why="has a key blob that is not valid base64"
+        return 1
+    fi
+    if [ -n "$comment" ] && printf '%s\n' "$(codepoints "$comment")" | grep -Eq "$cp_control"; then
+        why="has a control character in its comment"
+        return 1
+    fi
+    # The blob's first field: a 32-bit big-endian length, 1-64, then that many bytes
+    # of type name, compared byte for byte with the line's own type.
+    if ! command -v base64 >/dev/null 2>&1; then
+        why="cannot be checked without base64"
+        return 1
+    fi
+    set -- $(printf '%s' "$blob" | base64 -d 2>/dev/null | od -An -v -tu1 -N 68)
+    if [ $# -lt 4 ]; then
+        why="has a key blob that is truncated or not an SSH key encoding"
+        return 1
+    fi
+    len=$(($1 * 16777216 + $2 * 65536 + $3 * 256 + $4))
+    shift 4
+    if [ "$len" -lt 1 ] || [ "$len" -gt 64 ] || [ $# -lt "$len" ]; then
+        why="has a key blob that is truncated or not an SSH key encoding"
+        return 1
+    fi
+    embedded=''
+    while [ "$len" -gt 0 ]; do
+        embedded="$embedded $1"
+        shift
+        len=$((len - 1))
+    done
+    if [ "$embedded" != " $(echo $(printf '%s' "$key_type" | od -An -v -tu1))" ]; then
+        why="has a key blob that does not match its type name; the value looks truncated or re-wrapped"
+        return 1
+    fi
+}
+
+# --- Hostname and keys ----------------------------------------------------------
+
+if [ -n "$seed_hostname" ]; then
+    # A hostname the kernel refuses still fails hostnamectl; /etc/hosts is only
+    # rewritten once the name is actually set, so the two cannot disagree. The check
+    # keeps sed's own metacharacters out of the substitution too.
+    if ! check_hostname "$seed_hostname"; then
+        echo "boot2deb seed: hostname '$(shown "$seed_hostname")' $why; keeping the image's" >&2
+    elif hostnamectl set-hostname "$seed_hostname" 2>/dev/null; then
+        sed -i "s/^127\.0\.1\.1[[:space:]].*/127.0.1.1\t$seed_hostname/" "$root/etc/hosts" 2>/dev/null \
+            || true
+        echo "boot2deb seed: hostname set to $seed_hostname"
+    else
+        echo "boot2deb seed: hostnamectl refused '$seed_hostname'; keeping the image's" >&2
+    fi
+fi
+
+good_keys=''
+if [ -n "$seed_keys" ]; then
+    # Each entry is checked on its own, so one bad paste costs only itself. A refused
+    # entry is not echoed: it can be a pasted private key.
+    n=0
+    while IFS= read -r key; do
+        [ -n "$key" ] || continue
+        n=$((n + 1))
+        if check_authorized_key "$key"; then
+            good_keys="$good_keys$key
+"
+        else
+            echo "boot2deb seed: authorized_key entry $n $why; skipping it" >&2
+        fi
+    done <<EOF
+$seed_keys
+EOF
+fi
+
+if [ -n "$good_keys" ]; then
+    # The default account: UID 1000, which is the account every image creates.
+    account=$(getent passwd 1000 | cut -d: -f1)
+    home=$(getent passwd 1000 | cut -d: -f6)
+    if [ -n "$account" ] && [ -d "$home" ]; then
+        # The account's login group, by name. uutils' chown, Ubuntu's, reads no
+        # group from a trailing colon.
+        group=$(id -gn "$account")
+        install -d -m 700 -o "$account" -g "$group" "$home/.ssh"
+        touch "$home/.ssh/authorized_keys"
+        chown "$account:$group" "$home/.ssh/authorized_keys"
+        chmod 600 "$home/.ssh/authorized_keys"
+        printf '%s' "$good_keys" | while IFS= read -r key; do
+            [ -n "$key" ] || continue
+            grep -qxF -e "$key" "$home/.ssh/authorized_keys" && continue
+            if printf '%s\n' "$key" >> "$home/.ssh/authorized_keys"; then
+                echo "boot2deb seed: authorized an SSH key for $account"
+            else
+                echo "boot2deb seed: could not write $home/.ssh/authorized_keys" >&2
+            fi
+        done
+    else
+        echo "boot2deb seed: no UID-1000 account; skipping SSH keys" >&2
+    fi
+fi
+
+# --- Network ------------------------------------------------------------------
+#
+# Every profile below is mode 600 before it has content: NetworkManager refuses
+# (and the psk must never be) a world-readable profile, and netplan expects 600.
+umask 077
+
+wifi_ok=''
+if [ -n "$seed_wifi_ssid" ]; then
+    if ! check_ssid "$seed_wifi_ssid"; then
+        echo "boot2deb seed: wifi_ssid '$(shown "$seed_wifi_ssid")' $why; skipping the Wi-Fi profile" >&2
+    elif [ -n "$seed_wifi_psk" ] && ! check_psk "$seed_wifi_psk"; then
+        # The passphrase is not echoed.
+        echo "boot2deb seed: wifi_psk $why; skipping the Wi-Fi profile" >&2
+    else
+        wifi_ok=1
+    fi
+fi
+
 static_addr=''
 static_gw=''
 static_dns=''
-if [ -n "$seed_static_ip" ]; then
-    seed_static_ip=$(printf '%s' "$seed_static_ip" | tr -d ' 	')
-    static_addr=${seed_static_ip%%,*}
-    rest=''
-    case "$seed_static_ip" in
-        *,*) rest=${seed_static_ip#*,} ;;
-    esac
-    static_gw=${rest%%,*}
-    case "$rest" in
-        *,*) static_dns=${rest#*,} ;;
-    esac
+if [ -n "$seed_static_ip" ] && ! check_static_ip "$seed_static_ip"; then
+    echo "boot2deb seed: static_ip '$(shown "$seed_static_ip")' $why; skipping it" >&2
+    seed_static_ip=''
 fi
+
+# A string value in a NetworkManager keyfile. GKeyFile reads backslash escapes, so
+# a literal backslash is written doubled; the checks above leave no other character
+# it would misread (no line break, no control, no leading space).
+kf_string() { printf '%s' "$1" | sed 's/\\/\\\\/g'; }
+
+# An SSID value: a string value with its semicolons escaped too, as NetworkManager
+# writes them, so an SSID of digits and semicolons is not read as a list of bytes.
+kf_ssid() { kf_string "$1" | sed 's/;/\\\\;/g'; }
 
 # The [ipv4] section body for a NetworkManager profile: manual with the seeded
 # address when a static_ip is present, DHCP otherwise. NM's keyfile puts the
@@ -96,86 +499,228 @@ nm_ipv4_section() {
     fi
 }
 
-if [ -n "$seed_hostname" ]; then
-    # A hostname the kernel refuses (bad characters, too long) fails hostnamectl;
-    # /etc/hosts is only rewritten once the name is actually set, so the two
-    # cannot disagree.
-    if hostnamectl set-hostname "$seed_hostname" 2>/dev/null; then
-        sed -i "s/^127\.0\.1\.1[[:space:]].*/127.0.1.1\t$seed_hostname/" /etc/hosts 2>/dev/null \
-            || true
-        echo "boot2deb seed: hostname set to $seed_hostname"
-    else
-        echo "boot2deb seed: hostnamectl refused '$seed_hostname'; keeping the image's" >&2
+# The Wi-Fi profile: the seeded network, its passphrase when one was seeded (an
+# open network otherwise), and the seeded address or DHCP.
+wifi_profile() {
+    echo '[connection]'
+    printf 'id=%s\n' "$(kf_string "$seed_wifi_ssid")"
+    printf 'uuid=%s\n' "$uuid"
+    echo 'type=wifi'
+    echo ''
+    echo '[wifi]'
+    echo 'mode=infrastructure'
+    printf 'ssid=%s\n' "$(kf_ssid "$seed_wifi_ssid")"
+    if [ -n "$seed_wifi_psk" ]; then
+        echo ''
+        echo '[wifi-security]'
+        echo 'key-mgmt=wpa-psk'
+        printf 'psk=%s\n' "$(kf_string "$seed_wifi_psk")"
     fi
-fi
+    echo ''
+    echo '[ipv4]'
+    nm_ipv4_section
+    echo ''
+    echo '[ipv6]'
+    echo 'method=auto'
+}
 
-if [ -n "$seed_keys" ]; then
-    # The default account: UID 1000, which is the account every image creates.
-    account=$(getent passwd 1000 | cut -d: -f1)
-    home=$(getent passwd 1000 | cut -d: -f6)
-    if [ -n "$account" ] && [ -d "$home" ]; then
-        install -d -m 700 -o "$account" -g "$account" "$home/.ssh"
-        touch "$home/.ssh/authorized_keys"
-        chown "$account:$account" "$home/.ssh/authorized_keys"
-        chmod 600 "$home/.ssh/authorized_keys"
-        printf '%s' "$seed_keys" | while IFS= read -r key; do
-            [ -n "$key" ] || continue
-            if ! grep -qxF "$key" "$home/.ssh/authorized_keys"; then
-                printf '%s\n' "$key" >> "$home/.ssh/authorized_keys"
-                echo "boot2deb seed: authorized an SSH key for $account"
+# A wired profile with no interface-name matches any ethernet device; the
+# priority puts it ahead of NM's own auto-generated DHCP profile.
+wired_profile() {
+    echo '[connection]'
+    echo 'id=b2d-seed-wired'
+    printf 'uuid=%s\n' "$uuid"
+    echo 'type=ethernet'
+    echo 'autoconnect-priority=1'
+    echo ''
+    echo '[ipv4]'
+    nm_ipv4_section
+    echo ''
+    echo '[ipv6]'
+    echo 'method=auto'
+}
+
+# Install the NetworkManager profile that function $2 renders at path $1. It is
+# written in the directory above the connections directory, where NetworkManager
+# loads no profiles, and renamed into place, so a failed write leaves no partial
+# profile. NetworkManager has no offline check on every NM version an image can
+# contain, so the checks above are the guarantee that the profile parses: every
+# value in it has passed them, and the strings are escaped for GKeyFile.
+install_nm_profile() {
+    uuid=$(cat /proc/sys/kernel/random/uuid) || return 1
+    tmp="${1%/*/*}/.${1##*/}.tmp"
+    if "$2" > "$tmp" && mv -f "$tmp" "$1"; then
+        # Best-effort: NM picks the file up at startup anyway; reload only
+        # matters when it is already running by the time this hook fires.
+        nmcli connection reload 2>/dev/null || true
+        return 0
+    fi
+    rm -f "$tmp"
+    return 1
+}
+
+# The netplan definition: the image's `wired` ID with the static address in place
+# of DHCP.
+netplan_profile() {
+    echo '# Written by the boot2deb seed from its static_ip.'
+    echo 'network:'
+    echo '  version: 2'
+    echo '  ethernets:'
+    echo '    wired:'
+    echo '      dhcp4: false'
+    echo '      addresses:'
+    printf '        - "%s"\n' "$static_addr"
+    if [ -n "$static_gw" ]; then
+        echo '      routes:'
+        echo '        - to: default'
+        printf '          via: "%s"\n' "$static_gw"
+    fi
+    if [ -n "$static_dns" ]; then
+        echo '      nameservers:'
+        echo '        addresses:'
+        printf '%s\n' "$static_dns" | tr ',' '\n' | while IFS= read -r dns; do
+            if [ -n "$dns" ]; then
+                printf '          - "%s"\n' "$dns"
             fi
         done
-    else
-        echo "boot2deb seed: no UID-1000 account; skipping SSH keys" >&2
     fi
-fi
+}
+
+# Pin the wired interfaces through netplan. The image's netplan definition `wired`
+# matches every Ethernet name, so it holds across a rename a device hook makes on
+# this boot. The seeded file reuses its ID, which netplan merges over it: the
+# address replaces DHCP on the same interfaces. Rewritten whole, so a re-run is
+# idempotent.
+#
+# The file is proven before it is installed: `netplan generate` runs against a
+# staging root holding every definition this system has plus the new one, which is
+# the merged configuration `apply` would act on. Its output stays in the staging
+# root; the command also asks udev and systemd to reload, which `apply` does next
+# regardless. Only a profile that generates is installed, and one `netplan apply`
+# then fails on is removed and the image's own definitions applied again, so DHCP
+# stays in effect.
+seed_netplan() {
+    conf="$root/etc/netplan/60-boot2deb-seed.yaml"
+    if ! command -v netplan >/dev/null 2>&1; then
+        echo "boot2deb seed: static_ip set but netplan is not installed; skipping" >&2
+        return 1
+    fi
+    if ! stage=$(mktemp -d); then
+        echo "boot2deb seed: no scratch directory to check the netplan profile in; skipping static_ip" >&2
+        return 1
+    fi
+    for dir in lib/netplan etc/netplan run/netplan; do
+        [ -d "$root/$dir" ] || continue
+        mkdir -p "$stage/$dir"
+        for f in "$root/$dir"/*.yaml; do
+            if [ -f "$f" ]; then cp -p "$f" "$stage/$dir/"; fi
+        done
+    done
+    mkdir -p "$stage/etc/netplan"
+    if ! netplan_profile > "$stage/etc/netplan/60-boot2deb-seed.yaml" \
+        || ! netplan generate --root-dir "$stage" > "$stage/out" 2>&1; then
+        echo "boot2deb seed: netplan refused the static_ip profile; the wired interfaces stay on DHCP" >&2
+        sed 's/^/  netplan: /' "$stage/out" >&2 2>/dev/null
+        rm -rf "$stage"
+        return 1
+    fi
+    if ! { cp "$stage/etc/netplan/60-boot2deb-seed.yaml" "$conf.tmp" && mv -f "$conf.tmp" "$conf"; }; then
+        rm -f "$conf.tmp"
+        rm -rf "$stage"
+        echo "boot2deb seed: could not write $conf; the wired interfaces stay on DHCP" >&2
+        return 1
+    fi
+    if netplan apply > "$stage/out" 2>&1; then
+        rm -rf "$stage"
+        echo "boot2deb seed: pinned the wired interfaces to $static_addr via netplan"
+        return 0
+    fi
+    rm -f "$conf"
+    netplan apply > /dev/null 2>&1 || true
+    echo "boot2deb seed: netplan apply failed on the static_ip profile; removed it, the wired interfaces stay on DHCP" >&2
+    sed 's/^/  netplan: /' "$stage/out" >&2
+    rm -rf "$stage"
+    return 1
+}
+
+# The dhcpcd stanza: the static address scoped to interface $1.
+dhcpcd_stanza() {
+    echo '# boot2deb seed static ip'
+    printf 'interface %s\n' "$1"
+    printf 'static ip_address=%s\n' "$static_addr"
+    if [ -n "$static_gw" ]; then
+        printf 'static routers=%s\n' "$static_gw"
+    fi
+    if [ -n "$static_dns" ]; then
+        printf 'static domain_name_servers=%s\n' "$(printf '%s' "$static_dns" | tr ',' ' ')"
+    fi
+}
+
+# Pin the first wired interface through dhcpcd. dhcpcd has no include directory,
+# so the stanza is appended to the one config file behind a marker that makes a
+# re-run skip instead of stack duplicates. The interface block scopes the address
+# to the first wired interface by name — the boards that ship this stack have
+# exactly one.
+#
+# The stanza goes into a copy that replaces the file in one rename, so a failed
+# write cannot leave dhcpcd half a stanza. dhcpcd has no offline check, so the
+# checks above are the guarantee that it parses. A dhcpcd that does not restart
+# with it gets the original file back.
+seed_dhcpcd() {
+    conf="$root/etc/dhcpcd.conf"
+    if grep -q '^# boot2deb seed static ip$' "$conf"; then
+        echo "boot2deb seed: dhcpcd.conf already contains a seeded static ip; skipping"
+        return 0
+    fi
+    wired=''
+    for path in "$root"/sys/class/net/*; do
+        iface=${path##*/}
+        [ "$iface" = lo ] && continue
+        [ -d "$path/wireless" ] && continue
+        [ -e "$path" ] || continue
+        wired=$iface
+        break
+    done
+    if [ -z "$wired" ]; then
+        echo "boot2deb seed: static_ip set but no wired interface found; skipping" >&2
+        return 1
+    fi
+    if ! { cp -p "$conf" "$conf.b2d-orig" && cp -p "$conf" "$conf.b2d-new" \
+        && dhcpcd_stanza "$wired" >> "$conf.b2d-new" && mv -f "$conf.b2d-new" "$conf"; }; then
+        rm -f "$conf.b2d-new" "$conf.b2d-orig"
+        echo "boot2deb seed: could not write $conf; $wired stays on DHCP" >&2
+        return 1
+    fi
+    # try-restart touches dhcpcd only when it is already running; one that is not
+    # reads the file when it starts.
+    if systemctl try-restart dhcpcd 2>/dev/null; then
+        rm -f "$conf.b2d-orig"
+        echo "boot2deb seed: pinned $wired to $static_addr via dhcpcd"
+        return 0
+    fi
+    mv -f "$conf.b2d-orig" "$conf"
+    systemctl try-restart dhcpcd 2>/dev/null || true
+    echo "boot2deb seed: dhcpcd did not restart with the static_ip stanza; removed it, $wired stays on DHCP" >&2
+    return 1
+}
 
 # Set when a static_ip has been written into some connection's config, so the
 # wired fallback below does not apply it a second time.
 static_ip_done=''
+nmdir="$root/etc/NetworkManager/system-connections"
 
-if [ -n "$seed_wifi_ssid" ]; then
-    # A NetworkManager keyfile — the stack every Wi-Fi-capable image carries.
+if [ -n "$wifi_ok" ]; then
+    # A NetworkManager keyfile — the stack every Wi-Fi-capable image contains.
     # An image without it (a wired-only board) logs and skips: the seed is a
     # request, and "personalize nothing" stays the failure mode. The profile is
     # rewritten whole on a re-run, so re-applying the seed is idempotent.
-    nmdir=/etc/NetworkManager/system-connections
-    if [ -d "$nmdir" ]; then
-        conn="$nmdir/b2d-seed.nmconnection"
-        # NetworkManager wants a connection UUID; the kernel's generator is
-        # always there. Mode 600 before content: NM refuses (and the psk must
-        # never be) a world-readable profile.
-        uuid=$(cat /proc/sys/kernel/random/uuid)
-        umask 077
-        {
-            echo '[connection]'
-            printf 'id=%s\n' "$seed_wifi_ssid"
-            printf 'uuid=%s\n' "$uuid"
-            echo 'type=wifi'
-            echo ''
-            echo '[wifi]'
-            echo 'mode=infrastructure'
-            printf 'ssid=%s\n' "$seed_wifi_ssid"
-            if [ -n "$seed_wifi_psk" ]; then
-                echo ''
-                echo '[wifi-security]'
-                echo 'key-mgmt=wpa-psk'
-                printf 'psk=%s\n' "$seed_wifi_psk"
-            fi
-            echo ''
-            echo '[ipv4]'
-            nm_ipv4_section
-            echo ''
-            echo '[ipv6]'
-            echo 'method=auto'
-        } > "$conn"
-        [ -n "$seed_static_ip" ] && static_ip_done=1
-        # Best-effort: NM picks the file up at startup anyway; reload only
-        # matters when it is already running by the time this hook fires.
-        nmcli connection reload 2>/dev/null || true
+    if [ ! -d "$nmdir" ]; then
+        echo "boot2deb seed: wifi_ssid set but this image has no NetworkManager; skipping" >&2
+    elif install_nm_profile "$nmdir/b2d-seed.nmconnection" wifi_profile; then
+        [ -z "$seed_static_ip" ] || static_ip_done=1
         echo "boot2deb seed: wrote a Wi-Fi profile for '$seed_wifi_ssid'"
     else
-        echo "boot2deb seed: wifi_ssid set but this image has no NetworkManager; skipping" >&2
+        echo "boot2deb seed: could not write the Wi-Fi profile; skipping it" >&2
     fi
 fi
 
@@ -186,66 +731,20 @@ if [ -n "$seed_static_ip" ] && [ -z "$static_ip_done" ]; then
     # host on that network, not on whatever happens to be plugged in.
     if [ -n "$seed_wifi_ssid" ]; then
         echo "boot2deb seed: static_ip rides the Wi-Fi profile, which was not written; skipping" >&2
-    elif [ -d /etc/NetworkManager/system-connections ]; then
-        # A wired profile with no interface-name matches any ethernet device;
-        # the priority puts it ahead of NM's own auto-generated DHCP profile.
-        conn=/etc/NetworkManager/system-connections/b2d-seed-wired.nmconnection
-        uuid=$(cat /proc/sys/kernel/random/uuid)
-        umask 077
-        {
-            echo '[connection]'
-            echo 'id=b2d-seed-wired'
-            printf 'uuid=%s\n' "$uuid"
-            echo 'type=ethernet'
-            echo 'autoconnect-priority=1'
-            echo ''
-            echo '[ipv4]'
-            nm_ipv4_section
-            echo ''
-            echo '[ipv6]'
-            echo 'method=auto'
-        } > "$conn"
-        nmcli connection reload 2>/dev/null || true
-        echo "boot2deb seed: pinned the wired interface to $static_addr"
-    elif [ -f /etc/dhcpcd.conf ]; then
-        # dhcpcd has no include directory, so the stanza is appended to the one
-        # config file behind a marker that makes a re-run skip instead of stack
-        # duplicates. The interface block scopes the address to the first wired
-        # interface by name — the boards that ship this stack have exactly one.
-        if grep -q '^# boot2deb seed static ip$' /etc/dhcpcd.conf; then
-            echo "boot2deb seed: dhcpcd.conf already carries a seeded static ip; skipping"
+    elif [ -d "$nmdir" ]; then
+        if install_nm_profile "$nmdir/b2d-seed-wired.nmconnection" wired_profile; then
+            echo "boot2deb seed: pinned the wired interface to $static_addr"
         else
-            wired=''
-            for path in /sys/class/net/*; do
-                iface=${path##*/}
-                [ "$iface" = lo ] && continue
-                [ -d "$path/wireless" ] && continue
-                wired=$iface
-                break
-            done
-            if [ -n "$wired" ]; then
-                {
-                    echo '# boot2deb seed static ip'
-                    printf 'interface %s\n' "$wired"
-                    printf 'static ip_address=%s\n' "$static_addr"
-                    if [ -n "$static_gw" ]; then
-                        printf 'static routers=%s\n' "$static_gw"
-                    fi
-                    if [ -n "$static_dns" ]; then
-                        printf 'static domain_name_servers=%s\n' \
-                            "$(printf '%s' "$static_dns" | tr ',' ' ')"
-                    fi
-                } >> /etc/dhcpcd.conf
-                # Best-effort, like the NM reload: only matters when dhcpcd
-                # already configured the interface before this hook ran.
-                systemctl try-restart dhcpcd 2>/dev/null || true
-                echo "boot2deb seed: pinned $wired to $static_addr via dhcpcd"
-            else
-                echo "boot2deb seed: static_ip set but no wired interface found; skipping" >&2
-            fi
+            echo "boot2deb seed: could not write the wired profile; the wired interface stays on DHCP" >&2
         fi
+    elif [ -f "$root/etc/netplan/50-boot2deb.yaml" ]; then
+        # Checked before dhcpcd, because an Ubuntu image contains a dhcpcd.conf that
+        # no service there reads.
+        seed_netplan || true
+    elif [ -f "$root/etc/dhcpcd.conf" ]; then
+        seed_dhcpcd || true
     else
-        echo "boot2deb seed: static_ip set but this image has neither NetworkManager nor dhcpcd; skipping" >&2
+        echo "boot2deb seed: static_ip set but this image has no NetworkManager, netplan or dhcpcd; skipping" >&2
     fi
 fi
 

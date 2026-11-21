@@ -107,19 +107,55 @@ const FFMPEG_DEPS: &[&str] = &[
     "libdav1d-dev",
     "libssl-dev",
     "libfreetype-dev",
-    // Build-root only: headers and loader stub for the three Vulkan flags in
+    // Build-root only: headers and loader stub for `--enable-vulkan` in
     // [`BASE_CONFIGURE_FLAGS`]. `libvulkan-dev` is the largest entry in this list by
     // an order of magnitude (~37 MB, nearly all of it the registry XML and the
     // validation headers) and none of it reaches an image.
     "libvulkan-dev",
-    "libplacebo-dev",
-    "libshaderc-dev",
-    // `libshaderc-dev` satisfies `spirv_library`, which is what gives us libplacebo and
-    // `overlay_vulkan`. The shader-compiling filters -- `scale_vulkan`, `bwdif_vulkan`,
-    // `avgblur_vulkan` -- gate on `spirv_compiler` instead, which `check_glslc` probes
-    // for a `glslc` binary at build time. Debian ships that binary in its own package.
+    // The shader compiler FFmpeg's build runs. Every Vulkan filter's shaders are
+    // compiled to SPIR-V when FFmpeg is built, and `./configure` builds none of those
+    // filters unless `check_glslc` finds a `glslc` binary. Debian ships it in its own
+    // package.
     "glslc",
+    // The SPIR-V definitions swscale's Vulkan backend compiles against. Header-only.
+    "spirv-headers",
 ];
+
+/// A library the build links only on the suites that ship a version `./configure`
+/// accepts, with the flag that asks for it and the build-root package it needs.
+///
+/// The suites are enumerated rather than given as a version floor, as a
+/// suite-conditional package's are: whether an archive ships a new enough library
+/// is a fact about that archive, so naming the suite restates the claim whenever one
+/// is added, and boot2deb owns no ordering of releases. A suite that is not named
+/// builds without the library, which is a smaller FFmpeg rather than a failed
+/// configure.
+struct SuiteLib {
+    /// The `./configure` flag, added to [`configure_flags`] on the named suites.
+    flag: &'static str,
+    /// The `-dev` package that satisfies the flag's probe, layered by
+    /// [`layer_packages`] on exactly the same suites.
+    dev: &'static str,
+    /// The suites whose archive ships a version the pinned FFmpeg accepts.
+    suites: &'static [&'static str],
+}
+
+/// The [`SuiteLib`]s, in the order their flags are passed.
+///
+/// `libplacebo` adds `vf_libplacebo`: scale, tone-map, deinterlace and alpha
+/// compositing over the Vulkan context `--enable-vulkan` builds. The pinned FFmpeg
+/// requires 7.351 or later. trixie ships 7.349, so a trixie build has every other
+/// Vulkan filter and no `vf_libplacebo`.
+const SUITE_LIBS: &[SuiteLib] = &[SuiteLib {
+    flag: "--enable-libplacebo",
+    dev: "libplacebo-dev",
+    suites: &["forky", "sid", "resolute"],
+}];
+
+/// The [`SUITE_LIBS`] entries a build on `suite` links.
+fn suite_libs(suite: &str) -> impl Iterator<Item = &'static SuiteLib> + '_ {
+    SUITE_LIBS.iter().filter(move |l| l.suites.contains(&suite))
+}
 
 /// The build-deps the nonfree flavor adds, layered only when this build is one
 /// ([`ResolvedImage::ffmpeg_nonfree`](boot2deb_core::ResolvedImage::ffmpeg_nonfree)).
@@ -213,9 +249,17 @@ fn userspace_layer_packages(trees: &[UserspaceTree]) -> Vec<String> {
 /// `nonfree` is the build's license flavor, and it moves this set in step with the
 /// configure flags. The two flavors differ in what they ask `./configure` for *and* in
 /// what is present for it to find. That is what makes them different builds rather
-/// than the same build described differently.
-pub fn layer_packages(trees: &[UserspaceTree], nonfree: bool, libs: &[FfmpegLib]) -> Vec<String> {
+/// than the same build described differently. `suite` moves it the same way. Some
+/// libraries are linked only on the suites that ship a version `./configure`
+/// accepts. Each is layered on exactly the suites its flag is added on.
+pub fn layer_packages(
+    trees: &[UserspaceTree],
+    nonfree: bool,
+    libs: &[FfmpegLib],
+    suite: &str,
+) -> Vec<String> {
     let mut packages: Vec<String> = FFMPEG_DEPS.iter().map(|p| (*p).to_string()).collect();
+    packages.extend(suite_libs(suite).map(|l| l.dev.to_string()));
     if nonfree {
         packages.extend(NONFREE_DEPS.iter().map(|p| (*p).to_string()));
     }
@@ -291,14 +335,13 @@ fn assert_userspace_depends(
 /// The Rockchip-specific flags are not here; they are decided per build by
 /// [`configure_flags`] from the userspace trees the SoC actually declares.
 ///
-/// The three Vulkan flags are a set, not three independent choices:
-/// - `--enable-vulkan` compiles `libavutil/hwcontext_vulkan.c`, which is where a
-///   V4L2-request DRM PRIME frame becomes importable at all.
-/// - `--enable-libplacebo` adds `vf_libplacebo` — scale, tone-map, deinterlace and
-///   alpha compositing over that context.
-/// - `--enable-libshaderc` supplies `spirv_compiler`/`spirv_library`, without which
-///   `./configure` builds *neither* `scale_vulkan`/`overlay_vulkan` nor swscale's
-///   Vulkan compute backend, regardless of the other two.
+/// `--enable-vulkan` compiles `libavutil/hwcontext_vulkan.c`, which is where a
+/// V4L2-request DRM PRIME frame becomes importable at all, and with it the Vulkan
+/// filters (`scale_vulkan`, `overlay_vulkan` and the rest) and swscale's Vulkan
+/// compute backend. Their shaders are compiled to SPIR-V when FFmpeg is built, by the
+/// `glslc` in [`FFMPEG_DEPS`], so nothing compiles a shader on the board.
+/// `vf_libplacebo` is the one Vulkan path that depends on the suite: it is added per
+/// suite by [`SUITE_LIBS`].
 ///
 /// Linking them costs the image the Vulkan runtime libraries through the deb's
 /// `Depends`, and nothing else: the GPU driver that actually executes the work is an
@@ -328,8 +371,6 @@ const BASE_CONFIGURE_FLAGS: &[&str] = &[
     "--enable-libfreetype",
     "--enable-openssl",
     "--enable-vulkan",
-    "--enable-libplacebo",
-    "--enable-libshaderc",
 ];
 
 /// The `./configure` flags that make the produced binary undistributable, added only
@@ -383,11 +424,21 @@ fn rpath_ldflag() -> String {
 /// ([`ResolvedImage::ffmpeg_nonfree`](boot2deb_core::ResolvedImage::ffmpeg_nonfree)):
 /// it appends [`NONFREE_CONFIGURE_FLAGS`] and is the one input here that is a choice
 /// rather than a consequence of the hardware.
-fn configure_flags(trees: &[UserspaceTree], nonfree: bool, libs: &[FfmpegLib]) -> Vec<String> {
+///
+/// `suite` is the build root's suite, and adds the flag of each [`SUITE_LIBS`] entry
+/// that suite's archive satisfies. [`layer_packages`] reads the same table, so a flag
+/// is never asked for without the package its probe needs.
+fn configure_flags(
+    trees: &[UserspaceTree],
+    nonfree: bool,
+    libs: &[FfmpegLib],
+    suite: &str,
+) -> Vec<String> {
     let mut flags: Vec<String> = BASE_CONFIGURE_FLAGS
         .iter()
         .map(|s| (*s).to_string())
         .collect();
+    flags.extend(suite_libs(suite).map(|l| l.flag.to_string()));
     if nonfree {
         flags.extend(NONFREE_CONFIGURE_FLAGS.iter().map(|s| (*s).to_string()));
     }
@@ -580,7 +631,7 @@ pub fn build_ffmpeg(
     let mut debs = debs;
     debs.extend(opts.extra_debs.iter().cloned());
     let pool = LocalDistsRepo::assemble(&pool_dir, &debs, suite, arch, source_date_epoch, &step)?;
-    let packages = layer_packages(opts.trees, opts.nonfree, opts.libs);
+    let packages = layer_packages(opts.trees, opts.nonfree, opts.libs, suite);
     let packages: Vec<&str> = packages.iter().map(String::as_str).collect();
     let root = sandbox.build_root(
         &BuildRootSpec {
@@ -608,7 +659,7 @@ pub fn build_ffmpeg(
         &tree,
         &binds,
         &build_env,
-        &configure_flags(opts.trees, opts.nonfree, opts.libs),
+        &configure_flags(opts.trees, opts.nonfree, opts.libs, suite),
         &step,
     )?;
     step.progress(55);
@@ -645,7 +696,7 @@ pub fn build_ffmpeg(
         arch,
         &version,
         &depends,
-        &configure_flags(opts.trees, opts.nonfree, opts.libs),
+        &configure_flags(opts.trees, opts.nonfree, opts.libs, suite),
     );
     write_control(&pkg_stage, &control)?;
     let deb_name = format!("{PKG_NAME}_{version}_{arch}.deb");
@@ -760,7 +811,7 @@ pub fn output_manifest(
         pin: lock.patches.as_ref(),
         patches: us_patches,
     };
-    let flags = configure_flags(trees, nonfree, libs);
+    let flags = configure_flags(trees, nonfree, libs, suite);
     // The bytes behind those libraries, from the lock rather than from the staged
     // files: the key has to be computable without materializing anything, and the
     // pin *is* the content hash. A re-cut deb of the same library is a different
@@ -784,7 +835,7 @@ pub fn output_manifest(
         // What was layered over that sandbox, from the same function that stages it.
         // `./configure` is a probe suite, so every entry decides whether a codec is
         // compiled in.
-        .fold_set("build_deps", &layer_packages(trees, nonfree, libs))
+        .fold_set("build_deps", &layer_packages(trees, nonfree, libs, suite))
         .fold_set("ffmpeg_libs", &lib_debs)
         .fold_scalar("base.reference", &ffmpeg.base.reference)
         .fold_scalar("pkg_name", PKG_NAME);
@@ -1331,7 +1382,10 @@ fn control_text(arch: &str, version: &str, depends: &str, flags: &[String]) -> S
         caps.push("* scale_rkrga / vpp_rkrga via librga");
     }
     if has("--enable-vulkan") {
-        caps.push("* Vulkan filters and the libplacebo renderer");
+        caps.push("* Vulkan filters and swscale's Vulkan backend");
+    }
+    if has("--enable-libplacebo") {
+        caps.push("* the libplacebo renderer");
     }
 
     // The synopsis names the hardware paths the flags actually delivered. An ffmpeg
@@ -1362,8 +1416,9 @@ fn control_text(arch: &str, version: &str, depends: &str, flags: &[String]) -> S
 /// The Debian version for the `ffmpeg-rk` deb, derived from the lock the way
 /// u-boot's is: the pinned base `reference` (a leading `v`/`n` tag marker
 /// dropped) plus the short base commit for uniqueness, sanitized to the Debian
-/// upstream-version set ([`build::sanitize_deb_version`], which guarantees a
-/// digit-leading result).
+/// upstream-version set
+/// ([`sanitize_deb_version`](boot2deb_core::version::sanitize_deb_version), which
+/// guarantees a digit-leading result).
 ///
 /// `git describe` is unusable here: the base is fetched depth-1, so it has no
 /// ancestor tags and would fall through to a bare short hash — no ordering, and
@@ -1374,7 +1429,7 @@ fn deb_version(reference: &str, commit: &str) -> String {
         .or_else(|| reference.strip_prefix('n'))
         .unwrap_or(reference);
     let short = &commit[..commit.len().min(12)];
-    build::sanitize_deb_version(&format!("{base}+g{short}"))
+    boot2deb_core::version::sanitize_deb_version(&format!("{base}+g{short}"))
 }
 
 #[cfg(test)]
@@ -1398,6 +1453,10 @@ mod tests {
     /// A build with no prebuilt ffmpeg library — what every case here but the
     /// prebuilt-library tests is.
     const NO_LIBS: &[FfmpegLib] = &[];
+
+    /// The suite most builds here run on, and one whose archive satisfies every
+    /// [`SUITE_LIBS`] entry.
+    const TEST_SUITE: &str = "forky";
 
     /// A tree that ffmpeg links, with its runtime library and its `-dev`. The package
     /// names are the shipped ones: several assertions below are about the *exact* names
@@ -1459,20 +1518,24 @@ mod tests {
     #[test]
     fn configure_flags_follow_the_socs_declared_trees() {
         // Everything declared: the full vendor pipeline.
-        let full = configure_flags(&all_trees(), false, NO_LIBS);
+        let full = configure_flags(&all_trees(), false, NO_LIBS, TEST_SUITE);
         assert!(full.contains(&"--enable-rkmpp".to_string()));
         assert!(full.contains(&"--enable-rkrga".to_string()));
 
         // librga without MPP yields *neither* rkmpp nor rkrga: ffmpeg's own configure
         // rejects rkrga without rkmpp, so asking for it would fail the build. librga is
         // still built and shipped — it just is not an ffmpeg filter.
-        let rga = configure_flags(&rga_only(), false, NO_LIBS);
+        let rga = configure_flags(&rga_only(), false, NO_LIBS, TEST_SUITE);
         assert!(!rga.contains(&"--enable-rkmpp".to_string()));
         assert!(!rga.contains(&"--enable-rkrga".to_string()));
 
         // v4l2-request is unconditional: it needs no vendor userspace, only the
         // kernel's stateless decoder, which is the whole point on a mainline SoC.
-        for flags in [&full, &rga, &configure_flags(&no_trees(), false, NO_LIBS)] {
+        for flags in [
+            &full,
+            &rga,
+            &configure_flags(&no_trees(), false, NO_LIBS, TEST_SUITE),
+        ] {
             assert!(flags.contains(&"--enable-v4l2-request".to_string()));
         }
     }
@@ -1484,11 +1547,40 @@ mod tests {
     fn every_build_decodes_av1_in_software() {
         for nonfree in [false, true] {
             for trees in [all_trees(), rga_only(), no_trees()] {
-                let flags = configure_flags(&trees, nonfree, NO_LIBS);
+                let flags = configure_flags(&trees, nonfree, NO_LIBS, TEST_SUITE);
                 assert!(flags.contains(&"--enable-libdav1d".to_string()));
             }
         }
         assert!(FFMPEG_DEPS.contains(&"libdav1d-dev"));
+    }
+
+    /// A suite-conditional library moves its flag and its package together, and only
+    /// on the suites that name it.
+    ///
+    /// trixie's `libplacebo` is older than the pinned FFmpeg accepts, so asking for it
+    /// there fails `./configure`, and layering its headers without the flag would make
+    /// the build's inputs describe a binary it did not produce. Every build keeps the
+    /// rest of the Vulkan set, and none asks for a flag the base no longer knows.
+    #[test]
+    fn libplacebo_is_linked_only_on_the_suites_that_ship_a_new_enough_one() {
+        let placebo = "--enable-libplacebo".to_string();
+        let dev = "libplacebo-dev".to_string();
+        for suite in ["forky", "sid", "resolute"] {
+            assert!(configure_flags(&all_trees(), false, NO_LIBS, suite).contains(&placebo));
+            assert!(layer_packages(&all_trees(), false, NO_LIBS, suite).contains(&dev));
+        }
+        let trixie = configure_flags(&all_trees(), false, NO_LIBS, "trixie");
+        assert!(!trixie.contains(&placebo));
+        assert!(!layer_packages(&all_trees(), false, NO_LIBS, "trixie").contains(&dev));
+
+        for suite in ["forky", "trixie"] {
+            let flags = configure_flags(&all_trees(), false, NO_LIBS, suite);
+            assert!(flags.contains(&"--enable-vulkan".to_string()));
+            assert!(!flags.iter().any(|f| f == "--enable-libshaderc"));
+            let packages = layer_packages(&all_trees(), false, NO_LIBS, suite);
+            assert!(packages.contains(&"glslc".to_string()));
+            assert!(packages.contains(&"spirv-headers".to_string()));
+        }
     }
 
     /// The default build is redistributable, and it takes an explicit ask to make one
@@ -1501,7 +1593,7 @@ mod tests {
     /// left to the flag list being read correctly.
     #[test]
     fn the_default_flavor_is_free_and_the_nonfree_flags_move_together() {
-        let free = configure_flags(&all_trees(), false, NO_LIBS);
+        let free = configure_flags(&all_trees(), false, NO_LIBS, TEST_SUITE);
         for flag in NONFREE_CONFIGURE_FLAGS {
             assert!(
                 !free.contains(&(*flag).to_string()),
@@ -1517,7 +1609,7 @@ mod tests {
         // ffmpeg's configure rejects `--enable-libfdk-aac` against `--enable-gpl`
         // without `--enable-nonfree`, so a flavor including one and not the other
         // does not configure at all.
-        let nonfree = configure_flags(&all_trees(), true, NO_LIBS);
+        let nonfree = configure_flags(&all_trees(), true, NO_LIBS, TEST_SUITE);
         for flag in NONFREE_CONFIGURE_FLAGS {
             assert!(nonfree.contains(&(*flag).to_string()));
         }
@@ -1527,8 +1619,8 @@ mod tests {
         // not disturb what the SoC's declared trees derive.
         for trees in [all_trees(), rga_only(), no_trees()] {
             let (free, nonfree) = (
-                configure_flags(&trees, false, NO_LIBS),
-                configure_flags(&trees, true, NO_LIBS),
+                configure_flags(&trees, false, NO_LIBS, TEST_SUITE),
+                configure_flags(&trees, true, NO_LIBS, TEST_SUITE),
             );
             for flag in ["--enable-rkmpp", "--enable-rkrga", "--enable-v4l2-request"] {
                 assert_eq!(
@@ -1548,8 +1640,8 @@ mod tests {
     /// probe. Asserted from the same constants both sides read.
     #[test]
     fn the_license_flavor_moves_the_build_deps_with_the_flags() {
-        let free = layer_packages(&all_trees(), false, NO_LIBS);
-        let nonfree = layer_packages(&all_trees(), true, NO_LIBS);
+        let free = layer_packages(&all_trees(), false, NO_LIBS, TEST_SUITE);
+        let nonfree = layer_packages(&all_trees(), true, NO_LIBS, TEST_SUITE);
         for pkg in NONFREE_DEPS {
             assert!(
                 !free.contains(&(*pkg).to_string()),
@@ -1561,7 +1653,7 @@ mod tests {
         // The userspace half is untouched by the license axis, as in the flags.
         assert_eq!(
             userspace_layer_packages(&all_trees()).len(),
-            free.len() - FFMPEG_DEPS.len()
+            free.len() - FFMPEG_DEPS.len() - suite_libs(TEST_SUITE).count()
         );
     }
 
@@ -1572,7 +1664,8 @@ mod tests {
         // `librga2` in its Depends rejects a correct build, and layering librga-dev
         // puts headers in the root that no `./configure` probe reads.
         let rga = rga_only();
-        assert!(!configure_flags(&rga, false, NO_LIBS).contains(&"--enable-rkrga".to_string()));
+        assert!(!configure_flags(&rga, false, NO_LIBS, TEST_SUITE)
+            .contains(&"--enable-rkrga".to_string()));
         assert!(userspace_dep_prefixes(&rga).is_empty());
         assert!(userspace_layer_packages(&rga).is_empty());
         assert!(required_runtime_depends(&rga, NO_LIBS).is_empty());
@@ -1654,7 +1747,7 @@ mod tests {
         // suite's own FFmpeg, so a global search path would shadow it system-wide.
         let want = "--extra-ldflags=-Wl,-rpath,/opt/ffmpeg-rk/lib".to_string();
         for trees in [all_trees(), rga_only(), no_trees()] {
-            assert!(configure_flags(&trees, false, NO_LIBS).contains(&want));
+            assert!(configure_flags(&trees, false, NO_LIBS, TEST_SUITE).contains(&want));
         }
         // The flag must name the same prefix the tree installs to, or the objects
         // would resolve against a directory the deb never ships.
@@ -1791,6 +1884,8 @@ mod tests {
                 source: "ks".into(),
                 reference: "v".into(),
                 commit: "kc".into(),
+                revision: 1,
+                config_sha256: "d".repeat(64),
             }),
             patches: Some(PatchesPin {
                 series: vec!["rk3588-accel".into()],
@@ -1802,8 +1897,11 @@ mod tests {
                 source: "us".into(),
                 reference: "v".into(),
                 commit: "uc".into(),
+                revision: 1,
+                config_sha256: "9".repeat(64),
             }),
             uboot_patches: None,
+            tfa: None,
             userspace: vec![
                 named_pin("mpp", git("m")),
                 named_pin("librga", git("r")),
@@ -1821,7 +1919,10 @@ mod tests {
                 source_date_epoch: 1_790_347_034,
             }),
             blobs: Some(BlobsPin {
-                atf: "a".into(),
+                source: "https://example.invalid/rkbin.git".into(),
+                reference: "master".into(),
+                commit: "c".repeat(40),
+                atf: Some("a".into()),
                 tpl: "t".into(),
                 bl32: None,
             }),
@@ -1970,12 +2071,12 @@ mod tests {
             flag: "--enable-libdavs2".into(),
             links: vec!["libdavs2-16".into(), "libdavs2-dev".into()],
         }];
-        let flags = configure_flags(&all_trees(), false, &libs);
+        let flags = configure_flags(&all_trees(), false, &libs, TEST_SUITE);
         assert!(flags.contains(&"--enable-libdavs2".to_string()));
 
         // Both halves are layered: a `-dev` alone gives headers and a `.pc` file with
         // no `shlibs`, and the dependency is then dropped rather than failing.
-        let packages = layer_packages(&all_trees(), false, &libs);
+        let packages = layer_packages(&all_trees(), false, &libs, TEST_SUITE);
         assert!(packages.contains(&"libdavs2-16".to_string()));
         assert!(packages.contains(&"libdavs2-dev".to_string()));
 
@@ -2103,7 +2204,7 @@ mod tests {
             "arm64",
             "8.1-19-g942418aa06",
             "librockchip-mpp1, librga2, libc6",
-            &configure_flags(&all_trees(), false, NO_LIBS),
+            &configure_flags(&all_trees(), false, NO_LIBS, TEST_SUITE),
         );
         assert!(c.contains("Package: ffmpeg-rk"));
         assert!(c.contains("Version: 8.1-19-g942418aa06"));
@@ -2124,7 +2225,7 @@ mod tests {
             "arm64",
             "1.0",
             "libc6",
-            &configure_flags(&rga_only(), false, NO_LIBS),
+            &configure_flags(&rga_only(), false, NO_LIBS, TEST_SUITE),
         );
         assert!(rga.contains("Description: FFmpeg with V4L2 stateless hardware decode\n"));
         assert!(rga
@@ -2137,7 +2238,7 @@ mod tests {
             "arm64",
             "1.0",
             "libc6",
-            &configure_flags(&all_trees(), false, NO_LIBS),
+            &configure_flags(&all_trees(), false, NO_LIBS, TEST_SUITE),
         );
         assert!(full
             .contains("Description: FFmpeg with V4L2 stateless decode and Rockchip MPP encode\n"));
@@ -2149,7 +2250,7 @@ mod tests {
             "arm64",
             "1.0",
             "libc6",
-            &configure_flags(&no_trees(), false, NO_LIBS),
+            &configure_flags(&no_trees(), false, NO_LIBS, TEST_SUITE),
         );
         assert!(none.contains("Description: FFmpeg with V4L2 stateless hardware decode\n"));
         assert!(!none.contains("rkmpp"));

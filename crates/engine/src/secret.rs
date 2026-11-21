@@ -116,9 +116,110 @@ pub(crate) fn crypt_password(pass: &str) -> Result<String, EngineError> {
     Ok(hash)
 }
 
+/// Write `contents` to `path` readable and writable by its owner only, replacing any file
+/// there.
+///
+/// The file is created private rather than made private afterwards. A temporary file in
+/// the same directory is created exclusively at mode `0600`, and set to it explicitly so
+/// no umask widens it. It is written, synced, and renamed over `path`. At no moment are
+/// the contents readable by anyone else. A reader of `path` sees the old file or the new
+/// one, never a partial write. A symlink at `path` is replaced, not followed.
+///
+/// # Errors
+///
+/// [`EngineError::Io`] when the directory cannot be written or the rename fails. The
+/// temporary file is removed on every failure after it was created.
+pub fn write_private(path: &Path, contents: &[u8]) -> Result<(), EngineError> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut suffix = [0u8; 6];
+    fill_random(&mut suffix)?;
+    let tmp = dir.join(format!(
+        ".{name}.{}.{}.partial",
+        std::process::id(),
+        crate::blobs::hex(&suffix)
+    ));
+    let written = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        file.write_all(contents)?;
+        file.sync_all()?;
+        std::fs::rename(&tmp, path)
+    })();
+    written.map_err(|s| {
+        let _ = std::fs::remove_file(&tmp);
+        EngineError::io(path, s)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A private file is owner-only however permissive the process umask is, and it
+    /// replaces whatever was at the path rather than writing through it: a symlink there
+    /// is not followed, and the file it pointed at keeps its contents and mode.
+    ///
+    /// The umask is process-wide, so the write runs in a child of this test binary
+    /// started under `umask 000`, which leaves the other tests' umask alone.
+    #[test]
+    fn a_private_file_is_owner_only_under_a_permissive_umask() {
+        use std::os::unix::fs::PermissionsExt;
+        const CHILD: &str = "BOOT2DEB_TEST_WRITE_PRIVATE";
+        if let Some(path) = std::env::var_os(CHILD) {
+            write_private(Path::new(&path), b"secret\n").unwrap();
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("x.credentials.toml");
+        let outside = tmp.path().join("outside");
+        std::fs::write(&outside, b"public\n").unwrap();
+        std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::os::unix::fs::symlink(&outside, &path).unwrap();
+
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(
+                "umask 000 && exec \"$0\" --exact \
+                 secret::tests::a_private_file_is_owner_only_under_a_permissive_umask --quiet",
+            )
+            .arg(std::env::current_exe().unwrap())
+            .env(CHILD, &path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "the child write failed");
+
+        let meta = std::fs::symlink_metadata(&path).unwrap();
+        assert!(meta.file_type().is_file(), "the symlink was replaced");
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::read(&path).unwrap(), b"secret\n");
+        let kept = std::fs::metadata(&outside).unwrap();
+        assert_eq!(std::fs::read(&outside).unwrap(), b"public\n");
+        assert_eq!(kept.permissions().mode() & 0o777, 0o644);
+        let leftovers = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".partial")
+            })
+            .count();
+        assert_eq!(leftovers, 0);
+    }
 
     /// The length the config asked for is the length that comes out, across the range
     /// resolution admits and at both of its ends — the generator refills its random

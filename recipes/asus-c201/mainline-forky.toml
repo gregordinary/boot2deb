@@ -13,7 +13,7 @@ layout     = "combined"
 image_size = "2G"
 
 # The last pin that booted was v7.1.3, so this one has not been on the board. The pin is
-# v7.3, two generations on, and the `rk3288-fixes` series applies to all of it
+# v7.3.3, two generations on, and the `rk3288-fixes` series applies to all of it
 # unchanged. What those generations move on the paths this board reaches:
 #
 # `analogix_dp` — the eDP the panel hangs off — changes in both. 7.2 fixes a shift
@@ -47,4 +47,4 @@ image_size = "2G"
 # pin boots.
 [support]
 status = "expected"
-date   = "2026-10-19"
+date   = "2026-11-07"

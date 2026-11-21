@@ -2,9 +2,9 @@
 //! [`boot2deb_engine::tryboot`] for what the run asserts and how the guest is
 //! driven.
 //!
-//! This module handles the config half. It locates the recipe's image artifact and
-//! provenance manifest, says where the fixture root is provisioned from, and reports
-//! the result.
+//! This module handles the config half. It locates the recipe's image artifact through
+//! the point's artifact inventory, and the password in the image's credential document.
+//! It says where the fixture root is provisioned from, and reports the result.
 
 use crate::args::TryArgs;
 use crate::fsutil::absolutize;
@@ -43,31 +43,62 @@ pub(crate) fn run(
     );
 
     // The artifact that contains the rootfs — on a split build the boot image is
-    // not bootable under `-M virt` and is not what `try` tests.
+    // not bootable under `-M virt` and is not what `try` tests. Taken through the
+    // point's artifact inventory: the image stage's entry for the current lock and
+    // layout, and the file's bytes as that entry records them.
     let role = boot2deb_core::press::roles(&resolved)
         .into_iter()
         .find(|r| r.contains_rootfs())
         .expect("an image build has a rootfs-containing artifact");
-    let image = super::press::find_artifact(&out_dir, &stem, role)?;
-
-    // The generated password is recorded in the provenance manifest, which stays with
-    // the build — `try` authenticates with it, which is the assertion that it
-    // works.
-    let prov_path = out_dir.join(format!("{stem}.provenance.toml"));
-    let prov_text = std::fs::read_to_string(&prov_path).map_err(|e| {
+    let inventory = crate::inventory::load(&out_dir, &stem)?;
+    let entry = crate::inventory::current(
+        &inventory,
+        boot2deb_core::inventory::Stage::Image,
+        &crate::inventory::lock_digest(root, recipe)?,
+        &out_dir,
+        recipe,
+    )?;
+    if entry.layout != Some(resolved.layout) {
+        return Err(format!(
+            "the build laid the image out {}, and the recipe resolves {} — rebuild it",
+            entry
+                .layout
+                .map_or_else(|| "with no recorded layout".to_string(), |l| l.to_string()),
+            resolved.layout
+        )
+        .into());
+    }
+    let row = entry.disk_image(role).ok_or_else(|| {
         format!(
-            "no provenance manifest at {} ({e}) — `try` logs in with the generated \
-             first-boot password recorded there; run `boot2deb build {recipe}` first",
-            prov_path.display()
+            "the build published no {} — run `boot2deb build {recipe}`",
+            role.describe()
         )
     })?;
-    let credentials = boot2deb_core::provenance::manifest_credentials(
-        &prov_text,
-        &prov_path.display().to_string(),
-    )
-    .map_err(|e| {
-        format!("{e} — if this manifest is from an earlier build, rebuild: boot2deb build {recipe}")
+    let image = crate::inventory::verified(&out_dir, row)?;
+
+    // `try` logs in with the generated password, which is the assertion that it works.
+    // It is in the image's private credential document and nowhere else.
+    let cred_path = out_dir.join(boot2deb_core::credential::credential_name(&stem));
+    let cred_text = std::fs::read_to_string(&cred_path).map_err(|e| {
+        format!(
+            "no credential document at {} ({e}) — `try` logs in with the generated \
+             first-boot password recorded there; run `boot2deb build {recipe}` first",
+            cred_path.display()
+        )
     })?;
+    let credentials = boot2deb_core::credential::FirstBootCredential::from_toml_str(
+        &cred_text,
+        &cred_path.display().to_string(),
+    )?;
+    if credentials.image != role.file_name(&stem) {
+        return Err(format!(
+            "{} is the password for {}, not for the {} — rebuild: boot2deb build {recipe}",
+            cred_path.display(),
+            credentials.image,
+            role.describe()
+        )
+        .into());
+    }
 
     // Where the fixture root is provisioned from. It is the image's own suite and
     // architecture, resolved against the same archive and cached in the same download
@@ -88,11 +119,17 @@ pub(crate) fn run(
         let fixture = tryboot::fixture_kernel(
             &tryboot::FixtureSpec {
                 arch: resolved.arch,
+                kernel: tryboot::fixture_package(&resolved.distro, resolved.arch)?,
                 archive: &archive,
                 components: &resolved.distro.components,
                 keyring: &keyring,
                 deb_cache: &deb_cache,
                 scratch_dir: &work_dir,
+                // The firmware the UEFI phase boots an efi image's ESP under.
+                uefi: resolved_image
+                    .loader
+                    .as_ref()
+                    .is_some_and(|l| l.efi().is_some()),
             },
             &try_dir.join("fixture"),
             args.refresh_fixture,
@@ -128,6 +165,12 @@ pub(crate) fn run(
     let report = tryboot::try_boot(&opts, &sink)?;
 
     println!("try {recipe}: PASS");
+    if let Some(uefi) = &report.uefi {
+        println!(
+            "  UEFI boot    firmware -> GRUB (removable path) -> Linux {} running ({})",
+            uefi.kernel, uefi.cpu
+        );
+    }
     println!(
         "  first boot   {}, first-boot completed, selftest: {}",
         report.first.state, report.first.selftest

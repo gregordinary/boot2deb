@@ -40,11 +40,24 @@ default_user = "ubuntu"
 # recipe may pick initramfs-tools instead.
 initramfs_generator = "dracut"
 
+# The client ubuntu-minimal depends on. It keeps Ubuntu's NTS pools, the base layer's
+# `ntp_servers` are added beside them in /etc/chrony/sources.d, and chrony-wait holds
+# time-sync.target until the first synchronization, for 45 seconds at most.
+time_client = "chrony"
+
 # The important set already includes ubuntu-minimal and systemd-resolved, and
-# ubuntu-minimal depends on netplan and chrony. Nothing beyond the base set is named
-# here.
+# ubuntu-minimal depends on netplan. This layer's overlay/ tree configures netplan to
+# bring up the wired interfaces through systemd-networkd. Nothing beyond the base set is
+# named here.
 packages = []
 exclude = []
+
+# The kernel `boot2deb try` boots a QEMU `virt` guest with. linux-image-virtual is
+# Ubuntu's metapackage for virtual machines: the generic kernel and its modules,
+# without the linux-firmware package linux-image-generic also pulls in. Only arm64 is
+# named, since no Ubuntu image here is built for another architecture.
+[virt_kernels]
+arm64 = "linux-image-virtual"
 
 # The pockets beside the release one, in the order the image's apt sources list them,
 # which is the order a stock install writes. A build resolves against every one of

@@ -44,6 +44,7 @@ rather than a package:
 [image]
 device = "turing-rk1"
 boot_method = "rockchip-rkbin"
+bl31 = "rkbin"
 ...
 
 [kernel]
@@ -73,6 +74,14 @@ the same board and take different profiles. That is why they are separate build 
 The field is absent under a boot method that has no board profile, rather than being an
 empty string a reader would have to special-case.
 
+## `bl31` names the firmware under the kernel
+
+On a board whose bootloader boot2deb builds, `bl31` says which BL31 that bootloader packs:
+`rkbin`, Rockchip's prebuilt one, or `tfa`, Trusted Firmware-A built from source. Both
+answer the same calls from the kernel. A reader holding only the rootfs cannot tell them
+apart, and on a `split` image the bootloader is on another medium entirely. The field is
+absent where the firmware is the board's own.
+
 ## `kernel.flavor` decides how a kernel upgrade arrives
 
 `distro-package` means the kernel comes from the Debian mirror and an upgrade is
@@ -85,6 +94,15 @@ to put a kernel on this system needs to know which.
 Under `layout = "split"` the boot payload and the root filesystem live on **different
 media** — u-boot on the eMMC, the OS on NVMe. A reader that finds this rootfs with no
 bootloader beside it is looking at an expected state, not a fault.
+
+## `loader` says where the boot configuration lives
+
+`loader` is `extlinux` or `efi`, and absent on a depthcharge board, whose firmware
+loads the kernel itself. Under `extlinux` the boot configuration is
+`/boot/extlinux/extlinux.conf` on this rootfs. Under `efi` it is
+`/boot/grub/grub.cfg`. The loader and the board DTB are then on the EFI system
+partition beside the rootfs, which the board mounts at `/boot/efi`. A reader looking
+at the rootfs alone finds `/boot/efi` empty, which is the expected state.
 
 ## `pressed` marks a derived image
 

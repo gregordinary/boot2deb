@@ -2,11 +2,16 @@
 //! `target/sbom/`, where CI validates them against the published JSON schemas.
 //!
 //! An integration test rather than a unit one for two reasons. It composes only the
-//! public API — resolve a recipe, read its lock and its committed solved manifest,
-//! assemble a provenance manifest, render — which is the same path a build takes, so
-//! a document that renders here is one a build would produce rather than one a
-//! hand-written fixture allows. And the schema check needs the documents on disk, so
-//! something has to write them.
+//! public API — resolve a recipe, read its lock and a solved manifest, assemble a
+//! provenance manifest, render — which is the same path a build takes, so a document
+//! that renders here is one a build would produce rather than one a hand-written
+//! fixture allows. And the schema check needs the documents on disk, so something has
+//! to write them.
+//!
+//! The solved manifest is `tests/fixtures/turing-rk1-media-accel-forky.pkgs.lock`, the
+//! one a build of this recipe published. A recipe's lock does not pin its solved set,
+//! since a testing suite moves daily, so the real package set this test needs is kept
+//! here as a fixture.
 //!
 //! The unit tests beside each renderer assert the *content*: which fields contain what,
 //! how identifiers are formed, what the relationship graph claims. This asserts the
@@ -66,7 +71,6 @@ fn facts<'a>(
         plan_sha256: "0".repeat(64).leak(),
         archives,
         user: "debian",
-        password: "not-a-real-password",
         builder_version: env!("CARGO_PKG_VERSION"),
         cage_version: "0.4.4",
         builder_commit: None,
@@ -134,12 +138,13 @@ fn both_formats_render_from_the_shipped_configuration() {
     let build = resolve_recipe(&root, RECIPE, &Overrides::default()).expect("the recipe resolves");
     let lock = root.lock(RECIPE).expect("its lock is committed");
 
-    // The committed solved manifest beside the lock — a real 200-package set, so the
-    // documents are exercised against the versions and digests Debian actually serves
-    // rather than against two invented rows.
+    // A solved manifest a build of this recipe published — a real package set of
+    // nearly 300, so the documents are exercised against the versions and digests
+    // Debian actually serves rather than against two invented rows.
     let pin = lock.rootfs.as_ref().expect("an image build pins a rootfs");
-    let manifest_path = repo_root().join("recipes/turing-rk1").join(&pin.manifest);
-    let text = std::fs::read_to_string(&manifest_path).expect("the manifest is committed");
+    let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/turing-rk1-media-accel-forky.pkgs.lock");
+    let text = std::fs::read_to_string(&manifest_path).expect("the fixture manifest exists");
     let packages = manifest::parse(&text, &manifest_path.display().to_string()).expect("it parses");
     assert!(
         packages.len() > 100,

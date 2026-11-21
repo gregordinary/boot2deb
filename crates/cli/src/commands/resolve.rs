@@ -9,7 +9,7 @@
 //! committing it to config. [`unbuildable_note`] closes the gap that opens, by saying
 //! so at the moment a resolution names a point only config can reach.
 
-use crate::config::{preflight_config, resolve};
+use crate::config::{kernel_config_sha256, preflight_config, resolve};
 use crate::render::print_build;
 use boot2deb_core::model::Overrides;
 use boot2deb_core::ConfigRoot;
@@ -27,7 +27,7 @@ pub(crate) fn run(
     if json {
         println!("{}", serde_json::to_string_pretty(&build)?);
     } else {
-        print_build(&build);
+        print_build(&build, kernel_config_sha256(root, &build)?.as_deref());
         // After the printout, like the preflight below: the resolved values are what
         // the advice is about, so they should already be on screen.
         if let Some(advice) = advice {

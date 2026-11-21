@@ -20,8 +20,10 @@ use crate::render::{
 };
 use crate::timing::Timeline;
 use crate::workdir::mark_work_dir;
+use boot2deb_core::inventory::{role, Stage as Published, StageEntry};
 use boot2deb_core::lock::{SnapshotMode, SnapshotPin};
 use boot2deb_core::model::{ExtraDebTarget, Overrides, ResolvedBoot, ResolvedBuild};
+use boot2deb_core::press::ArtifactRole;
 use boot2deb_core::series::Scope;
 use boot2deb_core::{resolve_recipe, ConfigRoot};
 use boot2deb_engine::build::{app, ffmpeg, kernel, kmod, uboot, userspace, BuildEnv};
@@ -55,6 +57,7 @@ pub(crate) fn run_many(
         ("--feature", !args.features.is_empty()),
         ("--kernel-src", args.kernel_src.is_some()),
         ("--uboot-src", args.uboot_src.is_some()),
+        ("--tfa-src", args.tfa_src.is_some()),
         ("--userspace-src", !args.userspace_srcs.is_empty()),
         ("--ffmpeg-base-src", args.ffmpeg_base_src.is_some()),
         ("--kmod-src", !args.kmod_srcs.is_empty()),
@@ -291,6 +294,10 @@ fn run_point(
             .unwrap_or_else(|| work_dir.join("artifacts")),
     );
     *record = Some(RecordFile::start(&out_dir, &stem, recipe, args.stage)?);
+    // The generation every artifact this run publishes belongs to, read once at
+    // admission: the artifact inventory binds each stage's files to it, and a consumer
+    // takes them only under the same lock ([`boot2deb_core::inventory`]).
+    let lock_sha256 = crate::inventory::lock_digest(root, recipe)?;
     // Resolved before any work: a contradictory `--compress` is an argument error,
     // and discovering it after a multi-hour compile would waste the whole build.
     let compress = crate::args::image_compression(&args.compress)?;
@@ -305,7 +312,7 @@ fn run_point(
     }
     // Checked here for the same reason, and it is the one preflight whose failure is
     // otherwise invisible until the end: a stale binary compiles a perfectly good image
-    // and then stamps it with a commit that is not what ran. Two `git` reads now, or a
+    // and then stamps it with a commit that is not what ran. A few `git` reads now, or a
     // wrong provenance record discovered after the compiles are paid for.
     let freshness = crate::builder::freshness(root);
     if freshness.is_stale() && !args.allow_stale_builder {
@@ -340,6 +347,19 @@ fn run_point(
     // (kernel id, patch series, suite, extra_debs) must still match a fresh resolve,
     // or the build would mix new resolved axes with stale pins.
     boot2deb_engine::pins::check_lock_consistency(&lock, &resolved)?;
+    // The kernel's configuration inputs live in the config tree rather than in a pin,
+    // so they are compared by digest: a changed fragment under the same revision would
+    // build a kernel apt could not tell from the one the lock names.
+    boot2deb_engine::pins::check_kernel_config(
+        &lock,
+        crate::config::kernel_config_sha256(root, &resolved)?.as_deref(),
+    )?;
+    // Likewise the u-boot package's: a defconfig, offset or board description that moved
+    // under the same revision would archive a package apt could not tell from the last.
+    boot2deb_engine::pins::check_uboot_config(
+        &lock,
+        boot2deb_engine::pins::uboot_config_digest(&resolved).as_deref(),
+    )?;
     // Validate the cheap local config invariants (image geometry, kernel-fragment
     // and apt-keyring existence) up front, so a bad layout or a missing file fails
     // before any stage runs rather than deep in the pipeline.
@@ -396,11 +416,11 @@ fn run_point(
     // artifact dir before the compile stages publish into it. No-op when the
     // dir does not exist yet.
     boot2deb_engine::gc::sweep_stale_temps(&out_dir);
-    let blobs_dir = args.blobs_dir.clone().unwrap_or_else(|| {
-        let rel = format!("blobs/{}", resolved.soc.as_str());
-        root.find_asset(&rel)
-            .unwrap_or_else(|| root.path().join(rel))
-    });
+    let rkbin_cache = crate::config::rkbin_cache(root);
+    let blobs = match &args.blobs_dir {
+        Some(dir) => uboot::BlobSource::Dir(dir),
+        None => uboot::BlobSource::Fetch(&rkbin_cache),
+    };
     // Which compile nodes this build even has. Both are properties of the resolved
     // build, not of the stage flags: a distro-package kernel is installed from the
     // mirror rather than compiled, and a board whose firmware is its own (depthcharge)
@@ -460,6 +480,15 @@ fn run_point(
         resolved
             .rkbin_boot()
             .map(|b| b.uboot_source.clone())
+            .unwrap_or_default()
+    });
+    // Read only by a build point whose BL31 is TF-A; empty otherwise, like the
+    // u-boot source on a board that builds no u-boot.
+    let tfa_src = args.tfa_src.clone().unwrap_or_else(|| {
+        resolved
+            .rkbin_boot()
+            .and_then(|b| b.bl31.tfa())
+            .map(|t| t.git.clone())
             .unwrap_or_default()
     });
     // The userspace/ffmpeg clone sources default to the resolved SoC-layer URLs, but
@@ -873,10 +902,15 @@ fn run_point(
                 resolved.boot_method
             ),
             run: Box::new(|_state: &mut BuildState| {
+                // Nothing this stage published before is current until it finishes.
+                crate::inventory::begin(&out_dir, &stem, Published::Uboot)?;
+                // A TF-A BL31 is built inside this stage, as the input u-boot packs, and
+                // only when u-boot itself is not restored from the artifact cache.
                 let opts = uboot::UbootOptions {
                     source: &uboot_src,
                     patches: uboot_patches,
-                    blobs_dir: &blobs_dir,
+                    tfa_source: &tfa_src,
+                    blobs,
                     work_dir: &work_dir,
                     cross: &cross,
                     out_dir: &out_dir,
@@ -903,6 +937,16 @@ fn run_point(
                     std::slice::from_ref(&artifacts.deb),
                     resolved.arch,
                 )?;
+                let mut published = vec![
+                    crate::inventory::hashed(&artifacts.idbloader, role::IDBLOADER)?,
+                    crate::inventory::hashed(&artifacts.uboot_itb, role::UBOOT_ITB)?,
+                    crate::inventory::hashed(&artifacts.deb, role::UBOOT_DEB)?,
+                ];
+                if let Some(m) = &artifacts.maskrom {
+                    published.push(crate::inventory::hashed(&m.usb471, role::USB471)?);
+                    published.push(crate::inventory::hashed(&m.usb472, role::USB472)?);
+                    published.push(crate::inventory::hashed(&m.loader, role::MASKROM_LOADER)?);
+                }
                 // A uboot-only build also emits a standalone, directly-flashable
                 // bootloader image (`<stem>-boot.img`) — the eMMC/SPI medium for a split
                 // install whose OS lives on another disk. Emitted for an explicit
@@ -920,7 +964,27 @@ fn run_point(
                         &sink,
                     )?;
                     emit_artifact(&sink, "bootloader-image", "boot_img", &boot_img);
+                    // The standalone medium is a raw disk image, so it is its own disk.
+                    let (bytes, sha256) = boot2deb_engine::blobs::sha256_file(&boot_img)?;
+                    published.push(crate::inventory::hashed_disk(
+                        &boot_img,
+                        ArtifactRole::Boot.key(),
+                        boot2deb_core::inventory::DiskDigest { bytes, sha256 },
+                    )?);
                 }
+                crate::inventory::publish(
+                    &out_dir,
+                    &stem,
+                    StageEntry {
+                        stage: Published::Uboot,
+                        lock_sha256: lock_sha256.clone(),
+                        finished: now_rfc3339(),
+                        layout: None,
+                        external_rootfs: false,
+                        inputs: Vec::new(),
+                        artifacts: published,
+                    },
+                )?;
                 Ok(())
             }),
         },
@@ -1095,6 +1159,7 @@ fn run_point(
                     recipe,
                     stem: &stem,
                     lock: &lock,
+                    lock_sha256: &lock_sha256,
                     args: &args,
                     resolved: &resolved,
                     out_dir: &out_dir,
@@ -1125,6 +1190,7 @@ fn run_point(
                     state,
                     recipe,
                     stem: &stem,
+                    lock_sha256: &lock_sha256,
                     args: &args,
                     resolved: &resolved,
                     out_dir: &out_dir,
@@ -1139,13 +1205,7 @@ fn run_point(
         },
     ];
 
-    let mut state = BuildState {
-        // The rootfs tarball the image stage consumes: produced by the rootfs stage, or
-        // supplied directly via `--rootfs-tar` for an image-only build. The only field
-        // a caller can seed.
-        rootfs_tar: args.rootfs_tar.clone(),
-        ..BuildState::default()
-    };
+    let mut state = BuildState::default();
     for stage in stages {
         let named = stage.selectors.contains(&args.stage);
         if !named && args.stage != StageArg::All {
@@ -1172,6 +1232,8 @@ fn run_point(
             state: &state,
             stem: &stem,
             lock: &lock,
+            lock_sha256: &lock_sha256,
+            recipe,
             args: &args,
             resolved: &resolved,
             out_dir: &out_dir,
@@ -1288,6 +1350,13 @@ fn run_point(
         }
         let path = root.lock_path(recipe)?;
         pins::write_lock(&path, &new_lock)?;
+        // The new lock pins what this run built, so the artifacts this run published are
+        // the new lock's: move their inventory entries to its digest. Entries an earlier
+        // run wrote under another lock stay that lock's.
+        let rewritten = crate::inventory::lock_digest(root, recipe)?;
+        let mut inventory = crate::inventory::load(&out_dir, &stem)?;
+        inventory.restamp(&lock_sha256, &rewritten);
+        crate::inventory::save(&out_dir, &stem, &inventory)?;
         note(
             json,
             verbosity,
@@ -1334,13 +1403,18 @@ fn run_point(
 struct Provenance<'a> {
     /// The build and its image half.
     ib: boot2deb_core::ImageBuild<'a>,
-    /// What the stages left — the manifest, the plan, the password, the filesystem
-    /// contract and the image's size all come from here.
+    /// What the stages left — the manifest, the plan, the credential's presence, the
+    /// filesystem contract and the image's size all come from here.
     state: &'a BuildState,
     /// The artifact stem every produced file is named for.
     stem: &'a str,
     /// The recipe's lock.
     lock: &'a boot2deb_core::lock::Lock,
+    /// The lock file's digest, which the rootfs stage's inventory entry must carry for
+    /// its manifest and plan to describe this image.
+    lock_sha256: &'a str,
+    /// The build point's reference, for the remedy an error names.
+    recipe: &'a str,
     /// The command's own arguments.
     args: &'a BuildArgs,
     /// The resolved build.
@@ -1381,7 +1455,7 @@ struct Provenance<'a> {
 ///
 /// Writes nothing when the run stopped before the image node: the manifest's own
 /// contract is that every field describes something that exists, and four of them —
-/// the solved manifest, the per-image password, the filesystem contract, the image's
+/// the solved manifest, the image's credential, the filesystem contract, the image's
 /// size — only exist once that node has run. Naming them together in one pattern is
 /// what makes "a partial build writes no provenance" structural rather than a comment.
 ///
@@ -1389,49 +1463,43 @@ struct Provenance<'a> {
 fn write_provenance(
     r: Provenance,
 ) -> Result<Option<Vec<boot2deb_core::outputs::Output>>, Box<dyn std::error::Error>> {
-    // The solved manifest describing the rootfs inside the image this run assembled:
-    // from this run's own rootfs stage, else the one the rootfs stage left in `out_dir`
-    // beside the tar — the same auto-discovery the tar itself gets, and correct for the
-    // same reason, since one rootfs run writes both. An explicit `--rootfs-tar` names a
-    // tree from outside this directory, whose manifest is not knowable here.
-    let image_manifest: Option<PathBuf> = r.state.rootfs_manifest.clone().or_else(|| {
-        if r.args.rootfs_tar.is_some() {
-            return None;
+    // The solved manifest and plan describing the rootfs inside the image this run
+    // assembled: from this run's own rootfs stage, else from the rootfs stage's inventory
+    // entry the image stage took its tar from, since one rootfs run publishes all three.
+    // Taken through the entry for the reason the tar is: a file named like one may be
+    // another generation's. An explicit `--rootfs-tar` names a tree from outside this
+    // directory, whose manifest is not knowable here.
+    let (image_manifest, image_plan) = match (&r.state.rootfs_manifest, &r.state.rootfs_plan) {
+        (Some(manifest), Some(plan)) => (Some(manifest.clone()), Some(plan.clone())),
+        _ if r.args.rootfs_tar.is_some() || r.state.credential.is_none() => (None, None),
+        _ => {
+            let inventory = crate::inventory::load(r.out_dir, r.stem)?;
+            let entry = crate::inventory::current(
+                &inventory,
+                Published::Rootfs,
+                r.lock_sha256,
+                r.out_dir,
+                r.recipe,
+            )?;
+            let take = |name: &str| -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
+                entry
+                    .file(name)
+                    .map(|row| crate::inventory::verified(r.out_dir, row))
+                    .transpose()
+            };
+            (take(role::SOLVED_MANIFEST)?, take(role::PLAN)?)
         }
-        r.lock
-            .rootfs
-            .as_ref()
-            .map(|_| {
-                r.out_dir
-                    .join(boot2deb_core::manifest::manifest_name(r.stem))
-            })
-            .filter(|p| p.exists())
-    });
-    // The plan document beside that manifest, found the same way and for the same
-    // reason: one rootfs run writes the tar, the manifest and the plan together, so an
-    // image-only re-run over that tar records the plan that produced it rather than
-    // dropping the section.
-    let image_plan: Option<PathBuf> = r
-        .state
-        .rootfs_plan
-        .clone()
-        .or_else(|| {
-            if r.args.rootfs_tar.is_some() {
-                return None;
-            }
-            Some(r.out_dir.join(format!("{}.plan", r.stem)))
-        })
-        .filter(|p| p.exists());
+    };
 
     // The provenance manifest describes the image beside it, so it is emitted by every
-    // run that assembles one — including an image-only run, whose freshly generated
-    // first-boot password would otherwise leave the previous run's document standing
-    // over a different image, misstating the one credential it exists to record.
-    // It joins the lock's pins, the resolved build point, the solved-manifest digest,
-    // the blob hashes, the toolchain identity, and the first-boot credential into
-    // one "exactly what went into this image" document for support/security.
+    // run that assembles one — including an image-only run, whose image is a new one
+    // (its own spliced password at least) and would otherwise stand under the previous
+    // run's document. It joins the lock's pins, the resolved build point, the
+    // solved-manifest digest, the blob hashes, the toolchain identity, and the account's
+    // access record into one "exactly what went into this image" document for
+    // support/security. It contains no secret.
     let prov_path = r.out_dir.join(format!("{}.provenance.toml", r.stem));
-    if r.state.first_boot_password.is_some() && image_manifest.is_none() {
+    if r.state.credential.is_some() && image_manifest.is_none() {
         // An image was built and no manifest describes it. Any document here belongs to
         // an earlier image; removing it beats leaving one that reads as authoritative.
         if prov_path.exists() {
@@ -1454,9 +1522,9 @@ fn write_provenance(
     // stage ran. Naming them together makes that structural rather than a comment: a
     // build stopping before the image writes no provenance, because the record it would
     // describe does not exist.
-    if let (Some(manifest_path), Some(password), Some(filesystem), Some(image_bytes)) = (
+    if let (Some(manifest_path), Some(_), Some(filesystem), Some(image_bytes)) = (
         &image_manifest,
-        &r.state.first_boot_password,
+        &r.state.credential,
         &r.state.rootfs_filesystem,
         r.state.image_bytes,
     ) {
@@ -1564,7 +1632,6 @@ fn write_provenance(
             plan_sha256: &plan_record.sha256,
             archives: &plan_record.archives,
             user: &r.ib.image.user,
-            password,
             // Stamped by build.rs from the boot2deb checkout; the commit is empty when
             // built outside a git tree (e.g. a source tarball), leaving only the version.
             builder_version: env!("CARGO_PKG_VERSION"),
@@ -1649,11 +1716,8 @@ struct BuildState {
     /// discovered name for the same reason the kernel deb is: the name embeds the
     /// kernel release.
     kmod_debs: Vec<PathBuf>,
-    /// The rootfs tarball the image stage formats. Set by the rootfs stage, or seeded
-    /// from `--rootfs-tar` for an image-only run.
-    rootfs_tar: Option<PathBuf>,
     /// The solved manifest, captured when this run builds the rootfs; joins the image
-    /// stage's per-image password to emit the provenance manifest at the end.
+    /// stage's outputs to emit the provenance manifest at the end.
     rootfs_manifest: Option<PathBuf>,
     /// The plan document that stage published beside it — the install set plus the
     /// archive state it resolved against, which the provenance manifest records and a
@@ -1662,9 +1726,10 @@ struct BuildState {
     /// The freshly-solved manifest's sha256, set by the rootfs stage — verified against
     /// the committed pin and recorded into the lock by `--save-manifest`.
     solved_manifest_digest: Option<String>,
-    /// The per-image first-boot password, captured when this run assembles the image
-    /// (the image stage generates it, splicing it into the staged rootfs).
-    first_boot_password: Option<String>,
+    /// The private credential document the image stage wrote for the image this run
+    /// assembled. Its presence is what says this run assembled an image; the password
+    /// in it reaches no other record.
+    credential: Option<PathBuf>,
     /// Which checks the image stage ran over the finished rootfs filesystem — reported
     /// by that stage rather than re-probed here, since one of them depends on a host
     /// tool being present. Recorded in the provenance manifest.
@@ -1749,6 +1814,8 @@ struct RootfsStage<'a> {
     stem: &'a str,
     /// The recipe's lock.
     lock: &'a boot2deb_core::lock::Lock,
+    /// The lock file's digest, which the stage's inventory entry is bound to.
+    lock_sha256: &'a str,
     /// The command's own arguments.
     args: &'a BuildArgs,
     /// The resolved build.
@@ -1790,6 +1857,9 @@ struct ImageStage<'a> {
     recipe: &'a str,
     /// The artifact stem every produced file is named for.
     stem: &'a str,
+    /// The lock file's digest: the rootfs and u-boot artifacts the stage consumes must
+    /// be this lock's, and its own inventory entry is bound to it.
+    lock_sha256: &'a str,
     /// The command's own arguments.
     args: &'a BuildArgs,
     /// The resolved build.
@@ -1824,6 +1894,9 @@ fn rootfs_stage(s: RootfsStage) -> Result<(), Box<dyn std::error::Error>> {
         .rootfs
         .as_ref()
         .expect("an image build pins a rootfs");
+    // Nothing this stage published before is current until it finishes, and it finishes
+    // only once its solve has passed the pinned manifest.
+    crate::inventory::begin(s.out_dir, s.stem, Published::Rootfs)?;
     // Bootstrap the device rootfs: stand up a local apt repo from the
     // built .debs in out_dir, install the merged package set, apply the layered
     // overlay, and emit the tarball the image stage formats into ext4.
@@ -1917,7 +1990,7 @@ fn rootfs_stage(s: RootfsStage) -> Result<(), Box<dyn std::error::Error>> {
         preinstall_overlay_dirs: &preinstall_overlay_dirs,
         boot_config,
         image_identity: &system_identity,
-        rootfs_partuuid: identity.rootfs_partuuid,
+        partitions: boot2deb_engine::image::partitions(s.ib, &identity)?,
         out_dir: s.out_dir,
         stem: s.stem,
         // The build's own scratch tree: the provisioned userland is multi-GB and
@@ -1937,9 +2010,6 @@ fn rootfs_stage(s: RootfsStage) -> Result<(), Box<dyn std::error::Error>> {
         source_date_epoch: rootfs_pin.source_date_epoch,
     };
     let artifacts = rootfs::build_rootfs(s.ib, &opts, s.sink)?;
-    emit_artifact(s.sink, "rootfs", "tar", &artifacts.tar);
-    emit_artifact(s.sink, "rootfs", "manifest", &artifacts.manifest);
-    emit_artifact(s.sink, "rootfs", "plan", &artifacts.plan);
     // Manifest-as-input verification: unless `--save-manifest` re-pins,
     // a fresh solve must reproduce the committed pin — a drift means the live
     // mirror moved off the pinned package set. Hard error unless the drift is
@@ -1960,10 +2030,31 @@ fn rootfs_stage(s: RootfsStage) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+    // Announced and recorded only now, past the check: a solve the pinned manifest
+    // rejects leaves its files on disk, and nothing names them as this lock's rootfs.
+    emit_artifact(s.sink, "rootfs", "tar", &artifacts.tar);
+    emit_artifact(s.sink, "rootfs", "manifest", &artifacts.manifest);
+    emit_artifact(s.sink, "rootfs", "plan", &artifacts.plan);
+    crate::inventory::publish(
+        s.out_dir,
+        s.stem,
+        StageEntry {
+            stage: Published::Rootfs,
+            lock_sha256: s.lock_sha256.to_string(),
+            finished: now_rfc3339(),
+            layout: None,
+            external_rootfs: false,
+            inputs: Vec::new(),
+            artifacts: vec![
+                crate::inventory::hashed(&artifacts.tar, role::ROOTFS_TAR)?,
+                crate::inventory::hashed(&artifacts.manifest, role::SOLVED_MANIFEST)?,
+                crate::inventory::hashed(&artifacts.plan, role::PLAN)?,
+            ],
+        },
+    )?;
     s.state.solved_manifest_digest = Some(solved_digest);
     // The account is locked in the tarball; the unique per-image first-boot
-    // password is assigned at image assembly (surfaced there), not here.
-    s.state.rootfs_tar = Some(artifacts.tar);
+    // password is assigned at image assembly, not here.
     s.state.rootfs_manifest = Some(artifacts.manifest);
     s.state.rootfs_plan = Some(artifacts.plan);
     Ok(())
@@ -1974,55 +2065,82 @@ fn rootfs_stage(s: RootfsStage) -> Result<(), Box<dyn std::error::Error>> {
 ///
 /// Its own function for the reason [`rootfs_stage`] is.
 fn image_stage(s: ImageStage) -> Result<(), Box<dyn std::error::Error>> {
-    // The image node consumes the rootfs tarball plus the u-boot raw-gap
-    // payloads staged in out_dir by the earlier stages. The rootfs tar comes
-    // from the rootfs stage in this run, else --rootfs-tar, else the
-    // conventionally-named artifact the rootfs stage leaves in out_dir — the
-    // same auto-discovery the u-boot payloads get below.
-    let rootfs_tar = s
-        .state
-        .rootfs_tar
-        .clone()
-        .unwrap_or_else(|| s.out_dir.join(format!("{}-rootfs.tar", s.stem)));
-    if !rootfs_tar.exists() {
-        return Err(format!(
-            "rootfs tar not found at {} — run `build {} --stage rootfs` first (or pass --rootfs-tar)",
-        rootfs_tar.display(),
-        s.recipe
-        )
-        .into());
-    }
-    // Structural gate, not mere existence: confirm the tar is complete
-    // and readable through its appended `./etc/shadow` member. An `--stage image`
-    // retry after an interrupted rootfs stage then fails cleanly here instead of
-    // formatting a truncated tar into a broken ext4 image.
+    // Nothing this stage published before is current until it finishes.
+    crate::inventory::begin(s.out_dir, s.stem, Published::Image)?;
+    let inventory = crate::inventory::load(s.out_dir, s.stem)?;
+    // What the image is assembled from, as it was consumed, for the stage's entry: the
+    // recorded payload digests are what a check of the finished image's boot region
+    // holds its bytes to.
+    let mut inputs = Vec::new();
+    // The rootfs tree: an explicit `--rootfs-tar`, taken as given and marked external;
+    // otherwise the rootfs stage's tar, published under this lock and still holding the
+    // bytes it recorded. A file merely named like one is never taken: after a re-pin or
+    // a rootfs run whose solve was rejected, it is a readable tree of another generation.
+    let rootfs_tar = match &s.args.rootfs_tar {
+        Some(tar) => {
+            if !tar.is_file() {
+                return Err(format!("--rootfs-tar {} is not a file", tar.display()).into());
+            }
+            inputs.push(crate::inventory::hashed(tar, role::ROOTFS_TAR)?);
+            tar.clone()
+        }
+        None => {
+            let entry = crate::inventory::current(
+                &inventory,
+                Published::Rootfs,
+                s.lock_sha256,
+                s.out_dir,
+                s.recipe,
+            )?;
+            let row = entry
+                .file(role::ROOTFS_TAR)
+                .ok_or("the rootfs stage's inventory entry lists no tarball — rebuild it")?;
+            let tar = crate::inventory::verified(s.out_dir, row)?;
+            inputs.push(row.clone());
+            tar
+        }
+    };
+    // Structural gate, beyond the digest: the tar is complete and readable through its
+    // appended `./etc/shadow` member, so an external tree that was cut short fails here
+    // rather than formatting into a broken image.
     rootfs::validate_tar(&rootfs_tar)?;
-    // The boot payload, per method. A raw-gap bootloader was staged into out_dir
-    // by the u-boot stage; a depthcharge board's signed kernel needs nothing here,
-    // because it is already inside the rootfs tarball (`depthchargectl` built it
-    // there, so the same tool re-signs it on the running board).
-    let idbloader = s.out_dir.join(format!("{}-idbloader.img", s.stem));
-    let uboot_itb = s.out_dir.join(format!("{}-u-boot.itb", s.stem));
+    // The boot payload, per method. A raw-gap bootloader is the u-boot stage's, taken
+    // through its inventory entry under the same rule as the tar; a depthcharge board's
+    // signed kernel needs nothing here, because it is already inside the rootfs tarball
+    // (`depthchargectl` built it there, so the same tool re-signs it on the running
+    // board).
+    let payloads = match &s.resolved.boot {
+        ResolvedBoot::RockchipRkbin(_) => {
+            let entry = crate::inventory::current(
+                &inventory,
+                Published::Uboot,
+                s.lock_sha256,
+                s.out_dir,
+                s.recipe,
+            )?;
+            let mut paths = Vec::new();
+            for name in [role::IDBLOADER, role::UBOOT_ITB] {
+                let row = entry.file(name).ok_or_else(|| {
+                    format!("the u-boot stage's inventory entry lists no {name} — rebuild it")
+                })?;
+                paths.push(crate::inventory::verified(s.out_dir, row)?);
+                inputs.push(row.clone());
+            }
+            Some((paths.remove(0), paths.remove(0)))
+        }
+        ResolvedBoot::Depthcharge(_) => None,
+    };
     // Matched on the resolved boot method, not on a boolean, so adding a third
     // method is a compile error here rather than a silent route into the wrong arm.
-    let boot = match &s.resolved.boot {
-        ResolvedBoot::RockchipRkbin(_) => {
-            for p in [&idbloader, &uboot_itb] {
-                if !p.exists() {
-                    return Err(format!(
-                        "{} not found — run `build {} --stage uboot` first",
-                        p.display(),
-                        s.recipe
-                    )
-                    .into());
-                }
-            }
+    let boot = match (&s.resolved.boot, &payloads) {
+        (ResolvedBoot::RockchipRkbin(_), Some((idbloader, uboot_itb))) => {
             image::BootPayload::RockchipRkbin {
-                idbloader: &idbloader,
-                uboot_itb: &uboot_itb,
+                idbloader,
+                uboot_itb,
             }
         }
-        ResolvedBoot::Depthcharge(_) => image::BootPayload::Depthcharge,
+        (ResolvedBoot::RockchipRkbin(_), None) => unreachable!("payloads resolved above"),
+        (ResolvedBoot::Depthcharge(_), _) => image::BootPayload::Depthcharge,
     };
     let opts = image::ImageOptions {
         rootfs_tar: &rootfs_tar,
@@ -2070,23 +2188,94 @@ fn image_stage(s: ImageStage) -> Result<(), Box<dyn std::error::Error>> {
         .chain(std::iter::once(artifacts.files_manifest.clone()))
         .collect();
     s.state.flashables = crate::nextstep::flashables(&artifacts.output, &artifacts.compressed);
-    // The per-image first-boot password: unique per build, expired so it
-    // must be changed at first login. Surfaced here since it exists nowhere else
-    // the operator can read it except the provenance manifest.
+
+    // The per-image first-boot password: unique per build, expired so it must be changed
+    // at first login. It goes to one private file beside the image and nowhere else,
+    // since this stream, the provenance manifest and the inventory are records made to
+    // be shared. The note names the file, not the secret.
+    let credential = s
+        .out_dir
+        .join(boot2deb_core::credential::credential_name(s.stem));
+    let image_name = rootfs_image
+        .file_name()
+        .and_then(|n| n.to_str())
+        .expect("the image node names its images");
+    boot2deb_engine::secret::write_private(
+        &credential,
+        boot2deb_core::credential::FirstBootCredential::new(
+            image_name,
+            &s.ib.image.user,
+            &artifacts.password,
+        )
+        .to_toml()
+        .as_bytes(),
+    )?;
     note(
         s.json,
         s.verbosity,
         s.sink,
         "image",
         format!(
-            "{:<width$}: {}  (user {}, expired — change at first login)",
+            "{:<width$}: {} (user {}, readable by you only; the password is expired — \
+             change it at first login)",
             "first-boot pw",
-            artifacts.password,
+            credential.display(),
             s.ib.image.user,
             width = LABEL_WIDTH
         ),
     );
-    s.state.first_boot_password = Some(artifacts.password);
+
+    // The stage's inventory entry, written last: the images by role, each container with
+    // the disk it holds, and the listing.
+    let roles: Vec<(&std::path::Path, ArtifactRole)> = match &artifacts.output {
+        ImageOutput::Combined { image } => vec![(image.as_path(), ArtifactRole::Combined)],
+        ImageOutput::Split { bootloader, rootfs } => vec![
+            (bootloader.as_path(), ArtifactRole::Boot),
+            (rootfs.as_path(), ArtifactRole::Rootfs),
+        ],
+    };
+    let mut published = Vec::new();
+    for (raw, role) in roles {
+        let disk = artifacts
+            .disks
+            .iter()
+            .find(|(path, _)| path == raw)
+            .map(|(_, d)| d.clone())
+            .expect("the image node records every raw image's disk");
+        if !artifacts.raw_removed {
+            published.push(crate::inventory::hashed_disk(
+                raw,
+                role.key(),
+                disk.clone(),
+            )?);
+        }
+        for c in artifacts.compressed.iter().filter(|c| c.source == raw) {
+            published.push(crate::inventory::hashed_disk(
+                &c.path,
+                role.key(),
+                disk.clone(),
+            )?);
+        }
+    }
+    published.push(crate::inventory::hashed(
+        &artifacts.files_manifest,
+        role::FILES_MANIFEST,
+    )?);
+    crate::inventory::publish(
+        s.out_dir,
+        s.stem,
+        StageEntry {
+            stage: Published::Image,
+            lock_sha256: s.lock_sha256.to_string(),
+            finished: now_rfc3339(),
+            layout: Some(s.resolved.layout),
+            external_rootfs: s.args.rootfs_tar.is_some(),
+            inputs,
+            artifacts: published,
+        },
+    )?;
+
+    s.state.credential = Some(credential);
     s.state.rootfs_verified_with = artifacts.rootfs_verified_with;
     s.state.rootfs_filesystem = Some(artifacts.rootfs_filesystem);
     s.state.image_bytes = Some(artifacts.image_bytes);

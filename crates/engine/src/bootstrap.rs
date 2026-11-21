@@ -161,11 +161,17 @@ impl Archive {
 /// component set: what a test standing in for a build's provisioner configures.
 #[cfg(test)]
 pub(crate) fn test_archive(suite: &str) -> (Archive, Vec<String>) {
-    let root = boot2deb_core::ConfigRoot::new(test_root());
-    let (name, layer) = root.distro_for_suite(suite).expect("a shipped suite");
-    let distro = layer.resolve(&name, suite);
+    let distro = test_distro(suite);
     let archive = Archive::resolve(&distro, None, SnapshotMode::Off).expect("a live archive");
     (archive, distro.components)
+}
+
+/// The shipped config tree's distribution for `suite`, resolved.
+#[cfg(test)]
+pub(crate) fn test_distro(suite: &str) -> ResolvedDistro {
+    let root = boot2deb_core::ConfigRoot::new(test_root());
+    let (name, layer) = root.distro_for_suite(suite).expect("a shipped suite");
+    layer.resolve(&name, suite)
 }
 
 /// The shipped config tree's archive for `suite`, held to snapshot `timestamp` under
@@ -230,6 +236,7 @@ mod tests {
             components: vec!["main".into()],
             keyring: "debian-archive-keyring.gpg".into(),
             image_keyring: "/usr/share/keyrings/debian-archive-keyring.gpg".into(),
+            virt_kernels: Default::default(),
         }
     }
 

@@ -267,6 +267,67 @@ pub enum ConfigError {
         device: String,
     },
 
+    /// The selected BL31 provider is not in the device's `supported_bl31`. A board
+    /// that lists none supports `rkbin` alone.
+    #[error("device '{device}' does not support BL31 provider '{bl31}' (supported: {supported})")]
+    UnsupportedBl31 {
+        /// The device being resolved.
+        device: String,
+        /// The requested provider.
+        bl31: String,
+        /// Comma-separated providers the device supports.
+        supported: String,
+    },
+
+    /// The device declares `supported_bl31` but no `default_bl31`, and none was
+    /// selected. A build then has no BL31 provider to resolve.
+    #[error(
+        "device '{device}' lists supported_bl31 but no default_bl31 — set one (or select \
+         a provider per recipe / with --bl31)"
+    )]
+    MissingDefaultBl31 {
+        /// The device being resolved.
+        device: String,
+    },
+
+    /// A BL31 provider was selected on a boot method that builds no u-boot and so packs
+    /// no BL31. The selection is a recipe's `bl31`, a `--bl31`, or the device's own
+    /// `default_bl31`. Rejected rather than ignored, since nothing would act on it.
+    #[error(
+        "device '{device}' boots via '{boot_method}', which builds no u-boot and packs no \
+         BL31 — drop the `{what}` selection"
+    )]
+    Bl31WithoutBootloader {
+        /// The device being resolved.
+        device: String,
+        /// The boot method that builds no bootloader.
+        boot_method: String,
+        /// Which selection named a provider (`bl31`, `default_bl31`).
+        what: &'static str,
+    },
+
+    /// The `tfa` BL31 provider is selected but the SoC's `[tfa]` source cannot be
+    /// built from: it is absent, or a field fails its shape check.
+    #[error("device '{device}' selects BL31 provider 'tfa', but {why}")]
+    BadTfaSource {
+        /// The device being resolved.
+        device: String,
+        /// What is missing or malformed.
+        why: String,
+    },
+
+    /// A lock's tables contradict each other about the BL31 it pins. A
+    /// `rockchip-rkbin` lock pins exactly one BL31: `[blobs].atf` for the rkbin
+    /// provider or a `[tfa]` table for TF-A. A lock with no `[blobs]` builds no u-boot
+    /// and pins neither.
+    #[error("lock {path} is inconsistent: {why}")]
+    LockShape {
+        /// The lock file.
+        path: String,
+        /// Which tables contradict each other.
+        why: String,
+    },
+
     /// The chosen kernel does not list the device's SoC in `supported_socs`.
     #[error("kernel '{kernel}' does not support soc '{soc}' (supported: {supported})")]
     SocMismatch {
@@ -291,7 +352,7 @@ pub enum ConfigError {
         supported: String,
     },
 
-    /// A required blob field (e.g. `rkbin.atf`) is empty.
+    /// A required blob field (e.g. `rkbin.tpl`) is empty.
     #[error("device '{device}' is missing a required blob: {what}")]
     MissingBlob {
         /// The device being resolved.
@@ -300,8 +361,9 @@ pub enum ConfigError {
         what: String,
     },
 
-    /// The `[rkbin.upstream]` a layer declares cannot name a place to list blobs from.
-    #[error("device '{device}' declares an unusable [rkbin.upstream]: {why}")]
+    /// No layer declares an `[rkbin.upstream]`, or the one declared cannot name a place
+    /// to fetch blobs from.
+    #[error("device '{device}' has no usable [rkbin.upstream]: {why}")]
     BadRkbinUpstream {
         /// The device being resolved.
         device: String,
@@ -353,6 +415,59 @@ pub enum ConfigError {
         size: String,
         /// The slot count.
         slots: u8,
+    },
+
+    /// The selected loader is not one the boot method lists in its `loaders`.
+    #[error(
+        "device '{device}' boots by '{boot_method}', which does not support the \
+         '{loader}' loader (supported: {supported})"
+    )]
+    UnsupportedLoader {
+        /// The device being resolved.
+        device: String,
+        /// The resolved boot method.
+        boot_method: &'static str,
+        /// The selected loader.
+        loader: String,
+        /// Comma-separated loaders the boot method lists.
+        supported: String,
+    },
+
+    /// A loader was selected under a boot method whose firmware loads the kernel
+    /// itself. Named rather than ignored, because nothing in the image would act on it.
+    #[error(
+        "device '{device}' boots by '{boot_method}', whose firmware loads the kernel \
+         itself: there is no loader to select ('{loader}' was asked for)"
+    )]
+    LoaderWithoutChoice {
+        /// The device being resolved.
+        device: String,
+        /// The resolved boot method.
+        boot_method: &'static str,
+        /// The selected loader.
+        loader: String,
+    },
+
+    /// A boot method's `default_loader` is not among its own `loaders`.
+    #[error(
+        "boot method '{boot_method}' defaults to the '{loader}' loader, which its \
+         `loaders` list ({supported}) does not contain"
+    )]
+    DefaultLoaderNotListed {
+        /// The boot method layer at fault.
+        boot_method: &'static str,
+        /// Its `default_loader`.
+        loader: String,
+        /// Comma-separated `loaders`.
+        supported: String,
+    },
+
+    /// The `efi` loader's `esp_size` is zero or not a whole number of MiB. The rootfs
+    /// starts where the partition ends, so a size off a MiB boundary misaligns it.
+    #[error("esp_size '{value}' must be a non-zero whole number of MiB (e.g. '256MiB')")]
+    InvalidEspSize {
+        /// The authored size.
+        value: String,
     },
 
     /// The requested image layout has no meaning under the resolved boot method.

@@ -4,32 +4,39 @@
 [kernel]
 id = "rk3588-mainline-7.3"
 source = "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git"
-ref = "v7.3"
-commit = "c03c1a14507dfaf8b856c2608f9ac216021fc222"
+ref = "v7.3.3"
+commit = "d50d994bffa3c7c6db2d8bc4c5f0c55e3f46b0cd"
+revision = 2
+config_sha256 = "5364bdc5ce6839a5513883ae3311046d7223b57acac1adf3eb5449ab2a179037"
 
 [patches]
 series = ["rk3588-accel"]
 source = "https://github.com/gregordinary/patches.git"
 ref = "main"
-commit = "339beaf35d5a81f861e4a2229365fb8f07ade50c"
+commit = "39729e50f85eed4956341f7607ebc9058c90da00"
 
 [uboot]
 source = "https://git.u-boot-project.org/u-boot/u-boot.git"
 ref = "v2026.10"
 commit = "5508406582f6f7120dce0c4b3059819a41788db2"
+revision = 2
+config_sha256 = "358c95844ad7276b9797d17ece25432e84bb9e9b286d99d0ff03f4b22457adf2"
 
 [uboot_patches]
 series = ["turing-rk1-recovery"]
 source = "https://github.com/gregordinary/patches.git"
 ref = "main"
-commit = "339beaf35d5a81f861e4a2229365fb8f07ade50c"
+commit = "39729e50f85eed4956341f7607ebc9058c90da00"
 
 [rootfs]
 distro = "debian"
 suite = "forky"
 manifest = "forky.pkgs.lock"
-source_date_epoch = 1792427870
+source_date_epoch = 1795282907
 
 [blobs]
+source = "https://github.com/rockchip-linux/rkbin.git"
+ref = "master"
+commit = "3e288fe814e059dd06833495f845cab04ac20a5c"
 atf = "rk3588_bl31_v1.56.elf@sha256:2864c2fc36333e03e7e3fe6459225d320d310850b4ac7620d1f3601efb7d4a9b"
 tpl = "rk3588_ddr_lp4_2112MHz_lp5_2400MHz_v1.24.bin@sha256:2853a0da7ab895af43d50615af73eccf0694115dd0202483ee1c93c9071a42c3"

@@ -5,8 +5,8 @@ set -eu
 # For each volume the build declared in /etc/boot2deb/data-volumes.conf, walk a
 # three-step ladder and stop at the first step that applies:
 #
-#   1. adopt  -- a filesystem already carries our label. Mount it. Never format.
-#   2. create -- the matched disk is genuinely blank and the volume permits it.
+#   1. adopt  -- a filesystem already has our label. Mount it. Never format.
+#   2. create -- the matched disk is proven blank and the volume permits it.
 #                Write a GPT with one partition, mkfs with our label, mount.
 #   3. refuse -- anything else. Log what was found and leave the disk alone.
 #
@@ -15,16 +15,43 @@ set -eu
 # not create and must not touch it. A disk holding a partition table, a
 # filesystem, or a label that is not ours is evidence of data someone wants.
 #
+# "Proven blank" is a set of facts a tool reported, all established before the
+# first write. A query that fails, prints nothing, or needs a tool the image lacks
+# is a refusal, because the absence of an answer is not the absence of data:
+#
+#   - The match names exactly one writable whole disk: lsblk reports TYPE disk and
+#     RO 0, and the kernel's sysfs node for that device number has no `partition`
+#     attribute. Disks are compared by device number (MAJ:MIN), never by name.
+#   - That disk is not under root. The chain from root's source down through every
+#     device-mapper, md or LUKS layer to the disk or disks beneath it is walked,
+#     and every device number in it is excluded. When the chain cannot be walked,
+#     nothing is created on this boot; adopting still runs, since it never writes.
+#   - Nothing is on or above it: lsblk lists the disk alone and unmounted, and its
+#     sysfs holders directory is empty.
+#   - Its first and last MiB read back whole, so the regions the signature probes
+#     read are readable rather than failing quietly.
+#   - wipefs lists no signature. It reports every signature libblkid recognizes,
+#     each on its own line, and fails outright on a device it cannot open. That is
+#     why it, and not `blkid -p`, is the test: blkid exits 2, "nothing found", for
+#     a device it cannot open as for an empty one, and can report colliding
+#     superblocks the same way.
+#
 # The fstab entries were written at build time, so mounting here is only about
 # this first boot; every later boot mounts from fstab with no hook involved. They
-# carry `nofail`, so a refusal below costs the data disk and never the boot.
+# contain `nofail`, so a refusal below costs the data disk and never the boot.
 #
 # Failing leaves the whole first-boot unit re-runnable, so every step is
 # idempotent and the hook exits 0 on a refusal rather than blocking the rest of
 # first boot.
 
 conf=/etc/boot2deb/data-volumes.conf
+# sysfs, where the kernel states whether a node is a partition and what holds it.
+sys=/sys
 tab="$(printf '\t')"
+
+# Pathname expansion is off: the hook word-splits tool output (lsblk rows, holder
+# names), and none of it is a pattern.
+set -f
 
 log() { echo "data-volume: $*"; }
 
@@ -33,16 +60,35 @@ if [ ! -r "$conf" ]; then
     exit 0
 fi
 
-# The disk holding root is never a candidate, whatever the match says. Resolving
-# it here rather than per-volume keeps the guard in one place.
-root_src="$(findmnt -no SOURCE / 2>/dev/null || true)"
-root_disk=""
-if [ -n "$root_src" ]; then
-    root_pk="$(lsblk -no pkname "$root_src" 2>/dev/null | head -n1 || true)"
-    [ -n "$root_pk" ] && root_disk="/dev/$root_pk"
+# The device numbers of everything root's filesystem rests on, one per line: its
+# source and, through `lsblk -s`, every device beneath it down to the disk(s). A
+# candidate whose number appears here is never written. Empty means the chain could
+# not be established, and `root_why` says why; then no volume is created, since a
+# guard that cannot name root's disk cannot keep a write off it. `findmnt -v` drops
+# the [/subvolume] suffix a btrfs root adds to its source.
+root_ids=''
+root_why=''
+if ! root_src="$(findmnt -nvo SOURCE / 2>/dev/null)" || [ -z "$root_src" ]; then
+    root_why="findmnt cannot name root's source"
+else
+    case "$root_src" in
+        /dev/*)
+            if ! chain="$(lsblk -rnso MAJ:MIN,TYPE "$root_src" 2>/dev/null)"; then
+                root_why="lsblk cannot walk the devices under $root_src"
+            elif ! printf '%s\n' "$chain" | awk '$2 == "disk" { found = 1 } END { exit !found }'; then
+                root_why="the devices under $root_src reach no disk"
+            else
+                root_ids="$(printf '%s\n' "$chain" | cut -d' ' -f1)"
+            fi
+            ;;
+        *)
+            root_why="root's source $root_src is not a block device"
+            ;;
+    esac
 fi
 
-# Every whole disk of a transport, as /dev paths, one per line.
+# Every whole disk of a transport, as /dev paths, one per line. Returns 2 when
+# lsblk cannot list the disks, which the caller must not read as "there are none".
 #
 # Two independent tests, and a disk must pass both. The node name alone is not
 # enough: a SATA disk and a USB disk are both /dev/sd*, so an external drive
@@ -53,7 +99,8 @@ fi
 # mmc is the one exception: the block driver commonly reports no transport at all,
 # and there the name is already unambiguous. The pattern excludes mmcblk<n>boot<n>
 # -- the read-only eMMC boot hardware partitions, which lsblk also lists as whole
-# disks (TYPE=disk), and which must never be a candidate.
+# disks (TYPE=disk), and which must never be a candidate. The read-only test every
+# candidate passes through (`whole_disk_id`) excludes them besides.
 #
 # `lsblk -d` lists whole disks only, so partitions never reach this.
 disks_of_kind() {
@@ -64,7 +111,8 @@ disks_of_kind() {
         mmc)  pattern='^mmcblk[0-9]+$';      want=mmc;  tran_required=no  ;;
         *)    return 1 ;;
     esac
-    lsblk -dno NAME,TRAN 2>/dev/null | while read -r name tran; do
+    listing="$(lsblk -dno NAME,TRAN 2>/dev/null)" || return 2
+    printf '%s\n' "$listing" | while read -r name tran; do
         [ -n "$name" ] || continue
         printf '%s\n' "$name" | grep -qE "$pattern" || continue
         if [ "$tran" != "$want" ]; then
@@ -74,28 +122,75 @@ disks_of_kind() {
                 continue
             fi
         fi
-        # Read-only whole disks are never data volumes.
-        if [ "$(cat "/sys/block/$name/ro" 2>/dev/null || echo 0)" = "1" ]; then
-            continue
-        fi
         printf '/dev/%s\n' "$name"
     done
 }
 
-# True when the disk holds no partition table, no filesystem signature, and no
-# partitions the kernel knows about. Deliberately three independent checks: any
-# one of them alone has a case it misses, and the cost of a false "blank" is
-# somebody's data.
+# Print the device number (MAJ:MIN) of $1 when it is a writable whole disk.
+# Returns 1 when the answer is "not one": a partition, a device-mapper, md or loop
+# node, or a read-only disk such as an eMMC boot hardware partition. Returns 2 when
+# the question cannot be answered. lsblk's TYPE and the kernel's sysfs node must
+# agree, so a node that either source calls a partition is refused.
+whole_disk_id() {
+    info="$(lsblk -dnro MAJ:MIN,TYPE,RO "$1" 2>/dev/null)" || return 2
+    set -- $info
+    [ $# -eq 3 ] || return 2
+    [ -d "$sys/dev/block/$1" ] || return 2
+    if [ "$2" != disk ] || [ "$3" != 0 ] || [ -e "$sys/dev/block/$1/partition" ]; then
+        return 1
+    fi
+    printf '%s\n' "$1"
+}
+
+# Succeed only when the whole disk $1, device number $2, is proven blank, which
+# the header defines. Otherwise set `why` to the first fact that could not be
+# established, for the refusal to name.
 is_blank() {
-    disk="$1"
-    if [ -n "$(blkid -p -o value -s PTTYPE "$disk" 2>/dev/null || true)" ]; then
+    disk=$1
+    id=$2
+    if ! rows="$(lsblk -nro MAJ:MIN,MOUNTPOINT "$disk" 2>/dev/null)"; then
+        why="lsblk cannot list it"
         return 1
     fi
-    if [ -n "$(blkid -p -o value -s TYPE "$disk" 2>/dev/null || true)" ]; then
+    # One word, the disk's own number: any further row is a partition or a device
+    # stacked on the disk, and any further word is a mountpoint.
+    set -- $rows
+    if [ $# -eq 0 ]; then
+        why="lsblk lists nothing for it"
         return 1
     fi
-    # A child in lsblk means the kernel already sees partitions on it.
-    if [ "$(lsblk -no NAME "$disk" 2>/dev/null | wc -l)" -gt 1 ]; then
+    if [ $# -ne 1 ] || [ "$1" != "$id" ]; then
+        why="the kernel sees partitions, stacked devices or a mount on it"
+        return 1
+    fi
+    if ! holders="$(ls -A "$sys/dev/block/$id/holders" 2>/dev/null)"; then
+        why="its holders cannot be read"
+        return 1
+    fi
+    if [ -n "$holders" ]; then
+        why="it is held by $(echo $holders)"
+        return 1
+    fi
+    size="$(lsblk -bdnro SIZE "$disk" 2>/dev/null)" || size=''
+    case "$size" in
+        ''|*[!0-9]*) why="its size cannot be read"; return 1 ;;
+    esac
+    if [ "$size" -lt 2097152 ]; then
+        why="it is smaller than 2 MiB"
+        return 1
+    fi
+    head_bytes=$(($(dd if="$disk" bs=65536 count=16 2>/dev/null | wc -c)))
+    tail_bytes=$(($(dd if="$disk" bs=512 skip=$((size / 512 - 2048)) count=2048 2>/dev/null | wc -c)))
+    if [ "$head_bytes" -ne 1048576 ] || [ "$tail_bytes" -ne 1048576 ]; then
+        why="its first and last MiB do not read back"
+        return 1
+    fi
+    if ! sigs="$(wipefs --no-act --noheadings --output TYPE,OFFSET "$disk" 2>/dev/null)"; then
+        why="wipefs cannot probe it"
+        return 1
+    fi
+    if [ -n "$sigs" ]; then
+        why="wipefs finds $(printf '%s\n' "$sigs" | awk '{ printf "%s%s at %s", sep, $1, $2; sep = ", " }')"
         return 1
     fi
     return 0
@@ -105,49 +200,120 @@ while IFS="$tab" read -r match label fstype mount create; do
     case "$match" in ''|\#*) continue ;; esac
 
     # 1. Adopt: is there already a filesystem with our label? This is the path
-    #    every boot of a reflashed board takes.
-    existing="$(blkid -L "$label" 2>/dev/null || true)"
-    if [ -n "$existing" ]; then
+    #    every boot of a reflashed board takes. blkid exits 2 for "no such label";
+    #    any other failure means the search did not happen, so no disk is touched.
+    if ! command -v blkid >/dev/null 2>&1; then
+        log "REFUSING: blkid is not installed, so volume $label cannot be looked for; leaving every disk alone"
+        continue
+    fi
+    rc=0
+    existing="$(blkid -L "$label" 2>/dev/null)" || rc=$?
+    if [ "$rc" -eq 0 ] && [ -n "$existing" ]; then
         log "adopting $existing (label $label) at $mount"
         mkdir -p "$mount"
         mountpoint -q "$mount" || mount "$mount" || log "WARNING: mount $mount failed"
         continue
     fi
+    if [ "$rc" -ne 2 ]; then
+        log "REFUSING: blkid could not search for label $label (exit $rc); leaving every disk alone"
+        continue
+    fi
+
+    # Everything below exists to create, so a volume that may not be created stops here.
+    if [ "$create" != "if-blank" ]; then
+        log "no volume labelled $label and create=$create; leaving every disk alone"
+        continue
+    fi
+    if [ -z "$root_ids" ]; then
+        log "REFUSING: cannot establish which disk holds root ($root_why), so no disk is \
+safe to write; leaving $mount unmounted"
+        continue
+    fi
+    case "$fstype" in
+        ext4) ;;
+        *) log "REFUSING: unknown fstype '$fstype' for $label; leaving every disk alone"
+           continue ;;
+    esac
+    missing=''
+    for tool in lsblk wipefs dd sfdisk "mkfs.$fstype"; do
+        command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
+    done
+    if [ -n "$missing" ]; then
+        log "REFUSING: cannot check or create volume $label without:$missing"
+        continue
+    fi
 
     # Resolve the match to exactly one disk. Zero means the disk is not present
     # (a board built for one but shipped without); more than one means "the NVMe"
-    # was not an answer, and guessing which is not this hook's call.
+    # was not an answer, and guessing which is not this hook's call. An explicit
+    # node is canonicalized first, so a /dev/disk/by-* link and the node it points
+    # at are one disk.
+    explicit=''
     case "$match" in
-        /dev/*) candidates="$match"; [ -b "$match" ] || candidates="" ;;
-        *)      candidates="$(disks_of_kind "$match" || true)" ;;
+        /dev/*)
+            explicit=yes
+            listed="$(readlink -f "$match" 2>/dev/null)" || listed="$match"
+            ;;
+        *)
+            rc=0
+            listed="$(disks_of_kind "$match")" || rc=$?
+            if [ "$rc" -ne 0 ]; then
+                log "REFUSING: cannot list the $match disks; leaving $mount unmounted"
+                continue
+            fi
+            ;;
     esac
-    # Never consider the disk root is on.
-    if [ -n "$root_disk" ]; then
-        candidates="$(printf '%s\n' "$candidates" | grep -v "^${root_disk}$" || true)"
+
+    # Keep the writable whole disks that are not under root, as "path MAJ:MIN"
+    # lines. A disk whose identity cannot be established stops the volume: leaving
+    # it out could turn two disks into one and make an ambiguous match look certain.
+    candidates=''
+    unknown=''
+    while IFS= read -r dev; do
+        [ -n "$dev" ] || continue
+        rc=0
+        id="$(whole_disk_id "$dev")" || rc=$?
+        if [ "$rc" -eq 1 ]; then
+            [ -z "$explicit" ] || log "REFUSING: $dev is not a writable whole disk"
+            continue
+        fi
+        if [ "$rc" -ne 0 ]; then
+            unknown="$unknown $dev"
+            continue
+        fi
+        if printf '%s\n' "$root_ids" | grep -qxF "$id"; then
+            [ -z "$explicit" ] || log "REFUSING: $dev ($id) is under root"
+            continue
+        fi
+        candidates="$candidates$dev $id
+"
+    done <<EOF
+$listed
+EOF
+    if [ -n "$unknown" ]; then
+        log "REFUSING: cannot establish what$unknown is; leaving $mount unmounted"
+        continue
     fi
-    candidates="$(printf '%s\n' "$candidates" | grep -v '^$' || true)"
-    count="$(printf '%s\n' "$candidates" | grep -c . || true)"
+    count="$(printf '%s' "$candidates" | grep -c . || true)"
 
     if [ "$count" -eq 0 ]; then
         log "no disk matches '$match' for label $label; leaving $mount unmounted"
         continue
     fi
     if [ "$count" -gt 1 ]; then
-        log "REFUSING: '$match' matches $count disks ($(printf '%s' "$candidates" | tr '\n' ' ')); \
+        log "REFUSING: '$match' matches $count disks ($(printf '%s' "$candidates" | cut -d' ' -f1 | tr '\n' ' ')); \
 name one explicitly as match = \"/dev/...\""
         continue
     fi
-    disk="$candidates"
+    set -- $candidates
+    disk=$1
+    id=$2
 
-    if [ "$create" != "if-blank" ]; then
-        log "no volume labelled $label on $disk and create=$create; leaving it alone"
-        continue
-    fi
-
-    # 2/3. Create, but only on a disk that holds nothing at all.
-    if ! is_blank "$disk"; then
-        log "REFUSING: $disk already holds a partition table or filesystem and no \
-volume labelled $label; not touching it"
+    # 2/3. Create, but only on a disk proven to hold nothing at all.
+    why=''
+    if ! is_blank "$disk" "$id"; then
+        log "REFUSING: $disk is not proven blank ($why) and holds no volume labelled $label; \
+not touching it"
         continue
     fi
 
@@ -165,11 +331,7 @@ volume labelled $label; not touching it"
     fi
     part="/dev/$part"
 
-    case "$fstype" in
-        ext4) mkfs.ext4 -q -L "$label" "$part" ;;
-        *)    log "WARNING: unknown fstype '$fstype'; leaving $part unformatted"
-              continue ;;
-    esac
+    mkfs.ext4 -q -L "$label" "$part"
 
     mkdir -p "$mount"
     mountpoint -q "$mount" || mount "$mount" || log "WARNING: mount $mount failed"

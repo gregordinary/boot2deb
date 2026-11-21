@@ -1,0 +1,58 @@
+#!/bin/sh -e
+
+# kernel hook: /etc/kernel/postinst.d and /etc/kernel/postrm.d
+# Copy the newest installed kernel's board DTB onto the EFI system partition, at
+# /boot/efi/dtb/<ESP_DTB_PATH>. That is where u-boot's UEFI boot reads the device tree
+# it hands the kernel (its `fdtfile`, under /dtb on the partition it started the loader
+# from). The newest kernel's, because that is the kernel GRUB's menu boots by default;
+# after a removal the copy follows whichever kernel is then newest. Both names come from
+# /etc/boot2deb/board.conf, generated from the device: DTB_PATH is the kernel's DTB, and
+# ESP_DTB_PATH the name the board's u-boot loads it by.
+
+esp=/boot/efi
+
+version="$1"
+
+# passing the kernel version is required
+if [ -z "${version}" ]; then
+	echo >&2 "E: esp_dtb: ${DPKG_MAINTSCRIPT_PACKAGE:-kernel package} did not pass a version number"
+	exit 2
+fi
+
+if [ ! -e /etc/boot2deb/board.conf ]; then
+	echo >&2 "E: esp_dtb: /etc/boot2deb/board.conf missing (board dtb path unknown)"
+	exit 4
+fi
+. /etc/boot2deb/board.conf
+if [ -z "${ESP_DTB_PATH:-}" ]; then
+	echo >&2 "E: esp_dtb: /etc/boot2deb/board.conf names no ESP_DTB_PATH"
+	exit 4
+fi
+
+# The partition, not the directory under it: a DTB written to an empty mount point is
+# one the firmware never reads. The image build writes into the directory before the
+# partition exists, and says so with BOOT2DEB_ESP_STAGED.
+if [ -z "${BOOT2DEB_ESP_STAGED:-}" ] && ! mountpoint -q "${esp}"; then
+	echo >&2 "E: esp_dtb: ${esp} is not mounted; mount the EFI system partition and reinstall the kernel"
+	exit 5
+fi
+
+newest="$(linux-version list | linux-version sort --reverse | head -n1)"
+if [ -z "${newest}" ]; then
+	echo "I: esp_dtb: no kernel is installed; leaving ${esp}/dtb as it is"
+	exit 0
+fi
+
+source="/usr/lib/linux-image-${newest}/${DTB_PATH}"
+target="${esp}/dtb/${ESP_DTB_PATH}"
+if [ ! -e "${source}" ]; then
+	echo >&2 "E: esp_dtb: ${source} not found"
+	exit 3
+fi
+
+# Written beside the target and renamed over it, so a power cut leaves the old DTB or
+# the new one, never half of one.
+mkdir -p "$(dirname "${target}")"
+cp "${source}" "${target}.new"
+mv "${target}.new" "${target}"
+echo "I: esp_dtb: installed ${source} to ${target}"

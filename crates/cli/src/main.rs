@@ -37,6 +37,7 @@ mod builder;
 mod commands;
 mod config;
 mod fsutil;
+mod inventory;
 mod nextstep;
 mod prompt;
 mod render;

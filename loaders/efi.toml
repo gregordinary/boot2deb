@@ -1,0 +1,42 @@
+# loaders/efi.toml — UEFI: the firmware starts GRUB from an EFI system partition, and
+# GRUB reads /boot/grub/grub.cfg off the rootfs.
+#
+# The partition sits at the boot method's partition offset, ahead of the rootfs, and is
+# the one partition marked bootable, so u-boot's scan opens it and finds GRUB at the
+# removable-media path (\EFI\BOOT\BOOTAA64.EFI on arm64). That path needs no boot entry
+# in firmware variables, which none of these boards keeps from a running Linux. The
+# same binary sits under \EFI\debian\, where grub-install keeps it.
+#
+# The firmware also supplies the device tree, read from the partition's \dtb\ directory:
+# u-boot's UEFI boot loads \dtb\<fdtfile> from the partition it started the loader from.
+# A kernel hook (loaders/efi/overlay) copies the newest kernel's DTB there on every
+# kernel install and removal, so the board boots the device tree its kernel was built
+# with, not the firmware's own.
+#
+# The rest is Debian's: the architecture's GRUB package, its update-grub kernel hook,
+# and its postinst, which reinstalls the loader into both paths on every GRUB upgrade
+# (the image presets the debconf answers that make it do so without touching firmware
+# variables). /etc/default/grub.d/boot2deb.cfg gives update-grub the board's kernel
+# arguments.
+description = "UEFI: GRUB on an EFI system partition, at the removable-media path"
+
+# GRUB's EFI binary is under a mebibyte and a DTB a fraction of one; the partition is
+# sized well past FAT32's minimum (about 33 MiB) and past anything GRUB or a firmware
+# writes there.
+esp_size = "128MiB"
+
+# fsck.vfat, for the boot-time check of the ESP (/etc/fstab pass 2). The GRUB package
+# itself comes from the architecture, which resolution adds.
+packages = ["dosfstools"]
+
+# What update-grub and the GRUB package's postinst work from on the board: the menu, and
+# the core image the postinst checks for before it reinstalls the loader. The loader at
+# the removable path and the DTB on the partition are checked by the build, which knows
+# the architecture and the device.
+[[expect]]
+check = "file"
+path  = "/boot/grub/grub.cfg"
+
+[[expect]]
+check = "file"
+path  = "/boot/grub/*-efi/core.efi"

@@ -91,14 +91,14 @@ mod tests {
         let read = inputs(&[
             "devices/turing-rk1.toml",
             "devices/turing-rk1/overlay",
-            "blobs/rk3588",
+            "blobs/keyrings",
         ]);
         assert!(reaches(&read, "devices/turing-rk1.toml"));
         assert!(reaches(&read, "devices/turing-rk1/overlay/etc/motd"));
-        assert!(reaches(&read, "blobs/rk3588/rk3588_bl31_v1.51.elf"));
+        assert!(reaches(&read, "blobs/keyrings/debian-archive-keyring.gpg"));
         // A sibling that merely shares a prefix is not under the directory.
         assert!(!reaches(&read, "devices/turing-rk1-lite.toml"));
-        assert!(!reaches(&read, "blobs/rk3588x/a"));
+        assert!(!reaches(&read, "blobs/keyrings-old/a"));
         assert!(!reaches(&read, "docs/src/boards/turing-rk1.md"));
         let changed = vec![
             "docs/src/introduction.md".to_string(),

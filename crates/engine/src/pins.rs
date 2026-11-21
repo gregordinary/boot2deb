@@ -3,15 +3,17 @@
 //!
 //! The assembly (`assemble_lock`) is pure and unit-tested. The resolution
 //! ([`resolve_lock`]) is the side-effecting shell. It peels refs to commits with
-//! `git ls-remote`, hashes the vendored rkbin blobs, and reads the patches-repo
-//! HEAD. `boot2deb build` never runs this — it reads the committed lock.
+//! `git ls-remote`, pins and hashes the rkbin blobs at a commit of their upstream
+//! ([`rkbin::resolve`]), and reads the patches-repo HEAD. `boot2deb build` never runs
+//! this — it reads the committed lock.
 
 use crate::blobs;
 use crate::error::EngineError;
 use crate::git;
+use crate::rkbin;
 use boot2deb_core::lock::{
     AppPin, BlobsPin, DotnetPins, FfmpegPins, GitPin, KernelPin, KmodPin, Lock, NugetPin,
-    PatchesPin, RootfsPin, UbootPin, UserspacePin,
+    PatchesPin, RootfsPin, TfaPin, UbootPin, UserspacePin,
 };
 use boot2deb_core::model::{App, AppBuild, DotnetSdk, KernelSource};
 use boot2deb_core::ResolvedBuild;
@@ -27,6 +29,9 @@ pub struct UpdateOptions<'a> {
     pub kernel_ref: &'a str,
     /// u-boot ref to pin (defaults to the boot-method's `uboot_ref`).
     pub uboot_ref: &'a str,
+    /// Trusted Firmware-A ref to pin (defaults to the SoC's `[tfa].ref`). Read only
+    /// when the resolved BL31 provider is `tfa`.
+    pub tfa_ref: &'a str,
     /// Per-tree refs to pin the media-accel userspace sources at (`(name, ref)`), in
     /// any order. A tree absent here falls back to its own `[[userspace]]` declared
     /// `ref`. The caller seeds it from the previous lock (inheritance) or a
@@ -42,8 +47,11 @@ pub struct UpdateOptions<'a> {
     /// any order. A name absent here falls back to that `device_kmods` entry's declared
     /// `ref`. The caller seeds it from the previous lock (inheritance) or a flag.
     pub kmod_refs: &'a [(String, String)],
-    /// Directory holding the vendored rkbin blobs to hash.
-    pub blobs_dir: &'a Path,
+    /// The previous lock's rkbin pin, when there is one. Its commit is kept while it
+    /// is from the same repository and ref and contains every file the build names
+    /// ([`rkbin::resolve`]). An update that moves another axis then leaves the rkbin
+    /// pin where it was.
+    pub previous_blobs: Option<&'a BlobsPin>,
     /// Checkout of the `patches` repo whose HEAD pins the series. Consulted only when
     /// the resolved kernel names a patch series. A build that applies no patches
     /// leaves this unread and locks no `[patches]` table, so it needs no checkout.
@@ -51,6 +59,12 @@ pub struct UpdateOptions<'a> {
     /// Path recorded for the solved package manifest the rootfs stage writes
     /// (the content pin itself is produced then).
     pub rootfs_manifest: &'a str,
+    /// The digest of the compiled kernel's configuration inputs
+    /// ([`kernel_config_digest`]), which the lock records as
+    /// [`KernelPin::config_sha256`]. The caller computes it, because the inputs are
+    /// files found along the config search path. `None` for a build that compiles no
+    /// kernel, and required for one that does.
+    pub kernel_config_sha256: Option<&'a str>,
     /// The rootfs `SOURCE_DATE_EPOCH` this lock records, in Unix seconds: the time of
     /// this update. The caller keeps the previous lock's value instead when no pin moved
     /// ([`Lock::keep_source_date_epoch`]).
@@ -84,6 +98,119 @@ pub trait NugetResolver {
     /// Restore `app`'s package set from `pins`, write it as the sidecar the returned
     /// pin names, and return that pin.
     fn resolve(&self, app: &App, pins: &AppTreePins) -> Result<NugetPin, EngineError>;
+}
+
+/// The digest a lock records for a compiled kernel's configuration inputs
+/// ([`KernelPin::config_sha256`]), as 64 lowercase hex.
+///
+/// `fragments` is each config fragment in merge order, as `(name, contents)`, and
+/// `device_dts` each board device-tree source in installed order, likewise. The names
+/// are the config's own: a fragment's name from the kernel definition, a source's path
+/// from the device layer. A renamed or reordered input is therefore a different
+/// configuration, as it is to the merge. Pure, so `update` and `build` reach the same
+/// answer from the same files.
+pub fn kernel_config_digest(
+    base_defconfig: &str,
+    fragments: &[(&str, &[u8])],
+    device_dts: &[(&str, &[u8])],
+) -> String {
+    let mut text = format!("base_defconfig {base_defconfig}\n");
+    for (name, bytes) in fragments {
+        text.push_str(&format!(
+            "fragment {name} {}\n",
+            crate::blobs::sha256_hex(bytes)
+        ));
+    }
+    for (name, bytes) in device_dts {
+        text.push_str(&format!(
+            "device_dts {name} {}\n",
+            crate::blobs::sha256_hex(bytes)
+        ));
+    }
+    crate::blobs::sha256_hex(text.as_bytes())
+}
+
+/// Refuse a build whose kernel configuration moved since the lock was written.
+///
+/// `digest` is [`kernel_config_digest`] over the config tree as it is now, or `None`
+/// for a build that compiles no kernel. A lock whose
+/// [`config_sha256`](KernelPin::config_sha256) differs describes a kernel with another
+/// configuration under the same revision, which apt could not tell from this one. The
+/// fix is `update`, which records the new digest and moves the revision on. The
+/// lock's presence of a kernel is [`check_lock_consistency`]'s to compare.
+pub fn check_kernel_config(lock: &Lock, digest: Option<&str>) -> Result<(), EngineError> {
+    match (&lock.kernel, digest) {
+        (Some(pin), Some(digest)) if pin.config_sha256 != digest => {
+            Err(EngineError::LockConfigDrift {
+                axes: vec![format!(
+                    "kernel configuration (base defconfig, config fragments, board \
+                     device-tree sources): lock '{}' vs config tree '{}'",
+                    &pin.config_sha256[..12],
+                    &digest[..digest.len().min(12)]
+                )],
+            })
+        }
+        _ => Ok(()),
+    }
+}
+
+/// The digest a lock records for the u-boot package's configuration inputs
+/// ([`UbootPin::config_sha256`]), as 64 lowercase hex. It is `None` for a build that
+/// compiles no u-boot.
+///
+/// The inputs are the ones that field's documentation lists: the values the u-boot
+/// node folds into its output signature that no pin records. Each is recorded under its
+/// name with its length, so no two sets of values digest alike. The submodules are a
+/// set, as the TF-A node folds them. Pure, so `update` and `build` reach the same answer
+/// from the same resolved build.
+pub fn uboot_config_digest(build: &ResolvedBuild) -> Option<String> {
+    let boot = build.rkbin_boot()?;
+    let mut inputs = vec![
+        ("device", build.device.as_str()),
+        ("description", build.description.as_str()),
+        ("soc", build.soc.as_str()),
+        ("boot_method", build.boot_method.as_str()),
+        ("arch", build.arch.as_str()),
+        ("uboot_defconfig", boot.uboot_defconfig.as_str()),
+        ("offset.idbloader", boot.offsets.idbloader.as_str()),
+        ("offset.uboot_itb", boot.offsets.uboot_itb.as_str()),
+    ];
+    if let Some(tfa) = boot.bl31.tfa() {
+        inputs.push(("tfa.plat", tfa.plat.as_str()));
+        let mut submodules: Vec<&str> = tfa.submodules.iter().map(String::as_str).collect();
+        submodules.sort_unstable();
+        submodules.dedup();
+        inputs.extend(submodules.into_iter().map(|s| ("tfa.submodule", s)));
+    }
+    let text: String = inputs
+        .iter()
+        .map(|(name, value)| format!("{name} {} {value}\n", value.len()))
+        .collect();
+    Some(crate::blobs::sha256_hex(text.as_bytes()))
+}
+
+/// Refuse a build whose u-boot configuration moved since the lock was written.
+///
+/// `digest` is [`uboot_config_digest`] over the build as it resolves now, or `None` for
+/// a build that compiles no u-boot. A lock whose
+/// [`config_sha256`](UbootPin::config_sha256) differs would archive another package
+/// under the version it names. Running `update` records the new digest and moves the
+/// [revision](UbootPin::revision) on. The lock's presence of a u-boot is
+/// [`check_lock_consistency`]'s to compare.
+pub fn check_uboot_config(lock: &Lock, digest: Option<&str>) -> Result<(), EngineError> {
+    match (&lock.uboot, digest) {
+        (Some(pin), Some(digest)) if pin.config_sha256 != digest => {
+            Err(EngineError::LockConfigDrift {
+                axes: vec![format!(
+                    "u-boot configuration (defconfig, offsets, board identity, TF-A \
+                     platform): lock '{}' vs config tree '{}'",
+                    &pin.config_sha256[..12],
+                    &digest[..digest.len().min(12)]
+                )],
+            })
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Resolve a build to an exact [`Lock`] by consulting upstream and the vendored
@@ -180,31 +307,47 @@ pub fn resolve_lock(build: &ResolvedBuild, opts: &UpdateOptions) -> Result<Lock,
                 source,
                 reference: boot2deb_core::sources::normalize_ref(opts.kernel_ref),
                 commit,
+                // The first revision of this ref. The caller moves it on from the previous
+                // lock's with `Lock::carry_kernel_revision`.
+                revision: 1,
+                config_sha256: opts
+                    .kernel_config_sha256
+                    .expect("the caller digests a compiled kernel's configuration")
+                    .to_string(),
             })
         })
         .transpose()?;
     // Likewise u-boot and the rkbin blobs: only the boot method that compiles a
-    // bootloader has them. A depthcharge board's firmware is its own.
-    let (uboot, blobs) = match build.rkbin_boot() {
+    // bootloader has them. A depthcharge board's firmware is its own. The BL31 is
+    // pinned as exactly one of the rkbin blob or the TF-A tree, whichever provider
+    // resolution selected.
+    let (uboot, blobs, tfa) = match build.rkbin_boot() {
         Some(boot) => {
             let uboot = UbootPin {
                 source: boot.uboot_source.clone(),
                 reference: boot2deb_core::sources::normalize_ref(opts.uboot_ref),
                 commit: git::resolve_ref(&boot.uboot_source, opts.uboot_ref)?,
+                // The first revision of this upstream version. The caller moves it on
+                // from the previous lock's with `Lock::carry_uboot_revision`.
+                revision: 1,
+                config_sha256: uboot_config_digest(build)
+                    .expect("a rockchip-rkbin boot compiles u-boot"),
             };
-            let blobs = BlobsPin {
-                atf: blob_pin(opts.blobs_dir, &boot.rkbin.atf)?,
-                tpl: blob_pin(opts.blobs_dir, &boot.rkbin.tpl)?,
-                bl32: boot
-                    .rkbin
-                    .bl32
-                    .as_deref()
-                    .map(|f| blob_pin(opts.blobs_dir, f))
-                    .transpose()?,
-            };
-            (Some(uboot), Some(blobs))
+            let tfa = boot
+                .bl31
+                .tfa()
+                .map(|src| -> Result<TfaPin, EngineError> {
+                    Ok(TfaPin {
+                        source: src.git.clone(),
+                        reference: boot2deb_core::sources::normalize_ref(opts.tfa_ref),
+                        commit: git::resolve_ref(&src.git, opts.tfa_ref)?,
+                    })
+                })
+                .transpose()?;
+            let blobs = pin_blobs(boot, opts.previous_blobs)?;
+            (Some(uboot), Some(blobs), tfa)
         }
-        None => (None, None),
+        None => (None, None, None),
     };
     // Pin the media-accel sources only when the build includes them (a
     // `requires_media_accel` feature is selected); a base build peels no such refs
@@ -330,6 +473,7 @@ pub fn resolve_lock(build: &ResolvedBuild, opts: &UpdateOptions) -> Result<Lock,
         uboot,
         patches,
         uboot_patches,
+        tfa,
         userspace,
         ffmpeg,
         blobs,
@@ -392,6 +536,7 @@ fn assemble_lock(
     uboot: Option<UbootPin>,
     patches: Option<PatchesPin>,
     uboot_patches: Option<PatchesPin>,
+    tfa: Option<TfaPin>,
     userspace: Vec<UserspacePin>,
     ffmpeg: Option<FfmpegPins>,
     blobs: Option<BlobsPin>,
@@ -403,6 +548,7 @@ fn assemble_lock(
         patches,
         uboot,
         uboot_patches,
+        tfa,
         userspace,
         ffmpeg,
         // One pin per device `device_kmods` entry; empty (and omitted from the committed
@@ -440,8 +586,9 @@ fn assemble_lock(
 /// lock records *from the resolved build*:
 ///
 /// - The kernel definition id
-/// - Every commit pin's source repo (kernel / u-boot / userspace / ffmpeg /
-///   out-of-tree modules)
+/// - Every commit pin's source repo (kernel / u-boot / TF-A / rkbin / userspace /
+///   ffmpeg / out-of-tree modules)
+/// - The BL31 provider, which decides whether `[blobs].atf` or `[tfa]` exists
 /// - The rkbin blob file names
 /// - The patch series
 /// - The distro and the suite
@@ -524,6 +671,19 @@ pub fn check_lock_consistency(lock: &Lock, build: &ResolvedBuild) -> Result<(), 
     if let (Some(pin), Some(boot)) = (&lock.uboot, build.rkbin_boot()) {
         diff(&mut axes, "u-boot source", &pin.source, &boot.uboot_source);
     }
+    // The BL31 provider: the lock pins TF-A iff the resolved build selects it. A
+    // recipe that moved between providers must re-pin, not pack the other BL31. The
+    // source is compared where both sides have TF-A, as u-boot's is.
+    let resolved_tfa = build.rkbin_boot().and_then(|b| b.bl31.tfa());
+    presence(
+        &mut axes,
+        "tf-a",
+        lock.tfa.is_some(),
+        resolved_tfa.is_some(),
+    );
+    if let (Some(pin), Some(src)) = (&lock.tfa, resolved_tfa) {
+        diff(&mut axes, "tf-a source", &pin.source, &src.git);
+    }
     // A tree appearing or disappearing is drift in its own right — the SoC's statement
     // about its hardware changed, or this build stopped asking for an optional tree — so
     // presence is checked per name before the source URL, and the URL only where both
@@ -581,12 +741,21 @@ pub fn check_lock_consistency(lock: &Lock, build: &ResolvedBuild) -> Result<(), 
         build.rkbin_boot().is_some(),
     );
     if let (Some(pins), Some(boot)) = (&lock.blobs, build.rkbin_boot()) {
+        // The commit is meaningful only in the repository it was pinned from.
         diff(
             &mut axes,
-            "atf blob",
-            blob_pin_file(&pins.atf),
-            &boot.rkbin.atf,
+            "rkbin source",
+            &pins.source,
+            &boot.rkbin.upstream.git,
         );
+        match (&pins.atf, boot.bl31.rkbin_file()) {
+            (Some(locked), Some(resolved)) => {
+                diff(&mut axes, "atf blob", blob_pin_file(locked), resolved)
+            }
+            (locked, resolved) => {
+                presence(&mut axes, "atf blob", locked.is_some(), resolved.is_some())
+            }
+        }
         diff(
             &mut axes,
             "tpl blob",
@@ -854,27 +1023,195 @@ fn named_tree_url(name: &str) -> Option<String> {
     Some(url.to_string())
 }
 
-/// Hash a vendored blob and format its lock pin `"<filename>@sha256:<hex>"`.
-/// The u-boot build verifies the same pin with [`blobs::verify`]. A blob that
-/// does not exist is [`EngineError::BlobMissing`] — the remedy is to vendor the
-/// file, which a bare I/O error would not say.
-fn blob_pin(dir: &Path, filename: &str) -> Result<String, EngineError> {
-    let path = dir.join(filename);
-    let bytes = match std::fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
-            return Err(EngineError::BlobMissing {
-                filename: filename.to_string(),
-                dir: dir.display().to_string(),
-            })
-        }
-        Err(source) => return Err(EngineError::io(&path, source)),
+/// Pin the rkbin blobs a u-boot build consumes: the commit [`rkbin::resolve`] picks
+/// and each named file's `"<filename>@sha256:<hex>"`, hashed from the bytes at that
+/// commit. The u-boot stage fetches and verifies exactly these
+/// ([`rkbin::ensure_files`]).
+fn pin_blobs(
+    boot: &boot2deb_core::model::ResolvedRkbinBoot,
+    previous: Option<&BlobsPin>,
+) -> Result<BlobsPin, EngineError> {
+    let up = &boot.rkbin.upstream;
+    let atf = boot.bl31.rkbin_file();
+    let bl32 = boot.rkbin.bl32.as_deref();
+    let names: Vec<&str> = [atf, Some(boot.rkbin.tpl.as_str()), bl32]
+        .into_iter()
+        .flatten()
+        .collect();
+    let keep = previous
+        .filter(|p| p.source == up.git && p.reference == up.git_ref)
+        .map(|p| p.commit.as_str());
+    let fetched = rkbin::resolve(up, keep, &names)?;
+    let pin_of = |name: &str| {
+        fetched
+            .files
+            .iter()
+            .find(|(f, _)| f == name)
+            .map(|(f, bytes)| blobs::pin(f, bytes))
+            .expect("rkbin::resolve returns every file it was asked for")
     };
-    Ok(blobs::pin(filename, &bytes))
+    Ok(BlobsPin {
+        source: up.git.clone(),
+        reference: up.git_ref.clone(),
+        commit: fetched.commit.clone(),
+        atf: atf.map(pin_of),
+        tpl: pin_of(&boot.rkbin.tpl),
+        bl32: bl32.map(pin_of),
+    })
 }
 
 #[cfg(test)]
 mod tests {
+    /// The configuration digest the fixtures' `update` records for a compiled kernel.
+    const CONFIG_SHA256: &str = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+
+    /// The digest moves with every input it covers, including where an input sits in
+    /// the merge order and what it is called, and holds still otherwise.
+    #[test]
+    fn the_kernel_config_digest_covers_contents_order_and_names() {
+        let a: (&str, &[u8]) = ("soc/rk3588", b"CONFIG_A=y\n");
+        let b: (&str, &[u8]) = ("device/turing-rk1", b"CONFIG_B=m\n");
+        let dts: (&str, &[u8]) = ("devices/x/board.dts", b"/dts-v1/;\n");
+        let base = kernel_config_digest("defconfig", &[a, b], &[dts]);
+        assert_eq!(base.len(), 64);
+        assert_eq!(base, kernel_config_digest("defconfig", &[a, b], &[dts]));
+        for other in [
+            kernel_config_digest("rockchip_linux_defconfig", &[a, b], &[dts]),
+            kernel_config_digest("defconfig", &[b, a], &[dts]),
+            kernel_config_digest("defconfig", &[a, ("soc/rk3588", b"CONFIG_B=m\n")], &[dts]),
+            kernel_config_digest("defconfig", &[a, ("device/other", b"CONFIG_B=m\n")], &[dts]),
+            kernel_config_digest("defconfig", &[a, b], &[]),
+            kernel_config_digest("defconfig", &[a, b], &[("devices/x/board.dts", b"changed")]),
+        ] {
+            assert_ne!(base, other);
+        }
+    }
+
+    /// `build` refuses a lock whose recorded configuration is not the tree's, names the
+    /// axis, and says to re-run `update`. A matching tree, and a build with no compiled
+    /// kernel, pass.
+    #[test]
+    fn a_kernel_configuration_that_moved_since_the_lock_is_refused() {
+        let lock = matching_lock(&rk1_build());
+        check_kernel_config(&lock, Some(CONFIG_SHA256)).unwrap();
+        check_kernel_config(&lock, None).unwrap();
+        let moved = "e".repeat(64);
+        let err = check_kernel_config(&lock, Some(&moved)).unwrap_err();
+        let EngineError::LockConfigDrift { axes } = &err else {
+            panic!("{err}");
+        };
+        assert_eq!(axes.len(), 1);
+        assert!(axes[0].starts_with("kernel configuration"), "{}", axes[0]);
+        assert!(err.to_string().contains("boot2deb update"), "{err}");
+    }
+
+    /// The u-boot digest moves with every unpinned input the package is built from,
+    /// holds still for a resolved value the package does not read, and does not exist
+    /// for a board whose boot method compiles no u-boot.
+    #[test]
+    fn the_uboot_config_digest_covers_what_the_package_reads_and_no_more() {
+        let rkbin = rk1_build();
+        let base = uboot_config_digest(&rkbin).unwrap();
+        assert_eq!(base.len(), 64);
+        assert_eq!(
+            uboot_config_digest(&rk1_build()).as_deref(),
+            Some(base.as_str())
+        );
+        let digest =
+            |build: &ResolvedBuild, edit: &dyn Fn(&mut ResolvedBuild, &mut ResolvedRkbinBoot)| {
+                let mut build = build.clone();
+                let mut boot = build.rkbin_boot().unwrap().clone();
+                edit(&mut build, &mut boot);
+                build.boot = ResolvedBoot::RockchipRkbin(Box::new(boot));
+                uboot_config_digest(&build).unwrap()
+            };
+        for moved in [
+            digest(&rkbin, &|_, b| {
+                b.uboot_defconfig = "rock5b-rk3588_defconfig".into()
+            }),
+            digest(&rkbin, &|_, b| b.offsets.idbloader = "64KiB".into()),
+            digest(&rkbin, &|_, b| b.offsets.uboot_itb = "16MiB".into()),
+            digest(&rkbin, &|r, _| r.description = "Another board".into()),
+            digest(&rkbin, &|r, _| r.device = "another-board".into()),
+        ] {
+            assert_ne!(moved, base);
+        }
+        // Where the partitions begin is the image's, not the package's.
+        assert_eq!(
+            digest(&rkbin, &|_, b| b.offsets.partitions = "32MiB".into()),
+            base
+        );
+        // A value's length is recorded with it, so two inputs cannot trade characters
+        // across their boundary and digest alike.
+        assert_ne!(
+            digest(&rkbin, &|_, b| {
+                b.offsets.idbloader = "32KiB 1".into();
+                b.offsets.uboot_itb = "MiB".into();
+            }),
+            digest(&rkbin, &|_, b| {
+                b.offsets.idbloader = "32KiB".into();
+                b.offsets.uboot_itb = "1 MiB".into();
+            }),
+        );
+
+        // Under TF-A the platform and the submodule set are inputs too, and the set's
+        // order is not.
+        let tfa = boot2deb_core::resolve::resolve_recipe(
+            &crate::test_support::repo_root(),
+            crate::test_support::RK1_MEDIA_ACCEL,
+            &boot2deb_core::model::Overrides {
+                bl31: Some(boot2deb_core::model::Bl31Provider::Tfa),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let tfa_base = uboot_config_digest(&tfa).unwrap();
+        let tfa_source = |edit: &dyn Fn(&mut boot2deb_core::model::TfaSource)| {
+            digest(&tfa, &|_, b| {
+                let mut src = b.bl31.tfa().unwrap().clone();
+                edit(&mut src);
+                b.bl31 = boot2deb_core::model::Bl31::Tfa(Box::new(src));
+            })
+        };
+        assert_eq!(tfa_source(&|_| {}), tfa_base);
+        assert_ne!(tfa_source(&|s| s.plat = "rk3576".into()), tfa_base);
+        assert_ne!(
+            tfa_source(&|s| s.submodules = vec!["contrib/dtc".into(), "x".into()]),
+            tfa_base
+        );
+        assert_eq!(
+            tfa_source(&|s| s.submodules = vec!["b".into(), "a".into()]),
+            tfa_source(&|s| s.submodules = vec!["a".into(), "b".into()])
+        );
+
+        let depthcharge = boot2deb_core::resolve::resolve_recipe(
+            &crate::test_support::repo_root(),
+            "asus-c201/forky",
+            &boot2deb_core::model::Overrides::default(),
+        )
+        .unwrap();
+        assert_eq!(uboot_config_digest(&depthcharge), None);
+    }
+
+    /// `build` refuses a lock whose u-boot digest is not the config tree's, naming the
+    /// axis and `update` as the fix, and has nothing to compare for a build that
+    /// compiles no u-boot.
+    #[test]
+    fn a_uboot_configuration_that_moved_since_the_lock_is_refused() {
+        let build = rk1_build();
+        let lock = matching_lock(&build);
+        let digest = uboot_config_digest(&build).unwrap();
+        check_uboot_config(&lock, Some(&digest)).unwrap();
+        check_uboot_config(&lock, None).unwrap();
+        let err = check_uboot_config(&lock, Some(&"e".repeat(64))).unwrap_err();
+        let EngineError::LockConfigDrift { axes } = &err else {
+            panic!("{err}");
+        };
+        assert_eq!(axes.len(), 1);
+        assert!(axes[0].starts_with("u-boot configuration"), "{}", axes[0]);
+        assert!(err.to_string().contains("boot2deb update"), "{err}");
+    }
+
     /// A resolver for builds that declare no `dotnet-deb` app: reaching it is a bug in
     /// the test, not a resolution to stub.
     struct NoApps;
@@ -910,6 +1247,7 @@ mod tests {
     }
     use super::*;
     use crate::test_support::rk1_build;
+    use boot2deb_core::model::{ResolvedBoot, ResolvedRkbinBoot};
 
     #[test]
     fn named_tree_maps_to_kernel_org() {
@@ -1000,31 +1338,6 @@ mod tests {
     }
 
     #[test]
-    fn blob_pin_names_the_vendoring_remedy_when_missing() {
-        // A blob the resolved build names but the blob dir does not hold: the
-        // error names the file, the searched dir, and the vendoring remedy —
-        // not a bare I/O "No such file or directory".
-        let dir = tempfile::tempdir().unwrap();
-        let err = blob_pin(dir.path(), "rk3588_bl31_v1.51.elf").unwrap_err();
-        match &err {
-            EngineError::BlobMissing { filename, dir: d } => {
-                assert_eq!(filename, "rk3588_bl31_v1.51.elf");
-                assert_eq!(*d, dir.path().display().to_string());
-            }
-            e => panic!("expected BlobMissing, got {e:?}"),
-        }
-        assert!(
-            err.to_string().contains("vendor it there"),
-            "remedy in message: {err}"
-        );
-        // A present blob still pins.
-        std::fs::write(dir.path().join("blob.bin"), b"bytes").unwrap();
-        assert!(blob_pin(dir.path(), "blob.bin")
-            .unwrap()
-            .starts_with("blob.bin@sha256:"));
-    }
-
-    #[test]
     fn resolve_lock_refuses_a_dirty_patches_checkout_before_any_network() {
         // An uncommitted file in the patches checkout: `update` would pin a HEAD
         // that silently excludes it, so resolve_lock refuses. The clean check runs
@@ -1056,14 +1369,16 @@ mod tests {
         let opts = UpdateOptions {
             kernel_ref: "v7.1.1",
             uboot_ref: "unused",
+            tfa_ref: "",
             userspace_refs: &[],
             ffmpeg_base_ref: "unused",
             ffmpeg_rockchip_ref: "unused",
             kmod_refs: &[],
-            blobs_dir: Path::new("/unused"),
+            previous_blobs: None,
             patches_path: repo,
             rootfs_manifest: "unused.pkgs.lock",
             source_date_epoch: 1_790_347_034,
+            kernel_config_sha256: Some(CONFIG_SHA256),
             nuget: &NoApps,
         };
         let err = resolve_lock(&build, &opts).unwrap_err();
@@ -1102,14 +1417,16 @@ mod tests {
         let opts = UpdateOptions {
             kernel_ref: "v7.1.1",
             uboot_ref: "unused",
+            tfa_ref: "",
             userspace_refs: &[],
             ffmpeg_base_ref: "unused",
             ffmpeg_rockchip_ref: "unused",
             kmod_refs: &[],
-            blobs_dir: Path::new("/unused"),
+            previous_blobs: None,
             patches_path: Path::new("/definitely/not/a/git/repo"),
             rootfs_manifest: "unused.pkgs.lock",
             source_date_epoch: 1_790_347_034,
+            kernel_config_sha256: Some(CONFIG_SHA256),
             nuget: &NoApps,
         };
         if let Err(e) = resolve_lock(&build, &opts) {
@@ -1131,18 +1448,29 @@ mod tests {
                 source: kernel_source_url(&kernel.source).unwrap(),
                 reference: "v7.1.1".into(),
                 commit: "a".repeat(40),
+                revision: 1,
+                config_sha256: "d".repeat(64),
             }),
             Some(UbootPin {
                 source: boot.uboot_source.clone(),
                 reference: "v2026.04".into(),
                 commit: "b".repeat(40),
+                revision: 1,
+                config_sha256: "9".repeat(64),
             }),
             None,       // patches
             None,       // uboot_patches
+            None,       // tfa
             Vec::new(), // userspace
             None,       // ffmpeg
             Some(BlobsPin {
-                atf: format!("{}@sha256:{}", boot.rkbin.atf, "0".repeat(64)),
+                source: "https://github.com/rockchip-linux/rkbin.git".into(),
+                reference: "master".into(),
+                commit: "c".repeat(40),
+                atf: boot
+                    .bl31
+                    .rkbin_file()
+                    .map(|f| format!("{f}@sha256:{}", "0".repeat(64))),
                 tpl: format!("{}@sha256:{}", boot.rkbin.tpl, "1".repeat(64)),
                 bl32: None,
             }),
@@ -1173,6 +1501,8 @@ mod tests {
                 source: "ks".into(),
                 reference: "v7.1.1".into(),
                 commit: "a".repeat(40),
+                revision: 1,
+                config_sha256: "d".repeat(64),
             }),
             patches: Some(PatchesPin {
                 series: vec!["rk3588-accel".into()],
@@ -1184,8 +1514,11 @@ mod tests {
                 source: "us".into(),
                 reference: "v2026.04".into(),
                 commit: "c".repeat(40),
+                revision: 1,
+                config_sha256: "9".repeat(64),
             }),
             uboot_patches: None,
+            tfa: None,
             userspace: vec![
                 named_pin("mpp", git('1')),
                 named_pin("librga", git('2')),
@@ -1203,9 +1536,13 @@ mod tests {
                 source_date_epoch: 1_790_347_034,
             }),
             blobs: Some(BlobsPin {
-                atf:
+                source: "https://github.com/rockchip-linux/rkbin.git".into(),
+                reference: "master".into(),
+                commit: "c".repeat(40),
+                atf: Some(
                     "a.elf@sha256:0000000000000000000000000000000000000000000000000000000000000000"
                         .into(),
+                ),
                 tpl:
                     "t.bin@sha256:1111111111111111111111111111111111111111111111111111111111111111"
                         .into(),
@@ -1322,14 +1659,16 @@ mod tests {
         let opts = UpdateOptions {
             kernel_ref: "v7.1.1",
             uboot_ref: "v2026.04",
+            tfa_ref: "",
             userspace_refs: &[],
             ffmpeg_base_ref: "v4l2-request-n8.1",
             ffmpeg_rockchip_ref: "8.1",
             kmod_refs: &[],
-            blobs_dir: Path::new("/unused"),
+            previous_blobs: None,
             patches_path: Path::new("/unused"),
             rootfs_manifest: "turing-rk1-forky.pkgs.lock",
             source_date_epoch: 1_790_347_034,
+            kernel_config_sha256: Some(CONFIG_SHA256),
             nuget: &NoApps,
         };
         let git_pin = |r: &str, c: &str| boot2deb_core::lock::GitPin {
@@ -1345,11 +1684,15 @@ mod tests {
                 source: "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git".into(),
                 reference: "v7.1.1".into(),
                 commit: "c9acdc466e9aa96352f658b9276aa8a45b8e817d".into(),
+                revision: 1,
+                config_sha256: "d".repeat(64),
             }),
             Some(UbootPin {
                 source: build.rkbin_boot().unwrap().uboot_source.clone(),
                 reference: "v2026.04".into(),
                 commit: "88dc2788777babfd6322fa655df549a019aa1e69".into(),
+                revision: 1,
+                config_sha256: "9".repeat(64),
             }),
             Some(PatchesPin {
                 series: vec!["rk3588-accel".into()],
@@ -1358,6 +1701,7 @@ mod tests {
                 commit: "67750099d1f73e36ca3551de380744a72e4d5ef7".into(),
             }),
             None, // uboot_patches
+            None, // tfa
             vec![
                     named_pin("mpp", git_pin("mainline-cma-fix", "95a6c48816d39b190be4b7333ad6fc249c08590c")),
                     named_pin("librga", git_pin("master", "2cffdf6f332c3ddb93eb087841d78e8b487db2a3")),
@@ -1368,7 +1712,10 @@ mod tests {
                 rockchip: Some(git_pin("8.1", "f66f2f804627e4464c2d1b10181772b5437bb991")),
             }),
             Some(BlobsPin {
-                atf: "rk3588_bl31_v1.51.elf@sha256:2222222222222222222222222222222222222222222222222222222222222222".into(),
+                source: "https://github.com/rockchip-linux/rkbin.git".into(),
+                reference: "master".into(),
+                commit: "c".repeat(40),
+                atf: Some("rk3588_bl31_v1.51.elf@sha256:2222222222222222222222222222222222222222222222222222222222222222".into()),
                 tpl: "rk3588_ddr_v1.19.bin@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".into(),
                 bl32: None,
             }),
@@ -1459,6 +1806,96 @@ mod tests {
         }
     }
 
+    /// Every committed lock, variants included, describes the build point its recipe
+    /// resolves to today. A config edit that would make `build` refuse a shipped lock
+    /// fails here instead, naming the lock and its drifted axes.
+    #[test]
+    fn every_shipped_lock_agrees_with_its_fresh_resolution() {
+        let root = crate::test_support::repo_root();
+        let recipes = root.path().join("recipes");
+        let mut locks = Vec::new();
+        let mut dirs = vec![recipes.clone()];
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else if path.extension().is_some_and(|e| e == "lock")
+                    // The solved package manifest and an app's NuGet sidecar sit
+                    // beside the lock under the same extension; neither is a lock.
+                    && !path
+                        .file_stem()
+                        .is_some_and(|s| s.to_string_lossy().contains('.'))
+                {
+                    let rel = path.strip_prefix(&recipes).unwrap().with_extension("");
+                    locks.push(rel.to_string_lossy().into_owned());
+                }
+            }
+        }
+        locks.sort();
+        assert!(!locks.is_empty());
+        let drifted: Vec<String> = locks
+            .iter()
+            .filter_map(|reference| {
+                let build = boot2deb_core::resolve::resolve_recipe(
+                    &root,
+                    reference,
+                    &boot2deb_core::model::Overrides::default(),
+                )
+                .unwrap_or_else(|e| panic!("{reference} does not resolve: {e}"));
+                let lock = root.lock(reference).unwrap();
+                check_lock_consistency(&lock, &build)
+                    .err()
+                    .map(|e| format!("{reference}: {e}"))
+            })
+            .collect();
+        assert!(drifted.is_empty(), "{drifted:#?}");
+    }
+
+    /// Selecting the other BL31 provider is drift, in both directions: the lock pins
+    /// exactly the BL31 its point resolved, and a point that moved between providers
+    /// re-pins rather than packing the other one.
+    #[test]
+    fn moving_between_bl31_providers_is_drift() {
+        let rkbin = rk1_build();
+        let tfa = boot2deb_core::resolve::resolve_recipe(
+            &crate::test_support::repo_root(),
+            crate::test_support::RK1_MEDIA_ACCEL,
+            &boot2deb_core::model::Overrides {
+                bl31: Some(boot2deb_core::model::Bl31Provider::Tfa),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let rkbin_lock = matching_lock(&rkbin);
+        check_lock_consistency(&rkbin_lock, &rkbin).unwrap();
+        let axes = |lock: &Lock, build: &ResolvedBuild| match check_lock_consistency(lock, build) {
+            Err(EngineError::LockConfigDrift { axes }) => axes,
+            other => panic!("expected LockConfigDrift, got {other:?}"),
+        };
+        let drift = axes(&rkbin_lock, &tfa);
+        assert!(drift.iter().any(|a| a.starts_with("tf-a:")), "{drift:?}");
+        assert!(
+            drift.iter().any(|a| a.starts_with("atf blob:")),
+            "{drift:?}"
+        );
+        // A TF-A lock for the TF-A point passes, and its source is held to the SoC's.
+        let src = tfa.rkbin_boot().unwrap().bl31.tfa().unwrap();
+        let mut tfa_lock = matching_lock(&tfa);
+        tfa_lock.blobs.as_mut().unwrap().atf = None;
+        tfa_lock.tfa = Some(TfaPin {
+            source: src.git.clone(),
+            reference: src.git_ref.clone(),
+            commit: "e".repeat(40),
+        });
+        check_lock_consistency(&tfa_lock, &tfa).unwrap();
+        assert!(!axes(&tfa_lock, &rkbin).is_empty());
+        tfa_lock.tfa.as_mut().unwrap().source = "https://example.invalid/fork.git".into();
+        let drift = axes(&tfa_lock, &tfa);
+        assert_eq!(drift.len(), 1, "{drift:?}");
+        assert!(drift[0].starts_with("tf-a source"), "{drift:?}");
+    }
+
     #[test]
     fn a_media_accel_tree_appearing_or_vanishing_is_drift_on_both_axes() {
         // The userspace and ffmpeg pins exist together — resolution gates both on the
@@ -1491,14 +1928,16 @@ mod tests {
         let opts = UpdateOptions {
             kernel_ref: "v7.1.1",
             uboot_ref: "unused",
+            tfa_ref: "",
             userspace_refs: &[],
             ffmpeg_base_ref: "unused",
             ffmpeg_rockchip_ref: "unused",
             kmod_refs: &[],
-            blobs_dir: Path::new("/unused"),
+            previous_blobs: None,
             patches_path: Path::new("/definitely/not/a/checkout"),
             rootfs_manifest: "unused.pkgs.lock",
             source_date_epoch: 1_790_347_034,
+            kernel_config_sha256: Some(CONFIG_SHA256),
             nuget: &NoApps,
         };
         match resolve_lock(&build, &opts).unwrap_err() {
@@ -1551,9 +1990,15 @@ mod tests {
                 }),
             ),
             (
+                "rkbin source",
+                base_lock(&|l| {
+                    l.blobs.as_mut().unwrap().source = "https://other.example/rkbin.git".into()
+                }),
+            ),
+            (
                 "atf blob",
                 base_lock(&|l| {
-                    l.blobs.as_mut().unwrap().atf = "rk3588_bl31_v0.99.elf@sha256:aa".into()
+                    l.blobs.as_mut().unwrap().atf = Some("rk3588_bl31_v0.99.elf@sha256:aa".into())
                 }),
             ),
             (
@@ -1588,6 +2033,8 @@ mod tests {
                 source: kernel_source_url(&kernel.source).unwrap(),
                 reference: "v7.1.1".into(),
                 commit: "kc".into(),
+                revision: 1,
+                config_sha256: "d".repeat(64),
             }),
             patches: {
                 let series = image_of(build).kernel.patch_series();
@@ -1602,6 +2049,8 @@ mod tests {
                 source: boot.uboot_source.clone(),
                 reference: "v".into(),
                 commit: "u".into(),
+                revision: 1,
+                config_sha256: uboot_config_digest(build).unwrap(),
             }),
             uboot_patches: boot.uboot_series.as_ref().map(|series| PatchesPin {
                 series: vec![series.clone()],
@@ -1611,6 +2060,7 @@ mod tests {
             }),
             // Mirror whichever trees the fixture's SoC declares, so the lock built
             // here matches the config it is later drift-checked against.
+            tfa: None,
             userspace: image_of(build)
                 .userspace
                 .iter()
@@ -1628,7 +2078,10 @@ mod tests {
                 source_date_epoch: 1_790_347_034,
             }),
             blobs: Some(BlobsPin {
-                atf: format!("{}@sha256:aa", boot.rkbin.atf),
+                source: "https://github.com/rockchip-linux/rkbin.git".into(),
+                reference: "master".into(),
+                commit: "c".repeat(40),
+                atf: boot.bl31.rkbin_file().map(|f| format!("{f}@sha256:aa")),
                 tpl: format!("{}@sha256:bb", boot.rkbin.tpl),
                 bl32: boot.rkbin.bl32.as_ref().map(|f| format!("{f}@sha256:cc")),
             }),

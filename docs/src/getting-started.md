@@ -52,7 +52,7 @@ once.
   checkout without installing? Prefix each command with `cargo run -p boot2deb-cli --`.
   Either way, run it from inside `boot2deb/` (or pass `--root <dir>`), since the config
   root defaults to the current directory.
-- **Disk and time.** A cold build bootstraps a Debian rootfs and, for a board that
+- **Disk and time.** A cold build bootstraps the image's rootfs and, for a board that
   needs one, compiles a kernel and a bootloader. Budget a few GB of scratch space and
   tens of minutes the first time. Later builds reuse cached trees. A board that compiles
   nothing (the C201) is much cheaper: it is a rootfs bootstrap and an image assembly.
@@ -141,9 +141,9 @@ namespaces are a hard requirement even when nothing is cross.
 
 ### The roots a build provisions
 
-A build stands up as many as four Debian roots, each for one job, each bootstrapped and
-entered in-process through unprivileged user namespaces. They live in your work dir and
-`boot2deb clean --sandbox` reclaims them.
+A build stands up as many as four roots of the image's distribution, one per job,
+each bootstrapped and entered in-process through unprivileged user namespaces. They live
+in your work dir and `boot2deb clean --sandbox` reclaims them.
 
 | Root | Architecture | What it holds | What runs in it |
 | --- | --- | --- | --- |
@@ -260,9 +260,16 @@ unchanged skips the multi-minute bootstrap. To force a clean rootfs, add
 Artifacts are written under the recipe's work dir, `build/turing-rk1/forky/artifacts/`:
 
 - **`turing-rk1-forky.img.xz`** — the compressed bootable image.
-- **`turing-rk1-forky.provenance.toml`** — exactly what went into the image: the
-  resolved pins, package count, toolchain identity, the archives the rootfs resolved
-  against, and the first-boot credential.
+- **`turing-rk1-forky.provenance.toml`** — exactly what went into the image. That is
+  the resolved pins, package count, toolchain identity, and the archives the rootfs
+  resolved against. It also says who can reach the image's account, and contains no
+  secret.
+- **`turing-rk1-forky.credentials.toml`**: the image's generated first-boot password,
+  readable by you only. Keep it, and do not publish it with the image.
+- **`turing-rk1-forky.artifacts.toml`**: the artifact inventory, each file the build's
+  stages published, with its digest and the lock it was built under. `press`, `try` and
+  `verify-image` read the image through it, so a file left behind by an earlier build is
+  never mistaken for this one's.
 - **`turing-rk1-forky.plan`** — the package set as an installable document: every
   version and sha256, plus the state of each archive they came from. `boot2deb reproduce`
   replays it to rebuild this exact userland later. See
@@ -276,19 +283,21 @@ Every artifact is named for the whole build point, device and recipe together
 (`turing-rk1/forky` → `turing-rk1-forky`). Several recipes can therefore share one
 `--out-dir`, and an image copied to a flashing host still says what it is.
 
-The build prints the exact paths on its final lines, including the credential:
+The build prints the exact paths on its final lines, including the file that holds the
+credential:
 
 ```
 compressed        : .../build/turing-rk1/forky/artifacts/turing-rk1-forky.img.xz
-first-boot pw     : <generated>  (user debian, expired — change at first login)
+first-boot pw     : .../build/turing-rk1/forky/artifacts/turing-rk1-forky.credentials.toml (user debian, readable by you only; the password is expired — change it at first login)
 cross-manifest    : .../build/turing-rk1/forky/artifacts/turing-rk1-forky.cross.pkgs
 packaging-manifest: .../build/turing-rk1/forky/artifacts/turing-rk1-forky.packaging.pkgs
 provenance        : .../build/turing-rk1/forky/artifacts/turing-rk1-forky.provenance.toml
 ```
 
-**Note the first-boot password down.** It is unique per image, shown once here, and
-stored only in the provenance file. It exists nowhere on the running system in
-recoverable form. It is also expired, so the first login has to replace it.
+**The first-boot password is in that file and nowhere else.** It is unique per image,
+and the file is readable by you only. The password is not printed or written into any
+other record of the build. It exists nowhere on the running system in recoverable form.
+It is also expired, so the first login has to replace it.
 
 If you would rather not transcribe a password at a console, authorize your SSH key in
 the recipe instead. `ssh debian@<board>` then works on the first boot. That, and the

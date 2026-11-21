@@ -1,0 +1,53 @@
+#!/bin/sh
+# Name every PARTUUID this system mounts by that more than one attached partition
+# has.
+#
+# A boot2deb image mounts its root by PARTUUID, from the kernel command line and
+# /etc/fstab, and its EFI system partition the same way where it has one. Every
+# medium written from one image has the same identifiers, so with two attached the
+# initramfs roots on whichever partition it finds first. That can be the other
+# disk's, which then runs in place of this one with nothing to say so.
+#
+# Prints one line per shared PARTUUID, naming every partition that has it and the
+# one mounted from, and exits 1 when there is any. Exit 0 says every PARTUUID the
+# system mounts by names one partition. With --log each line also goes to the
+# kernel log as a warning, which is how boot2deb-partuuid-check.service runs it on
+# every boot. It warns and never refuses: the system it is running is a working one,
+# and the fix is to detach one disk or give it identifiers of its own
+# (`boot2deb press --fresh-identity`).
+
+set -u
+
+log=
+case "${1:-}" in
+    --log) log=1 ;;
+    '') ;;
+    *) echo "usage: partuuid-check [--log]" >&2; exit 2 ;;
+esac
+
+# The PARTUUIDs the system mounts by, lowercase: the first field of each fstab entry
+# that names one, and the kernel's root=. A tag can be written in either case, and
+# lsblk reports lowercase.
+uuids=$(
+    {
+        awk '$1 ~ /^PARTUUID=/ { sub(/^PARTUUID=/, "", $1); print $1 }' /etc/fstab
+        tr ' ' '\n' < /proc/cmdline | sed -n 's/^root=PARTUUID=//p'
+    } | awk '{ print tolower($0) }' | sort -u
+)
+
+table=$(lsblk -rno PATH,PARTUUID)
+shared=0
+for uuid in $uuids; do
+    devices=$(printf '%s\n' "$table" | awk -v u="$uuid" 'tolower($2) == u { print $1 }')
+    count=$(printf '%s\n' "$devices" | grep -c .)
+    [ "$count" -gt 1 ] || continue
+    shared=$((shared + 1))
+    mounted=$(findmnt -rn -o SOURCE -S "PARTUUID=$uuid" | head -n 1)
+    line="PARTUUID $uuid is on $count partitions: $(echo $devices), mounted from ${mounted:-none}"
+    echo "$line"
+    if [ -n "$log" ]; then
+        printf '<4>boot2deb: %s. Two disks written from one image share it, and a boot mounts whichever it finds first. Detach one, or give it identifiers of its own with boot2deb press --fresh-identity.\n' \
+            "$line" > /dev/kmsg 2>/dev/null || true
+    fi
+done
+[ "$shared" -eq 0 ]

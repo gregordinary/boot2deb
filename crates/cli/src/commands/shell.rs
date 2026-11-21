@@ -185,6 +185,10 @@ fn ensure_build_has(
         ShellStage::Uboot if build.rkbin_boot().is_none() => Err(refuse(
             "this board's boot method builds no bootloader — its firmware is its own",
         )),
+        ShellStage::Tfa if build.rkbin_boot().and_then(|b| b.bl31.tfa()).is_none() => Err(refuse(
+            "its BL31 is not built from Trusted Firmware-A — it packs the rkbin blob, \
+                 or builds no bootloader at all",
+        )),
         ShellStage::Kmod
             if build
                 .image
@@ -243,6 +247,19 @@ mod tests {
         }
         // Neither declares an out-of-tree module, so neither has a kmod root.
         assert!(ensure_build_has(&base, ShellStage::Kmod, "r").is_err());
+        // Both pack the rkbin BL31, so neither has a TF-A root, until `--bl31 tfa`
+        // selects the provider that compiles one.
+        assert!(ensure_build_has(&base, ShellStage::Tfa, "r").is_err());
+        let tfa = resolve_recipe(
+            &repo_root(),
+            "turing-rk1/forky",
+            &Overrides {
+                bl31: Some(boot2deb_core::model::Bl31Provider::Tfa),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(ensure_build_has(&tfa, ShellStage::Tfa, "r").is_ok());
     }
 
     /// Every value of the flag names a distinct engine stage, so no two `--stage`
@@ -252,6 +269,7 @@ mod tests {
         let stages = [
             ShellStageArg::Kernel,
             ShellStageArg::Uboot,
+            ShellStageArg::Tfa,
             ShellStageArg::Kmod,
             ShellStageArg::Userspace,
             ShellStageArg::Ffmpeg,

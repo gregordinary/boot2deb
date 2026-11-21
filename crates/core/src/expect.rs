@@ -21,13 +21,17 @@
 //! skipped. There are no inline comments and no quoting, so a pattern or a card
 //! name is kept verbatim.
 //!
-//! Four check kinds exist only in the generated stream and cannot be authored.
+//! Five check kinds exist only in the generated stream and cannot be authored.
 //! `kernel-release` and `kernel-flavor` are derived from the image identity by
 //! the build (see the rootfs stage). A layer restating the pinned kernel would
-//! drift from the lock that pins it. `single-kernel` takes no argument at all and
-//! is not a property of any layer. It states that the image contains one kernel.
-//! That is true of every image this builder produces, and is a claim only the
-//! build is in a position to make.
+//! drift from the lock that pins it.
+//!
+//! `single-kernel` and `unique-partuuid` take no argument at all and are not
+//! properties of any layer. The first states that the image contains one kernel.
+//! That is true of every image this builder produces, and is a claim only the build
+//! is in a position to make. The second states that every PARTUUID the running
+//! system mounts by names one attached partition. It holds until a second disk
+//! written from the same image is attached.
 //!
 //! `initramfs-module` is derived, one line per name, from the resolved
 //! [`initramfs_modules`](crate::model::ResolvedImage::initramfs_modules). The list
@@ -38,10 +42,11 @@
 
 /// The check kinds only the build emits, in the `.checks` grammar's spelling. An
 /// `[[expect]]` naming one is refused with a pointer to where its value comes from.
-const DERIVED_KINDS: [&str; 4] = [
+const DERIVED_KINDS: [&str; 5] = [
     "kernel-release",
     "kernel-flavor",
     "single-kernel",
+    "unique-partuuid",
     "initramfs-module",
 ];
 
@@ -65,6 +70,10 @@ pub const CHECKS_DIR: &str = "etc/boot2deb/selftest.d";
 /// - **Disk content** (checkable on any boot of the rootfs, including under
 ///   `boot2deb try`): [`File`](Self::File), [`Dtb`](Self::Dtb),
 ///   [`Firmware`](Self::Firmware).
+/// - **Boot-partition content** (checkable where the EFI system partition is
+///   mounted, which is on the board): [`EspFile`](Self::EspFile). It is reported
+///   not-applicable under `try`, whose UEFI boot reads the partition through the
+///   firmware instead.
 /// - **Hardware state** (meaningful only on the board, reported not-applicable
 ///   under emulation): [`DriverBound`](Self::DriverBound),
 ///   [`Devnode`](Self::Devnode), [`SoundCard`](Self::SoundCard),
@@ -77,6 +86,18 @@ pub enum Expectation {
     /// one entry.
     File {
         /// Absolute path, `*` allowed (e.g. `/boot/initrd.img-*`).
+        path: String,
+    },
+    /// A path that must exist on the EFI system partition, relative to its root
+    /// (`/EFI/BOOT/BOOTAA64.EFI`). The runner reads it under the partition's mount
+    /// point, [`ESP_MOUNT_POINT`](crate::model::ESP_MOUNT_POINT). `*` globs as in
+    /// [`File`](Self::File).
+    ///
+    /// The partition holds what the firmware reads before Linux exists: the loader and
+    /// the DTB. A file missing there is a board that does not boot, or one that boots on
+    /// the firmware's own device tree without saying so.
+    EspFile {
+        /// Path from the partition's root, `*` allowed.
         path: String,
     },
     /// The board's device-tree blob must be installed where its boot path reads
@@ -182,7 +203,7 @@ impl TryFrom<ExpectRaw> for Expectation {
         .flatten()
         .collect();
         let takes: &[&str] = match raw.check.as_str() {
-            "file" | "dtb" | "firmware" | "devnode" => &["path"],
+            "file" | "esp-file" | "dtb" | "firmware" | "devnode" => &["path"],
             "driver-bound" => &["device", "driver"],
             "sound-card" => &["name"],
             "no-dmesg-match" => &["pattern"],
@@ -193,7 +214,7 @@ impl TryFrom<ExpectRaw> for Expectation {
             }
             other => {
                 return Err(format!(
-                    "unknown check kind '{other}' (known: file, dtb, firmware, \
+                    "unknown check kind '{other}' (known: file, esp-file, dtb, firmware, \
                      driver-bound, devnode, sound-card, no-dmesg-match)"
                 ))
             }
@@ -210,6 +231,9 @@ impl TryFrom<ExpectRaw> for Expectation {
         };
         let expect = match raw.check.as_str() {
             "file" => Expectation::File {
+                path: take("path", raw.path)?,
+            },
+            "esp-file" => Expectation::EspFile {
                 path: take("path", raw.path)?,
             },
             "dtb" => Expectation::Dtb {
@@ -243,6 +267,7 @@ impl Expectation {
     pub fn kind(&self) -> &'static str {
         match self {
             Expectation::File { .. } => "file",
+            Expectation::EspFile { .. } => "esp-file",
             Expectation::Dtb { .. } => "dtb",
             Expectation::Firmware { .. } => "firmware",
             Expectation::DriverBound { .. } => "driver-bound",
@@ -259,6 +284,7 @@ impl Expectation {
     pub fn args(&self) -> String {
         match self {
             Expectation::File { path }
+            | Expectation::EspFile { path }
             | Expectation::Dtb { path }
             | Expectation::Firmware { path }
             | Expectation::Devnode { path } => path.clone(),
@@ -278,7 +304,9 @@ impl Expectation {
     /// the flat `.checks` grammar (which has no quoting to hide in).
     fn validate(&self) -> Result<(), String> {
         match self {
-            Expectation::File { path } | Expectation::Devnode { path } => {
+            Expectation::File { path }
+            | Expectation::EspFile { path }
+            | Expectation::Devnode { path } => {
                 absolute_path(self.kind(), path)?;
                 if matches!(self, Expectation::Devnode { .. }) && !path.starts_with("/dev/") {
                     return Err(format!("devnode path '{path}' must start with /dev/"));
@@ -305,11 +333,11 @@ impl Expectation {
 
 /// Format one `.checks` line: the kind padded to a fixed column, then the
 /// argument text. Shared with the engine's generated identity lines
-/// (`kernel-release`, `kernel-flavor`, `single-kernel`, `initramfs-module`) so
-/// authored and derived checks render identically.
+/// (`kernel-release`, `kernel-flavor`, `single-kernel`, `unique-partuuid`,
+/// `initramfs-module`) so authored and derived checks render identically.
 ///
 /// Trailing whitespace is trimmed, so a kind that takes no argument at all
-/// (`single-kernel`) renders as the bare word. The alternative would be a word
+/// (`single-kernel`, `unique-partuuid`) renders as the bare word. The alternative would be a word
 /// followed by the padding of an argument that is not there.
 pub fn render_line(kind: &str, args: &str) -> String {
     format!("{kind:<17} {args}").trim_end().to_string()
@@ -379,6 +407,8 @@ pub enum ExpectScope {
     Soc,
     /// From the boot-method layer: the boot artifacts that method installs.
     BootMethod,
+    /// From the loader layer: what the selected loader's hooks keep current.
+    Loader,
     /// From the device layer (the resolved device's or an ancestor's).
     Device,
     /// From the kernel definition.
@@ -395,6 +425,7 @@ impl ExpectScope {
         match self {
             ExpectScope::Soc => "soc",
             ExpectScope::BootMethod => "boot-method",
+            ExpectScope::Loader => "loader",
             ExpectScope::Device => "device",
             ExpectScope::Kernel => "kernel",
             ExpectScope::Feature => "feature",
@@ -467,6 +498,11 @@ mod tests {
                 r#"check = "file"
 path = "/boot/vmlinuz-*""#,
                 "file              /boot/vmlinuz-*",
+            ),
+            (
+                r#"check = "esp-file"
+path = "/EFI/BOOT/BOOTAA64.EFI""#,
+                "esp-file          /EFI/BOOT/BOOTAA64.EFI",
             ),
             (
                 r#"check = "dtb"

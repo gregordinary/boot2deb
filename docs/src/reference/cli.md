@@ -154,7 +154,7 @@ boot2deb doctor turing-rk1/forky
 - **`resolve`** prints the fully merged build point without building, and runs the same
   local `preflight_config` coherence check the build does (geometry, fragment-file
   existence, feature compatibility, apt keyrings). Every selectable axis (`--kernel`,
-  `--suite`, `--feature`, `--layout`, `--boot-method`, `--board`, `--image-size`,
+  `--suite`, `--feature`, `--layout`, `--boot-method`, `--board`, `--bl31`, `--image-size`,
   `--locale`, `--locale-gen`, `--timezone`, `--keymap`) can be overridden, so you can
   see what a choice resolves to before committing it to config.
 
@@ -221,7 +221,8 @@ the typed model. It offers only valid choices:
 
 It fills every derivable value, and leaves the four values it cannot validate as
 best-effort suggestions marked `# TODO:`. Those are `uboot_defconfig`, `kernel_dtb`, and
-the `[rkbin]` `atf`/`tpl` blobs.
+the `[rkbin]` `atf`/`tpl` blobs. On a SoC whose layer declares a `[tfa]` source, it
+also lists both BL31 providers in `supported_bl31`, with `rkbin` as the default.
 
 It writes into the highest-precedence `--overlay` when one is given (the third-party
 path), else the primary root. It then resolve-checks the result and prints exactly which
@@ -239,8 +240,8 @@ wrong. Verify them before `update`/`build`. See
 boot2deb update turing-rk1/forky --kernel-ref v7.1.1
 ```
 
-Resolves upstream refs to commits and hashes the vendored blobs, writing
-`recipes/<device>/<leaf>.lock`. This is the **only** command that consults upstream.
+Resolves upstream refs to commits and pins the rkbin blobs (a commit of the rkbin
+repository plus each file's sha256), writing `recipes/<device>/<leaf>.lock`. This is the **only** command that consults upstream.
 `build` reads only the lock, so a build is reproducible from its committed pins.
 
 The lock also records the rootfs's `source_date_epoch`, the time every rootfs timestamp
@@ -260,6 +261,10 @@ One flag is worth calling out:
   as a *variant* of the recipe. Everything but the features comes from the recipe,
   and the lock is written beside it as `<leaf>+<feature>...lock`. A variant's first
   `update` inherits the recipe's pins, so it needs no `--kernel-ref`.
+
+Each fetched tree with a declared ref has a flag that pins another one, and a lock
+pinned to a bare commit keeps it. The bootloader's are `--uboot-ref` and, for a recipe
+whose BL31 provider is `tfa`, `--tfa-ref`.
 
 An example:
 
@@ -295,6 +300,19 @@ build ends it changes to `succeeded`, or to `failed` with the error it ended on.
 stale builder say, is recorded as failed too. `verify-image` reads it first, so it never
 vouches for an image the newest build did not write.
 
+The u-boot, rootfs and image stages also record their files in the point's artifact
+inventory, `<point>.artifacts.toml`, since later stages and commands read them by name.
+Each entry lists every file with its digest, and the lock it was built under. The
+image's entry adds its layout and the files it was assembled from. A stage drops its
+entry when it starts, and writes it back only once its checks passed. A rootfs whose
+solve the pinned manifest rejected is therefore never listed.
+
+An image-only run takes its rootfs tar and bootloader payloads from those entries. It
+holds them to the current lock and to their digests, and refuses ones that fail either.
+An explicit `--rootfs-tar` is used as given and recorded as external. The image stage also removes
+the containers and other-layout images an earlier run left that this run did not write
+again.
+
 Notable flags:
 
 - **`--feature <name>`**, repeatable, selects which lock to build — the one `update
@@ -317,7 +335,9 @@ Notable flags:
   [`device_kmods`](config-model.md#out-of-tree-modules-are-their-own-layer))
   against an existing kernel tree, so a driver bump need not rebuild the kernel. A
   `--stage uboot` run also emits a standalone, directly-flashable `<point>-boot.img`
-  (see below).
+  (see below). Where the recipe's BL31 provider is `tfa`, the `uboot` node also builds
+  TF-A, in the same cross root, and packs the `bl31.elf` it produces. A u-boot restored
+  from the artifact cache builds no TF-A.
 
   Asking for a node this recipe does not *have* is an error naming why, rather than a
   silent no-op. `--stage kernel` on a board that installs Debian's kernel is that case.
@@ -337,7 +357,7 @@ Notable flags:
   content cache. **`--no-artifact-cache`** forces every compile node to rebuild instead
   of restoring stored `.deb`s (see [Two caches](#two-caches-and-what-each-one-keys-on)).
 
-- **`--kernel-src`, `--uboot-src`, `--ffmpeg-base-src`, `--userspace-src`,
+- **`--kernel-src`, `--uboot-src`, `--tfa-src`, `--ffmpeg-base-src`, `--userspace-src`,
   `--kmod-src`** redirect where a tree is *cloned from*, without changing what is built.
   The commit still comes from the lock, so a local checkout holding it makes the fetch
   near-instant and produces the same result.
@@ -521,6 +541,7 @@ one:
 | --- | --- | --- |
 | `kernel` | the host-arch cross root | the kernel stage's build-deps |
 | `uboot` | the same cross root | the u-boot stage's build-deps |
+| `tfa` | the same cross root | nothing, since the toolchain is the whole of TF-A's build-deps |
 | `kmod` | the same cross root | the kernel's, which is what an out-of-tree module build needs |
 | `userspace` | the target-arch build sandbox | the userspace stage's shared build-deps, plus each named tree's own (`--userspace <name>`) |
 | `ffmpeg` | the same target-arch sandbox | the suite's codec libraries **plus this build's own `librga`/MPP `.deb`s**, so run `--stage userspace` first |
@@ -748,7 +769,7 @@ ordering is the point. The cheap check tells you a series makes no claim about y
 kernel, and the expensive one tells you whether it would have worked anyway.
 
 ```
-note: kernel v7.4-rc5 is outside series 'rk3588-accel' (declared >=7.3, <7.4) — a build
+note: kernel v7.4-rc5 is outside series 'rk3588-accel' (declared >=7.3.4, <7.4) — a build
       will refuse it. Measure it first, which needs no re-pin:
   boot2deb verify-patches turing-rk1/forky --kernel v7.4-rc5 --kernel-path <checkout> --keep-going
 then widen applies_to_kernel in the series if it comes back clean, or retire the
@@ -893,19 +914,35 @@ build of the point was a whole one that succeeded. A failed or unfinished build 
 and neither is a later `--stage kernel` run. Either is the point's whole report.
 Every other check would be judging files the newest build did not write.
 
-Then, per image, it checks:
+The image it checks is the one the point's artifact inventory, `<point>.artifacts.toml`,
+names. That is the image stage's entry for the current lock, in the layout that stage
+laid out. A split build's rootfs image is therefore found as readily as a combined one.
+It is never a file picked by its name. Then, per image, it checks:
 
-- That the artifact set is present.
+- That **the artifact is the bytes the build recorded**. A file changed since, or an image
+  formatted from an external `--rootfs-tar`, ends the report there.
+- That the provenance manifest records this artifact, with the same digest.
 - That the plan document parses, and its digest matches what the provenance manifest
   records.
 - That `[[archives]]` is well formed. That is the mirror plus the build's own pool. The
   pool is marked `local` and contains no mirror URL, since a per-run path is not
   portable provenance.
-- That **the ext4 filesystem is exactly its GPT partition**.
+- That the disk is the length both records state.
+- That **both copies of the partition table validate**: the primary strictly (header and
+  entry-array checksums, every extent inside the disk), and the backup on the disk's last
+  sector, agreeing with it.
+- That the rootfs partition is the one with the image's root PARTUUID, whatever
+  `--rootfs-label` called it, and has the Linux filesystem type.
+- That **the ext4 filesystem is exactly its GPT partition**, by the superblock on the disk
+  and by the provenance.
 - That the rootfs GPT entry is marked bootable, since U-Boot's `bootflow scan` looks
-  only at marked partitions once any partition has the mark.
+  only at marked partitions once any partition has the mark. Under the `efi` loader, the
+  EFI system partition instead, which must also have the EFI system type.
 - For a fitted `--image-size`, that the slack the recipe asked for actually survived
   into the shipped filesystem.
+- Under `rockchip-rkbin`, that **the boot region holds the bootloader the image stage
+  placed**. Each payload is read at its offset and held to the digest recorded for the
+  file the stage consumed. A split build's boot image is held to the same record.
 - That **the rootfs holds exactly the files its
   [file manifest](reproducibility.md#the-rootfs-file-manifest) lists**, every field of
   every path.
@@ -919,14 +956,14 @@ The filesystem and partition check is the one that matters most. Larger and it w
 mount at all, and smaller and the difference is wasted. It is checked on every image,
 not only the fitted one, because it is the invariant the fit ordering exists to preserve.
 
-Every structure is read by the code that *wrote* it, meaning the same Rust GPT and ext4
-readers the image node uses. The check therefore cannot drift from the build by parsing
-the same bytes differently. It needs no root, and changes nothing it verifies.
+Every structure is read by the code that *wrote* it, or by a strict reader of what the
+writer produced. The check therefore cannot drift from the build by parsing the same
+bytes differently. It needs no root, and changes nothing it verifies.
 
-The file check walks the whole rootfs, and a walk seeks, which a compressed stream
-cannot. A `.img.xz` is therefore decompressed into a sparse temporary file in the
-artifact directory first, and a raw `.img` from `--keep-raw` is read in place. Every
-other check reads only the head of the artifact. A failing invariant in any point exits
+The disk checks read the image by offset, and every read is bounded by the disk. A
+damaged image is therefore an error that says what is wrong with it. A `.img.xz` cannot
+seek, so it is decompressed once into a sparse temporary file in the artifact directory.
+A raw `.img` from `--keep-raw` is read in place. A failing invariant in any point exits
 non-zero, and `--json` gives the whole run as one document.
 
 ### verify-sources
@@ -979,15 +1016,16 @@ Each side is a **recipe name**, a path to a **`.lock`**, or a path to a
 **`.provenance.toml`**. The two sides need not be the same kind. Everything it
 reads is a document the build already wrote, so it runs offline and builds nothing.
 
-Seven sections, in the order they answer the question:
+Eight sections, in the order they answer the question:
 
 | section | what it compares |
 | --- | --- |
 | `packages` | the solved manifest: added, removed, re-versioned, and *rebuilt* (same version, different `.deb`) |
-| `kernel` | the pin — id, flavor, clone URL, ref, commit — and the requested kconfig, symbol by symbol |
+| `kernel` | the pin — id, flavor, clone URL, ref, commit, package revision — and the requested kconfig, symbol by symbol |
 | `patches` | series membership, each axis's ref and commit, and the patch **files** behind a moved commit |
-| `sources` | every other pinned tree: u-boot, MPP, RGA, Mali, ffmpeg, each out-of-tree module |
+| `sources` | every other pinned tree: u-boot with its package revision, the rkbin commit, MPP, RGA, Mali, ffmpeg, each out-of-tree module |
 | `blobs` | the rkbin pins, by sha256 |
+| `extra-debs` | each pre-built `.deb` from outside the suite's archive, by URL or path: its sha256 and where it is staged |
 | `builder` | which boot2deb ran, the host it cross-compiled from, and the archive state the rootfs resolved against |
 | `files` | every file the image's rootfs holds: added, removed, and changed, with the fields that changed |
 
@@ -1073,7 +1111,7 @@ documents state the same facts. What is in them:
 | --- | --- |
 | every installed package | name, exact version, sha256, and a `pkg:deb/debian/...` purl — containing `&upstream=<source>` where the source package is named separately |
 | every pinned source tree | the ref and the exact commit — kernel, u-boot, the patch series, the media-accel trees, and each compiled app's tree, packaging tree and series |
-| every rkbin blob | its sha256, which is the only identity it has |
+| every rkbin blob | its sha256, and the rkbin commit it was fetched at as its download location |
 | every externally-fetched `.deb` | its URL and sha256 |
 | every NuGet package a compiled app ships | id, exact version, sha512, and a `pkg:nuget/...` purl |
 
@@ -1186,7 +1224,7 @@ upstream gives:
 | pin | compared against |
 | --- | --- |
 | a git source | the refs its remote advertises |
-| an rkbin blob | the files of the upstream directory its SoC layer names in `[rkbin.upstream]` |
+| an rkbin blob | the files of the directory its SoC layer names in `[rkbin.upstream]`, at the head of that table's `ref` |
 | an `extra_debs` entry fetched by URL | the index of the pool directory the URL is in |
 | a compiled app's .NET SDK | the SDK versions its channel has released |
 

@@ -65,9 +65,10 @@ pub struct SeedKeys {
     /// `static_ip=` — static IPv4 (`address/prefix[,gateway[,dns...]]`, validated by
     /// `boot2deb_core::staticip`) for the connection the seed sets up. That is the
     /// Wi-Fi profile when [`wifi_ssid`](Self::wifi_ssid) is present, and the wired
-    /// interface otherwise. It is applied through NetworkManager on images that contain
-    /// it, `dhcpcd.conf` on images that contain dhcpcd, and a logged skip on images with
-    /// neither. Absent means DHCP.
+    /// interface otherwise. An image with NetworkManager gets a connection profile, and
+    /// one whose wired network netplan configures gets a netplan file. An image that
+    /// runs dhcpcd gets a `dhcpcd.conf` stanza, and any other a logged skip. Absent means
+    /// DHCP.
     pub static_ip: Option<String>,
 }
 

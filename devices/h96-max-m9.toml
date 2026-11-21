@@ -7,6 +7,10 @@ supported_boot_methods  = ["rockchip-rkbin"]
 
 # Validated against u-boot v2026.10: builds idbloader.img + u-boot.itb.
 uboot_defconfig         = "generic-rk3576_defconfig"
+# u-boot boots the generic RK3576 tree and names it as its `fdtfile`. Under the efi
+# loader the kernel's DTB goes onto the EFI system partition under that name, which
+# is the one u-boot's UEFI boot reads and hands the kernel.
+uboot_fdtfile           = "rockchip/rk3576-generic.dtb"
 
 # The board DTS is not upstream, so the kernel builds these DTBs from the
 # device_dts sources below rather than from its own tree. Resolution checks
@@ -23,7 +27,7 @@ device_dts              = [
     "devices/h96-max-m9/dts/rk3576-h96-max-m9-npu.dts",
 ]
 
-# Boot-time workarounds this board needs (mk_extlinux appends them after root=):
+# Boot-time workarounds this board needs (the loader appends them after root=):
 #  - cpuidle.off=1: a CPU suspended into the DT CPU_SLEEP state can miss its
 #    wakeup (BL31-side; the checker self-test is already off in the SoC kconfig
 #    fragment, this covers normal governor-driven idle). Drop once BL31 delivers
@@ -90,6 +94,10 @@ default_kernel          = "rk3576-mainline-7.3"
 # board-neutral loader and util tools are homed on the rk3576-generic device.
 supported_uboot_series = ["rk3576-display", "h96-max-m9-util"]
 default_uboot_series    = "rk3576-display"
+# The BL31 is its own axis: rkbin's prebuilt one, or Trusted Firmware-A built from the
+# SoC layer's [tfa] source. rkbin is the default this board is validated on.
+supported_bl31          = ["rkbin", "tfa"]
+default_bl31            = "rkbin"
 
 # forky only. RK3576 support was merged in 6.13 and this board's Wi-Fi uses an out-of-tree
 # driver built against the kernel it ships with, so an older suite has neither the
@@ -100,7 +108,7 @@ default_layout          = "combined"               # combined | split
 hostname                = "h96-max-m9"
 image_size              = "2G"
 
-# rkbin (ATF + DDR TPL; no BL32) is inherited from socs/rk3576.toml. The H96
+# rkbin (BL31 + DDR TPL; no BL32) is inherited from socs/rk3576.toml. The H96
 # has LPDDR4X at 2112 MHz, which is the SoC default loader's native target, so
 # this board overrides no blobs.
 

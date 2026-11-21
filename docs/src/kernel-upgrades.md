@@ -185,6 +185,11 @@ A compiled kernel is not on any mirror, so nothing will ever offer it to you —
 the `.deb` yourself. Once `dpkg` configures it, the slot is written and the reboot is as
 safe as any other.
 
+A re-pin that changes the kernel under the same version gives it the next
+[revision](reference/reproducibility.md#the-kernels-revision-and-configuration). The
+new `.deb` is then a new release, `7.3.3-2-armv7` after `7.3.3-1-armv7`, and `dpkg`
+installs it beside the running kernel instead of over it.
+
 > **The upgrade unit is the `.deb`, not the signed blob.** It is tempting to think of the
 > signed kernel partition as the thing you ship, and it is not. The signed blob contains
 > the kernel, the device tree, and the initramfs, but *not* the kernel modules. Those
@@ -200,7 +205,11 @@ safe as any other.
 ## The other boards
 
 On a `rockchip-rkbin` board — the [Turing RK1](boards/turing-rk1.md), the H96 — none of
-this applies. There the kernel is an ordinary file in `/boot`, the bootloader is u-boot
-reading `extlinux.conf`, and a kernel upgrade rewrites that config file. It is simpler,
-and it has no rollback. The boot configuration is a file, so a bad kernel is fixed by
-editing it back. That needs a keyboard and a screen, or a serial console.
+this applies. There the kernel is an ordinary file in `/boot`, and a kernel upgrade
+rewrites the loader's configuration. Under the `extlinux` loader that is the
+`extlinux.conf` u-boot reads. Under the `efi` loader it is GRUB's `grub.cfg`, and the
+kernel's DTB is copied onto the EFI system partition at the same time.
+
+It is simpler, and it has no rollback. The boot configuration is a file, so a bad kernel
+is fixed by editing it back. Under `efi`, GRUB's menu also offers the previous kernel.
+Either needs a keyboard and a screen, or a serial console.

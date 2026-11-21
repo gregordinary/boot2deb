@@ -5,13 +5,18 @@
 source = "https://git.u-boot-project.org/u-boot/u-boot.git"
 ref = "v2026.10"
 commit = "5508406582f6f7120dce0c4b3059819a41788db2"
+revision = 1
+config_sha256 = "f56b70584e5e31e3dea6a6782947d5b5706accf091c7a3766fa2776f03ae65fe"
 
 [uboot_patches]
 series = ["rk3576-util"]
 source = "https://github.com/gregordinary/patches.git"
 ref = "main"
-commit = "a74f07a5df1f92ab242b2ca79fff8bf061508c14"
+commit = "0465628c7167bf4cf99d7ac8dd6368dc64968cef"
 
 [blobs]
+source = "https://github.com/rockchip-linux/rkbin.git"
+ref = "master"
+commit = "3e288fe814e059dd06833495f845cab04ac20a5c"
 atf = "rk3576_bl31_v1.25.elf@sha256:a709eb309746a46c192405fe95b725a668c20ee05b134478838a69e723bfafb2"
 tpl = "rk3576_ddr_lp4_2112MHz_lp5_2736MHz_v1.13.bin@sha256:f697151bdd09d31bf7a1e49d63796a6a200e81bf8f9a766c2e95c840e88fc0ce"

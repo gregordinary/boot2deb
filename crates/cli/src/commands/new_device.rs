@@ -168,6 +168,7 @@ pub(crate) fn run(
         image_size,
         dt_dir: soc_layer.dt_dir.clone(),
         soc_rkbin: soc_layer.rkbin.clone(),
+        soc_has_tfa: soc_layer.tfa.is_some(),
         features,
         emit_recipe: !args.no_recipe,
     };

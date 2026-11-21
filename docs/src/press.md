@@ -15,13 +15,31 @@ files for two media: `--boot-out` for the eMMC/SPI half, `--rootfs-out` for the
 OS disk. A split build pressed with one positional output is an error naming
 both flags, not a wrong file.
 
+A press reads the build's artifacts through the point's artifact inventory,
+`<stem>.artifacts.toml`, which the build writes as each stage finishes. It takes
+a file only from the entry of the stage that published it, and only under three
+conditions:
+
+- The entry was built under the lock the recipe has now.
+- For an image, the entry's layout is the one the press resolves.
+- The file still holds the bytes the entry records.
+
+A file in the artifact directory that the inventory does not list is never
+pressed, whatever its name. A container an earlier build left behind, or a
+rootfs tar from before a re-pin, therefore cannot stand in for the current one.
+A press over a stale or partial build fails naming the stage to run again.
+
 A plain press streams the build's compressed artifact into the output, so
-pressing a card never costs a rebuild. It then verifies the file it wrote. The
-bytes are re-read against the digest computed while streaming. The partition
-table is read back and compared entry-for-entry against the one the artifact
-contains. What you hand the flasher is what the build made.
-`--dry-run` prints what would be pressed, including the medium size the image
-needs, without writing anything.
+pressing a card never costs a rebuild. On the way through, it holds the artifact
+to its recorded digest, and the disk it decompresses to to the build's recorded
+disk digest.
+
+It then verifies the file it wrote. The bytes are re-read against that digest.
+The partition table is read back and compared entry-for-entry against the one
+the artifact contains. An artifact that contains a rootfs and has no readable
+table fails, since only a boot image has none to compare. What you hand the
+flasher is what the build made. `--dry-run` prints what would be
+pressed, including the medium size the image needs, without writing anything.
 
 Beside each output that contains a rootfs, `press` writes its
 [file manifest](reference/reproducibility.md#the-rootfs-file-manifest), named
@@ -30,9 +48,31 @@ build's, since the rootfs is the build's to the byte. A press with additions
 formats a new rootfs, so it writes a manifest of that one. Seed keys are written to
 the seed partition, outside the rootfs, and leave the manifest true.
 
-A press never writes over the build's own artifacts. An output named for the
-build's image, or for a compressed copy of it, is refused before anything is
-written.
+Every file a press writes is checked as one set before any of it is written.
+That is each image, its file manifest, and for a re-assembled image its
+credentials file (below):
+
+- A destination must be a regular file or not exist yet. A symlink is not
+  written through, and a block device, directory or FIFO is refused by kind:
+  boot2deb does not write devices.
+- A destination that exists is replaced only with `--overwrite`.
+- Two destinations never name the same file, by path or through a link. So
+  `--boot-out` and `--rootfs-out` cannot both name one file.
+- No destination is, or links to, anything the press reads, or one of the build's
+  own names in its artifact directory. The press reads the build's artifacts, the
+  `--copy` and `--deb` sources, and the files under a `--copy-tree` directory.
+
+Each output is then produced under a temporary name in its own directory. Only
+once every output is written, verified and personalized do they take their
+names. A press that fails leaves no partial output, and an existing file is
+replaced whole rather than written into.
+
+A re-assembled image gets a first-boot password of its own. The press writes it
+to `<output stem>.credentials.toml` beside the image (`card.img` gets
+`card.credentials.toml`), readable by you only, and prints the file's path, not
+the password. A streamed image is the build's, password included, so its
+password is in the build's own credentials file. See
+[The password](access.md#the-password).
 
 ## Flashing the pressed file
 
@@ -85,18 +125,26 @@ empty template and behaves exactly as an unpersonalized image always has.
 
 `static_ip=` follows the connection the other keys define. Seeded together
 with `wifi_ssid` it makes that Wi-Fi profile static, and seeded alone it pins
-the first wired interface. It works through NetworkManager where the image
-contains it, through `dhcpcd.conf` where it contains dhcpcd, and with a logged
-skip where it contains neither.
+the wired interface. Where the image contains NetworkManager it is written as a
+connection profile, and on an Ubuntu image as a netplan file. Where the image runs
+dhcpcd it goes into `dhcpcd.conf`, and anywhere else it is a logged skip.
+
+A netplan file is first generated together with the image's own definitions, and
+only a file that generates is installed. A configuration that netplan or dhcpcd
+then fails to apply is taken out again. The wired interfaces stay on DHCP, and the
+log says the address was not applied.
 
 Fields beyond the address are optional. No gateway field means no default route
 is written, and no DNS fields mean no resolvers are. The key personalizes
-exactly what it names. Only the syntax is validated at press time (IPv4 dotted
-quads, a `/1`–`/32` prefix), and the address plan is yours.
+exactly what it names. Only the syntax is validated (IPv4 dotted quads, a
+`/1`–`/32` prefix), at press time and again on the device, and the address plan
+is yours.
 
 Because the seed is FAT, an operator can also edit it with no tooling at all.
 Plug the card into any laptop, open `seed.txt` on the `B2D-SEED` volume,
-change the hostname, and eject. The file documents its own keys.
+change the hostname, and eject. The file documents its own keys. The device
+holds an edited file to the rules `press` checks. A value that `press` refuses
+is skipped whole and logged, and the other keys still apply.
 
 To re-personalize a pressed **file** without re-pressing it:
 
@@ -140,9 +188,14 @@ wrote the root PARTUUID into the rootfs, and the press rewrites each place:
 
 | File | Boards | What the press changes |
 | --- | --- | --- |
-| `/etc/fstab` | every board | the root entry |
-| `/boot/extlinux/extlinux.conf` | `rockchip-rkbin` | the `root=` of every boot entry |
+| `/etc/fstab` | every board | the root entry, and the EFI system partition's under the `efi` loader |
+| `/boot/extlinux/extlinux.conf` | the `extlinux` loader | the `root=` of every boot entry |
+| `/boot/grub/grub.cfg` | the `efi` loader | the `root=` of every boot entry, and the filesystem UUID GRUB searches for |
 | `/boot/depthcharge/*.img` | `depthcharge` | the signed kernel, re-signed for the new root and placed in the kernel slot too |
+
+Under the `efi` loader the EFI system partition gets a fresh GUID and volume serial as
+well. Its files name no identifier: GRUB's core image finds the rootfs as a partition of
+the disk it was loaded from. The press therefore formats it again unchanged.
 
 A depthcharge kernel is re-signed with the key the image contains for its own
 kernel upgrades, the vboot developer key. The press refuses a kernel that any
@@ -332,11 +385,24 @@ own compressed artifact inside the pressed image, at
 boot2deb press asus-c201/forky card.img --embed-image
 ```
 
+Beside the artifact, the press places `<artifact>.info`: its sha256 and the
+length and sha256 of the disk it decompresses to, as the build recorded them.
+
 On the booted board, `boot2deb-install-to` (in every image) writes the
 embedded artifact to the internal disk. It wraps the documented `dd` procedure
-with the checks that matter. The target must be a whole disk, must not be the
-disk the system is running from, and must have nothing mounted. The
-confirmation requires typing the device's name.
+with the checks that matter, and refuses whenever it cannot establish an answer:
+
+- The payload must hash to its record before the target is touched, so a card
+  that was damaged after pressing never half-writes a disk.
+- The target must be a whole, writable disk, at least as large as the image.
+- It must not be or hold anything the running system's root sits on, through any
+  LVM or LUKS layer.
+- Nothing on it can be mounted, and no other device can hold it.
+- The confirmation requires typing the device's name.
+
+After the write, a decompressor or `dd` failure is reported as a failed install.
+The disk is then read back and held to the recorded image digest, and only then
+is the install reported done.
 
 ```sh
 sudo boot2deb-install-to /dev/mmcblk0

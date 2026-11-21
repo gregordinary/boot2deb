@@ -144,7 +144,7 @@ boot2deb resolve <recipe>
 # 2. Is the host equipped to build it? Prints install commands for your distro.
 boot2deb doctor <recipe>
 
-# 3. Resolve upstream refs + hash blobs into the lock. The only command that touches
+# 3. Resolve upstream refs and pin the rkbin blobs into the lock. The only command that touches
 #    the network for pins; --kernel-ref is required on the first update of a recipe
 #    that compiles a kernel.
 boot2deb update <recipe> --kernel-ref <tag>

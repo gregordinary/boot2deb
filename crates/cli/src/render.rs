@@ -8,7 +8,7 @@
 //! remaining helpers format the non-streaming commands' output — [`print_columns`]
 //! sizing every `list-*` table from its own data.
 
-use boot2deb_core::model::{ResolvedBoot, ResolvedBuild, ResolvedKernel};
+use boot2deb_core::model::{Bl31, ResolvedBoot, ResolvedBuild, ResolvedKernel, ResolvedLoader};
 use boot2deb_engine::event::{Event, LogOrigin, Stream};
 use boot2deb_engine::EventSink;
 use std::path::Path;
@@ -264,7 +264,12 @@ pub(crate) fn human_size(bytes: u64) -> String {
 /// that no node ever reads, so printing them would show an image size and a hostname
 /// for an artifact that has neither — and a blank locale line reads as a bug rather
 /// than as an axis that does not exist here.
-pub(crate) fn print_build(b: &ResolvedBuild) {
+///
+/// `kernel_config` is the digest of a compiled kernel's configuration inputs, which the
+/// caller reads from the config tree, printed beside the fragments it covers. The u-boot
+/// package's digest is computed here from the build alone, and printed after the boot
+/// method's lines.
+pub(crate) fn print_build(b: &ResolvedBuild, kernel_config: Option<&str>) {
     let image = b.image.as_ref();
     println!("device       : {} — {}", b.device, b.description);
     println!("arch / soc   : {} / {}", b.arch, b.soc);
@@ -290,6 +295,11 @@ pub(crate) fn print_build(b: &ResolvedBuild) {
                 }
             );
             println!("  fragments  : {}", k.config_fragments.join(", "));
+            // The digest a lock records for these inputs, so a reader can hold the
+            // config tree against `[kernel] config_sha256` without building.
+            if let Some(digest) = kernel_config {
+                println!("  config     : sha256 {digest}");
+            }
             // The libre axis is a *subtraction* from the image — no nonfree firmware,
             // `main` alone in apt — so the resolve output is where a reader can see it
             // was applied. Printed only when it is on: the ordinary build is the one
@@ -357,6 +367,18 @@ pub(crate) fn print_build(b: &ResolvedBuild) {
     // into the image's raw gap or emitted as its own file.
     println!("layout       : {}", b.layout);
     if let Some(i) = image {
+        // A board whose firmware loads the kernel itself has no loader, and prints none.
+        match &i.loader {
+            Some(ResolvedLoader::Extlinux) => {
+                println!("loader       : extlinux (/boot/extlinux/extlinux.conf)");
+            }
+            Some(ResolvedLoader::Efi(efi)) => println!(
+                "loader       : efi (a {} EFI system partition: GRUB at /EFI/BOOT/{}, \
+                 the DTB at /dtb/{})",
+                efi.esp_size, efi.arch.removable_file, efi.dtb
+            ),
+            None => {}
+        }
         println!("image size   : {}", i.image_size);
         // Printed only when the build declares one: a line reading "none" on every
         // other board would imply an axis most images have no opinion about. Each
@@ -385,13 +407,13 @@ pub(crate) fn print_build(b: &ResolvedBuild) {
             i.locales_generate.join(", ")
         );
         println!("timezone     : {}", i.timezone);
-        // Naming the pool on the empty case rather than printing nothing: "no servers
+        // Naming the source on the empty case rather than printing nothing: "no servers
         // configured" and "no time source" look identical otherwise, and only the
         // first is true.
         println!(
             "ntp servers  : {}",
             if i.ntp_servers.is_empty() {
-                "(Debian fallback pool)".to_string()
+                format!("(distribution default, through {})", i.time_client)
             } else {
                 i.ntp_servers.join(", ")
             }
@@ -453,15 +475,27 @@ pub(crate) fn print_build(b: &ResolvedBuild) {
                 "u-boot series: {}",
                 boot.uboot_series.as_deref().unwrap_or("none (pristine)")
             );
-            println!("rkbin atf    : {}", boot.rkbin.atf);
+            match &boot.bl31 {
+                Bl31::Rkbin { file } => println!("bl31         : rkbin {file}"),
+                Bl31::Tfa(src) => println!(
+                    "bl31         : tf-a {} (PLAT={}, {})",
+                    src.git_ref, src.plat, src.git
+                ),
+            }
             println!("rkbin tpl    : {}", boot.rkbin.tpl);
             if let Some(bl32) = &boot.rkbin.bl32 {
                 println!("rkbin bl32   : {bl32}");
             }
             println!(
-                "offsets      : idbloader {}, u-boot.itb {}, rootfs {}",
-                boot.offsets.idbloader, boot.offsets.uboot_itb, boot.offsets.rootfs
+                "offsets      : idbloader {}, u-boot.itb {}, partitions {}",
+                boot.offsets.idbloader, boot.offsets.uboot_itb, boot.offsets.partitions
             );
+            // The digest a lock records for the u-boot package's configuration inputs,
+            // so a reader can hold the config tree against `[uboot] config_sha256`
+            // without building.
+            if let Some(digest) = boot2deb_engine::pins::uboot_config_digest(b) {
+                println!("u-boot config: sha256 {digest}");
+            }
         }
         ResolvedBoot::Depthcharge(boot) => {
             println!("board profile: {}", boot.board);
@@ -481,11 +515,6 @@ pub(crate) fn print_build(b: &ResolvedBuild) {
                 boot.initramfs_compress.as_str()
             );
         }
-    }
-    // The SoC's force-loaded module list is a kernel-axis value, so it has no meaning
-    // for a build that has no kernel.
-    if image.is_some() {
-        println!("modules      : {}", b.modules.join(", "));
     }
     // The modules the initramfs must contain, SoC first and then the board's. A build
     // that names none leaves the choice to initramfs-tools, and prints nothing here.

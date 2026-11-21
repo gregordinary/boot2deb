@@ -75,11 +75,12 @@ drd0 is its only USB role.
 | | loader | display | util |
 |---|:---:|:---:|:---:|
 | Delivery | maskrom RAM | eMMC (shipped) | maskrom RAM / flashable |
-| Autoboots | — | 10 s, interruptible | — (drops to the prompt) |
+| Autoboots | — | 5 s, interruptible | — (drops to the prompt) |
 | Serial console | yes | yes | yes |
 | HDMI console + USB keyboard | — | yes | yes |
 | `ums` (export a block device to a laptop) | yes | yes | yes |
 | rockusb via `reboot loader` | yes | yes | yes |
+| `ums` via `reboot ums` | yes | yes | yes |
 | SARADC download key → BootROM | yes | yes | yes |
 | maskrom USB boot images (usb471/472) | yes | yes | yes |
 | Boot a USB rescue stick (`bootflow scan`, extlinux) | yes | yes | yes |
@@ -90,6 +91,13 @@ drd0 is its only USB role.
 | `md5sum` / `sha1sum` (verify an image) | — | — | yes |
 | `smc` / cache commands (developer) | — | — | yes |
 | ethernet (`dhcp`/`tftp`/`ping`) | — | — | board util only |
+
+The two reboot paths start in Linux. `reboot loader` and `reboot ums` write a
+mode value to a register only when the board's device tree has a
+`syscon-reboot-mode` node that names the mode. u-boot reads the value at the
+next boot and starts the gadget on drd0. The H96 MAX M9's device tree has that
+node. The mainline RK3576 device trees, the EVB1's among them, do not, so on
+those boards both commands boot normally.
 
 The SoC-generic images bring up no networking. Recovery runs over USB and
 maskrom. A board's own util recipe can add ethernet — `h96-max-m9/util` does,

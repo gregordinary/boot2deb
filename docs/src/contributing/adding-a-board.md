@@ -2,7 +2,7 @@
 
 Bringing up a new device is mostly **writing config layers**. A build resolves from TOML
 across the [config model](../reference/config-model.md)'s axes. A new board is therefore a
-set of small TOML files, plus any vendored blobs and kernel fragments. The one exception is a
+set of small TOML files, plus any kernel fragments. The one exception is a
 genuinely new *chip family*, which also needs a small Rust change. See
 [What needs code](#what-needs-code).
 
@@ -83,9 +83,11 @@ u-boot takes no `ARCH=` from here, because its defconfig contains it.
 the SoC's shared properties:
 
 - Device-tree directory
-- Force-loaded modules
 - Arch
 - Any SoC-wide firmware packages
+- The modules every board on it needs in its initramfs
+- Any modules its media stack force-loads, as a file under the overlay's
+  `etc/modules-load.d/`
 
 **Media-accel sources are optional and come with the feature.** Supply the one `[[userspace]]`
 entry per vendor tree the part has, plus the `[ffmpeg.base]` and `[ffmpeg.rockchip]`
@@ -103,7 +105,8 @@ on the method**, because the methods differ in kind:
 
 - `rockchip-rkbin` compiles a bootloader. It contains the u-boot source and ref, plus the
   **raw-gap offsets**: where `idbloader` and `u-boot.itb` sit outside any partition, and
-  where the rootfs partition starts.
+  where the partitions start. It also lists the loaders u-boot can boot through
+  (`extlinux` and `efi`), which a new board on the method gets without stating anything.
 - `depthcharge` compiles nothing, because the firmware is the board's own and what it
   loads is the signed kernel. The file contains the ChromeOS kernel partition's geometry,
   its GPT attribute bits, and the command line to sign into the kernel.
@@ -111,7 +114,9 @@ on the method**, because the methods differ in kind:
 A field from the other method is an unknown field and fails to parse. That is the point,
 since an image cannot half-belong to two boot chains.
 
-`boot-methods/<method>/overlay/` ships any boot-time files (e.g. the extlinux generator).
+`boot-methods/<method>/overlay/` ships any boot-time files the method needs, and
+`loaders/<loader>/overlay/` ships the kernel hooks of the loader a build selects (the
+extlinux menu generator, or the hook that copies the DTB onto the EFI system partition).
 `overlay-pre/` ships config a package's own maintainer scripts must see *while they run*
 (see [Two overlay stages](#two-overlay-stages)).
 
@@ -144,8 +149,9 @@ A device also states whatever its boot method requires.
 Under `rockchip-rkbin`, the board states a `uboot_defconfig`, and an `[rkbin]` block only
 if it departs from the SoC's defaults. The bootloader blobs are **inherited from the soc
 layer** and merged per field. A board on the SoC's usual memory omits the block entirely,
-and a board with different DRAM overrides just `tpl`. The SoC's `[rkbin.upstream]`,
-where `outdated` looks for newer blobs, is inherited whole.
+and a board with different DRAM overrides just `tpl`. The override names another file
+from the rkbin repository. The SoC's `[rkbin.upstream]`, the repository every blob is fetched
+from, is inherited whole.
 
 Under `depthcharge`, the board states a `[depthcharge]` block naming the board profile and
 the series the unit supports. There is no `uboot_defconfig` and there are no blobs. This
@@ -236,8 +242,9 @@ Use `overlay/` unless the package acts before your file would arrive.
 
 Supporting assets:
 
-- **Blobs** (`blobs/<soc>/`) — vendored bootloader binaries the device/boot-method
-  references.
+- **Keyrings** (`blobs/keyrings/`) — the apt signing keyrings a distro layer or feature
+  names, each with a fingerprint manifest. The bootloader blobs are fetched from rkbin,
+  not stored here.
 - **Fragments** (`fragments/<name>.config`) — kernel `.config` fragments merged onto the
   base defconfig, referenced by name from a kernel or device.
 - **Patch series** — lives in the separate `patches` repo, referenced by the kernel. See
@@ -299,7 +306,7 @@ boot2deb resolve <recipe>
 #    costs nothing but a re-run rather than a network round trip.
 boot2deb doctor <recipe>
 
-# 3. Resolve upstream refs + hash blobs into the lock. The only command that consults
+# 3. Resolve upstream refs and pin the rkbin blobs into the lock. The only command that consults
 #    the network for pins; the verify gates below all read the lock it writes.
 boot2deb update <recipe> --kernel-ref <ref>
 
@@ -341,11 +348,19 @@ default_suite           = "forky"
 default_layout          = "combined"
 hostname                = "my-board"                     # defaults to the slug, which is already one
 image_size              = "2G"
+supported_bl31          = ["rkbin", "tfa"]               # the SoC layer has a [tfa] source
+default_bl31            = "rkbin"                        # until the board is validated on tfa
 
 [rkbin]                                                  # board-memory-specific DDR init
 atf = "rk3588_bl31_v1.56.elf"
 tpl = "rk3588_ddr_lp4_2112MHz_lp5_2400MHz_v1.24.bin"
 ```
+
+The BL31 is a separate decision from the DDR TPL. The TPL is always rkbin's, and
+matches the board's memory. The BL31 is rkbin's prebuilt one or Trusted Firmware-A
+built from source, and a board lists `tfa` only once it boots on it. A board that
+names no `supported_bl31` uses rkbin's. See
+[The BL31 is its own axis](../reference/config-model.md#the-bl31-is-its-own-axis).
 
 `recipes/my-board/forky.toml`:
 

@@ -22,7 +22,7 @@ image_size = "3G"
 # The kernel's GPU fix and the u-boot chain are hardware-validated on this board,
 # and Panfrost + Mesa render first-party at 4K.
 #
-# What the move from the 7.2 generation changes on this SoC's paths. The pin is v7.3.
+# What the move from the 7.2 generation changes on this SoC's paths. The pin is v7.3.3.
 # `h96-max-m9/forky` describes the board-wide part: the IOMMU fixes the NPU series no
 # longer includes, the regenerated power-domain patches, the aic8800 7.3 guard, and the
 # HDMI PHY and `dw_hdmi_qp` changes that make the display the first thing to check on a
@@ -51,7 +51,7 @@ image_size = "3G"
 #
 # The claim is `expected` rather than `validated` because the lock has moved since that
 # image: it booted kernel v7.2.3 with patches `daa40ed` on u-boot v2026.07, BL31 v1.24
-# and DDR init v1.12, and the pins here are v7.3 with patches `339beaf` on u-boot
+# and DDR init v1.12, and the pins here are v7.3.3 with patches `339beaf` on u-boot
 # v2026.10, BL31 v1.25 and DDR init v1.13, the bootloader `h96-max-m9/forky`
 # describes. Of the NPU patches that image included, the kernel now supplies six itself
 # -- four rocket fixes from 7.2.4 and the two Rockchip IOMMU fixes from 7.3 -- and four
@@ -65,4 +65,4 @@ image_size = "3G"
 # image at these pins boots the board.
 [support]
 status = "expected"
-date   = "2026-10-19"
+date   = "2026-11-20"
